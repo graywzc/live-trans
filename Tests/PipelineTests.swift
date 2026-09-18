@@ -125,3 +125,19 @@ final class ServerConfigTests: XCTestCase {
         )
     }
 }
+
+final class FrameChunkerTests: XCTestCase {
+    func testCutsArbitraryChunksIntoWholeFrames() {
+        var chunker = FrameChunker()
+        // Capture buffers arrive in sizes unrelated to the frame size.
+        let stream = Data((0..<2500).map { UInt8($0 % 251) })
+        var frames: [Data] = []
+        for start in stride(from: 0, to: stream.count, by: 341) {
+            frames += chunker.push(stream.subdata(in: start..<min(start + 341, stream.count)))
+        }
+        XCTAssertEqual(frames.count, 2500 / AudioFormat.frameBytes)
+        XCTAssertTrue(frames.allSatisfy { $0.count == AudioFormat.frameBytes && $0.startIndex == 0 })
+        // Nothing dropped, duplicated or reordered.
+        XCTAssertEqual(frames.reduce(Data(), +), stream.prefix(frames.count * AudioFormat.frameBytes))
+    }
+}

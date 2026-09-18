@@ -1,26 +1,14 @@
 import AVFoundation
-import CoreAudio
 
 struct AudioInputDevice: Identifiable, Equatable {
-    let id: AudioDeviceID
+    /// The Core Audio device UID, stable across reboots and replugging.
+    let id: String
     let name: String
 
-    /// Every device with at least one input channel.
     static func all() -> [AudioInputDevice] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let system = AudioObjectID(kAudioObjectSystemObject)
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr else { return [] }
-        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &ids) == noErr else { return [] }
-        return ids.compactMap { id in
-            guard inputChannels(of: id) > 0, let name = name(of: id) else { return nil }
-            return AudioInputDevice(id: id, name: name)
-        }
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified
+        ).devices.map { AudioInputDevice(id: $0.uniqueID, name: $0.localizedName) }
     }
 
     /// First device whose name contains `name`, case-insensitively, so
@@ -29,103 +17,111 @@ struct AudioInputDevice: Identifiable, Equatable {
         guard !name.isEmpty else { return nil }
         return all().first { $0.name.localizedCaseInsensitiveContains(name) }
     }
-
-    private static func inputChannels(of id: AudioDeviceID) -> Int {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(id, &address, 0, nil, &size) == noErr, size > 0 else { return 0 }
-        let raw = UnsafeMutableRawPointer.allocate(
-            byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment
-        )
-        defer { raw.deallocate() }
-        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, raw) == noErr else { return 0 }
-        let buffers = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
-        return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
-    }
-
-    private static func name(of id: AudioDeviceID) -> String? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var name: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &name) == noErr else { return nil }
-        return name?.takeRetainedValue() as String?
-    }
 }
 
-/// Captures from a Core Audio input device: BlackHole for whatever the Mac is
+/// Captures from an audio input device: BlackHole for whatever the Mac is
 /// playing, or a microphone.
-final class InputDeviceSource: AudioSource {
+///
+/// This is an AVCaptureSession rather than an AVAudioEngine. The engine builds
+/// its input node around the system default input and copes badly with being
+/// pointed elsewhere: when the default is, say, AirPods at 24 kHz and the
+/// capture device is BlackHole at 48 kHz, it raises an Objective-C exception
+/// over the mismatch. A capture session opens the device asked for, whatever
+/// the default is, and converts to the wire format itself.
+final class InputDeviceSource: NSObject, AudioSource, AVCaptureAudioDataOutputSampleBufferDelegate {
     enum CaptureError: LocalizedError {
         case noInput
+        case cannotOpen(String)
 
         var errorDescription: String? {
-            "The audio input device has no usable input."
+            switch self {
+            case .noInput: "No audio input device is available."
+            case .cannotOpen(let name): "Could not open the audio input \"\(name)\"."
+            }
         }
     }
 
     /// nil captures from the system default input.
     private let device: AudioInputDevice?
-    private let engine = AVAudioEngine()
+    private let queue = DispatchQueue(label: "com.larrywang.livetrans.capture")
+    private var session: AVCaptureSession?
     private var continuation: AsyncStream<Data>.Continuation?
-    private var configObserver: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
+    /// Touched only on `queue`.
+    private var chunker = FrameChunker()
 
     init(device: AudioInputDevice?) {
         self.device = device
     }
 
     func start() throws -> AsyncStream<Data> {
-        if let device {
-            try engine.inputNode.auAudioUnit.setDeviceID(device.id)
+        let captureDevice = device.flatMap { AVCaptureDevice(uniqueID: $0.id) }
+            ?? AVCaptureDevice.default(for: .audio)
+        guard let captureDevice else { throw CaptureError.noInput }
+
+        let session = AVCaptureSession()
+        let input = try AVCaptureDeviceInput(device: captureDevice)
+        let output = AVCaptureAudioDataOutput()
+        // Ask for the server's wire format directly: PCM s16le mono 16 kHz.
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: AudioFormat.sampleRate,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        guard session.canAddInput(input), session.canAddOutput(output) else {
+            throw CaptureError.cannotOpen(captureDevice.localizedName)
         }
+        session.addInput(input)
+        session.addOutput(output)
+        output.setSampleBufferDelegate(self, queue: queue)
+
         let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
         self.continuation = continuation
-        try startEngine()
+        self.session = session
 
-        // A sample-rate or device change stops the engine and invalidates the
-        // tap's format; rebuild both.
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
-            guard let self, self.continuation != nil else { return }
-            self.engine.inputNode.removeTap(onBus: 0)
-            try? self.startEngine()
-        }
+        // Ending the stream tells the caption engine the input is gone, which
+        // it reports; silently captioning nothing would be worse.
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: .main) { [weak self] _ in
+                self?.stop()
+            },
+            center.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: captureDevice, queue: .main) { [weak self] _ in
+                self?.stop()
+            },
+        ]
+
+        // startRunning blocks while the device opens; keep that off the main thread.
+        queue.async { session.startRunning() }
         return stream
     }
 
     func stop() {
-        if let configObserver {
-            NotificationCenter.default.removeObserver(configObserver)
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        if let session {
+            queue.async { session.stopRunning() }
         }
-        configObserver = nil
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        session = nil
         continuation?.finish()
         continuation = nil
     }
 
-    private func startEngine() throws {
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            throw CaptureError.noInput
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
+        let length = CMBlockBufferGetDataLength(block)
+        guard length > 0 else { return }
+        var pcm = Data(count: length)
+        let status = pcm.withUnsafeMutableBytes { bytes in
+            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: bytes.baseAddress!)
         }
-        let framer = try PCMFramer(inputFormat: format)
-        let continuation = self.continuation
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
-            for frame in framer.push(buffer) {
-                continuation?.yield(frame)
-            }
+        guard status == kCMBlockBufferNoErr else { return }
+        for frame in chunker.push(pcm) {
+            continuation?.yield(frame)
         }
-        engine.prepare()
-        try engine.start()
     }
 }
