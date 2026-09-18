@@ -32,6 +32,10 @@ struct ContentView: View {
                     Image(systemName: "trash")
                 }
             }
+            Text(AppVersion.display)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.gray.opacity(0.7))
+                .help("LiveTrans version")
             SettingsLink {
                 Image(systemName: "gearshape")
             }
