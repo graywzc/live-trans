@@ -191,3 +191,24 @@ final class AppVersionTests: XCTestCase {
         XCTAssertEqual(AppVersion.format(version: nil, isDebug: false), "v?")
     }
 }
+
+final class AudioInputDeviceTests: XCTestCase {
+    private let devices = [
+        AudioInputDevice(id: "a", name: "AirPods"),
+        AudioInputDevice(id: "b2", name: "BlackHole 16ch"),
+        AudioInputDevice(id: "b1", name: "BlackHole 2ch"),
+    ]
+
+    func testFragmentFindsTheDevice() {
+        XCTAssertEqual(AudioInputDevice.match("blackhole", in: devices)?.id, "b2")
+    }
+
+    func testExactNameBeatsAnEarlierPartialMatch() {
+        XCTAssertEqual(AudioInputDevice.match("BlackHole 2ch", in: devices)?.id, "b1")
+    }
+
+    func testNoMatch() {
+        XCTAssertNil(AudioInputDevice.match("USB Mic", in: devices))
+        XCTAssertNil(AudioInputDevice.match("", in: devices))
+    }
+}
