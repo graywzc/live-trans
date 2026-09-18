@@ -13,6 +13,7 @@ enum AppSettings {
     static let remotePython = "remotePython"
     static let idleTimeout = "idleTimeout"
     static let inputDeviceName = "inputDeviceName"
+    static let autoRouteOutput = "autoRouteOutput"
     static let showFurigana = "showFurigana"
     static let captionFontSize = "captionFontSize"
     static let sensitivity = "sensitivity"
@@ -28,6 +29,7 @@ enum AppSettings {
             remotePython: "~/venvs/livetrans/bin/python",
             idleTimeout: 180,
             inputDeviceName: "BlackHole",
+            autoRouteOutput: true,
             showFurigana: true,
             captionFontSize: 22.0,
             sensitivity: 0.5,

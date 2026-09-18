@@ -51,6 +51,7 @@ final class CaptionEngine {
 
     private var session: ServerSession?
     private var source: AudioSource?
+    private let outputRouter = OutputRouter()
     private var runTask: Task<Void, Never>?
     private var finalWorker: Task<Void, Never>?
     private var partialTask: Task<Void, Never>?
@@ -87,6 +88,7 @@ final class CaptionEngine {
         finals = nil
         source?.stop()
         source = nil
+        outputRouter.restore()
         if let activity {
             ProcessInfo.processInfo.endActivity(activity)
         }
@@ -149,6 +151,10 @@ final class CaptionEngine {
         do {
             frames = try source.start()
             self.source = source
+            if let captureUID = (source as? InputDeviceSource)?.captureDeviceUID,
+               UserDefaults.standard.bool(forKey: AppSettings.autoRouteOutput) {
+                outputRouter.engage(captureUID: captureUID)
+            }
         } catch {
             fail("Could not start audio: \(error.localizedDescription)")
             return

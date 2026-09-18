@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage(AppSettings.remoteDir) private var remoteDir = ""
     @AppStorage(AppSettings.remotePython) private var remotePython = ""
     @AppStorage(AppSettings.inputDeviceName) private var inputDeviceName = ""
+    @AppStorage(AppSettings.autoRouteOutput) private var autoRouteOutput = true
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.sensitivity) private var sensitivity = 0.5
@@ -27,14 +28,17 @@ struct SettingsView: View {
                         Text(device.name).tag(device.name)
                     }
                 }
+                Toggle("Switch sound output while captioning", isOn: $autoRouteOutput)
                 Slider(value: $sensitivity, in: 0...1) {
                     Text("Sensitivity")
                 }
             } header: {
                 Text("Audio")
             } footer: {
-                Text("Choose BlackHole to caption what the Mac is playing. Raise sensitivity if quiet "
-                    + "speech is missed. The orange mark on the level meter is the speech threshold.")
+                Text("Choose BlackHole to caption what the Mac is playing. While captioning, sound "
+                    + "output moves to the Multi-Output Device that contains BlackHole and your current "
+                    + "speakers or headphones, and moves back when you stop. Raise sensitivity if quiet "
+                    + "speech is missed; the orange mark on the level meter is the speech threshold.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

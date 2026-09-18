@@ -58,6 +58,13 @@ To caption what the Mac is playing while still hearing it:
 3. LiveTrans reads from BlackHole by default. Pick a different input in
    Settings (⌘,) to caption a microphone instead.
 
+Step 2 is automatic: while captioning, LiveTrans moves the sound output to the
+Multi-Output Device that contains both BlackHole and whatever you are
+currently listening on, and moves it back when you stop. With one Multi-Output
+Device per pair of headphones, the right one is picked by which is connected.
+The Mac's sound *input* setting does not matter. Turn this off in Settings if
+you would rather switch by hand.
+
 ## GPU host setup
 
 On the GPU machine, once:
