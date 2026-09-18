@@ -1,0 +1,6 @@
+faster-whisper
+ctranslate2
+numpy
+# only for LIVETRANS_TRANSLATE_BACKEND=nllb
+transformers
+sentencepiece

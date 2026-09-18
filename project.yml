@@ -1,0 +1,67 @@
+name: LiveTrans
+options:
+  bundleIdPrefix: com.larrywang.livetrans
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: "3436H9LR76"
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.10"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  LiveTrans:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: LiveTrans
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.utilities
+        NSMicrophoneUsageDescription: LiveTrans listens to the selected audio input so it can caption and translate Japanese speech.
+        # The GPU server speaks plain HTTP over Tailscale; without this App
+        # Transport Security would only permit HTTPS.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.larrywang.livetrans
+        PRODUCT_NAME: LiveTrans
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Sources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # No sandbox: the app starts the GPU server by running ssh, which a
+        # sandboxed app cannot.
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: NO
+  LiveTransTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: LiveTrans
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.larrywang.livetrans.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/LiveTrans.app/Contents/MacOS/LiveTrans"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  LiveTrans:
+    build:
+      targets:
+        LiveTrans: all
+        LiveTransTests: [test]
+    test:
+      targets:
+        - LiveTransTests

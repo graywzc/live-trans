@@ -1,0 +1,13 @@
+# The Xcode project is generated from project.yml by xcodegen
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+build/
+.swiftpm/
+*.zip
+.DS_Store
+
+__pycache__/
+*.py[cod]
+*.log

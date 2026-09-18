@@ -1,0 +1,127 @@
+import XCTest
+@testable import LiveTrans
+
+final class VoiceActivityDetectorTests: XCTestCase {
+    private func frame(amplitude: Int16) -> Data {
+        // A square wave: its RMS is exactly the amplitude.
+        var data = Data(capacity: AudioFormat.frameBytes)
+        for index in 0..<AudioFormat.frameSamples {
+            var sample = index % 2 == 0 ? amplitude : -amplitude
+            withUnsafeBytes(of: &sample) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
+    func testRMS() {
+        XCTAssertEqual(VoiceActivityDetector.rms(frame(amplitude: 1000)), 1000, accuracy: 0.5)
+        XCTAssertEqual(VoiceActivityDetector.rms(Data()), 0)
+    }
+
+    func testSpeechStandsOutFromRoomNoise() {
+        var vad = VoiceActivityDetector()
+        for _ in 0..<100 {
+            XCTAssertFalse(vad.isSpeech(frame(amplitude: 150)))
+        }
+        XCTAssertTrue(vad.isSpeech(frame(amplitude: 1500)))
+        // Noise a little above the floor is still noise.
+        XCTAssertFalse(vad.isSpeech(frame(amplitude: 250)))
+    }
+
+    func testQuietRoomStillNeedsMinimumLevel() {
+        var vad = VoiceActivityDetector()
+        for _ in 0..<100 {
+            _ = vad.isSpeech(frame(amplitude: 2))
+        }
+        XCTAssertFalse(vad.isSpeech(frame(amplitude: 30)))
+    }
+
+    func testFloorAdaptsWhenNoiseRises() {
+        var vad = VoiceActivityDetector()
+        for _ in 0..<100 {
+            _ = vad.isSpeech(frame(amplitude: 100))
+        }
+        // A fan switches on: loud enough to trip the VAD at first ...
+        XCTAssertTrue(vad.isSpeech(frame(amplitude: 400)))
+        // ... but after a minute it has become the new floor.
+        for _ in 0..<AudioFormat.frameCount(seconds: 60) {
+            _ = vad.isSpeech(frame(amplitude: 400))
+        }
+        XCTAssertFalse(vad.isSpeech(frame(amplitude: 400)))
+    }
+}
+
+final class FuriganaTests: XCTestCase {
+    func testReadingGoesOverKanjiOnly() {
+        let tokens = Furigana.annotate("食べる")
+        XCTAssertEqual(tokens, [
+            RubyToken(base: "食", reading: "た"),
+            RubyToken(base: "べる"),
+        ])
+    }
+
+    func testKanaHasNoReading() {
+        XCTAssertTrue(Furigana.annotate("ありがとう テレビ").allSatisfy { $0.reading == nil })
+    }
+
+    func testTextIsPreservedIncludingPunctuation() {
+        let text = "お兄ちゃん、学校に遅れるよ! OK?"
+        let tokens = Furigana.annotate(text)
+        XCTAssertEqual(tokens.map(\.base).joined(), text)
+        XCTAssertTrue(tokens.contains(RubyToken(base: "、", gluesToPrevious: true)))
+        XCTAssertTrue(tokens.contains(RubyToken(base: "学校", reading: "がっこう")))
+    }
+
+    func testEmptyText() {
+        XCTAssertEqual(Furigana.annotate(""), [])
+    }
+}
+
+final class ASRClientTests: XCTestCase {
+    func testDecodesSentenceLines() throws {
+        let json = #"{"ja":"こんにちは元気","en":"Hello. How are you?","lines":[{"ja":"こんにちは","en":"Hello."},{"ja":"元気","en":"How are you?"}],"rtf":0.05}"#
+        let result = try ASRClient.decodeTranscription(Data(json.utf8), statusCode: 200)
+        XCTAssertEqual(result.japanese, "こんにちは元気")
+        XCTAssertEqual(result.lines, [
+            CaptionPair(ja: "こんにちは", en: "Hello."),
+            CaptionPair(ja: "元気", en: "How are you?"),
+        ])
+    }
+
+    func testDecodesServerWithoutSentenceSplitting() throws {
+        let json = #"{"ja":"こんにちは","en":"Hello."}"#
+        let result = try ASRClient.decodeTranscription(Data(json.utf8), statusCode: 200)
+        XCTAssertEqual(result.lines, [CaptionPair(ja: "こんにちは", en: "Hello.")])
+    }
+
+    func testPartialResponseHasNoTranslation() throws {
+        let json = #"{"ja":"こんにちは","en":"","lines":[{"ja":"こんにちは","en":""}]}"#
+        let result = try ASRClient.decodeTranscription(Data(json.utf8), statusCode: 200)
+        XCTAssertEqual(result.japanese, "こんにちは")
+    }
+
+    func testServerErrorThrows() {
+        let json = #"{"error":"RuntimeError: CUDA out of memory"}"#
+        XCTAssertThrowsError(try ASRClient.decodeTranscription(Data(json.utf8), statusCode: 500)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("CUDA out of memory"))
+        }
+    }
+
+    func testGarbageThrows() {
+        XCTAssertThrowsError(try ASRClient.decodeTranscription(Data("<html>".utf8), statusCode: 502))
+    }
+}
+
+final class ServerConfigTests: XCTestCase {
+    func testLaunchCommandDetachesServer() {
+        let config = ServerConfig(
+            sshHost: "gpubox", port: 8770, remoteDir: "~/livetrans",
+            remotePython: "~/venvs/livetrans/bin/python", idleTimeout: 180
+        )
+        XCTAssertEqual(
+            config.launchCommand,
+            "cd ~/livetrans && setsid nohup ~/venvs/livetrans/bin/python asr_server.py "
+                + "--host 0.0.0.0 --port 8770 --idle-timeout 180 "
+                + "< /dev/null >> ~/livetrans/server.log 2>&1 & disown; echo started"
+        )
+    }
+}
