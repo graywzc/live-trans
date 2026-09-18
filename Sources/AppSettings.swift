@@ -6,6 +6,29 @@ import Foundation
 /// how the app is pointed at a scratch server:
 ///
 ///     LiveTrans.app/Contents/MacOS/LiveTrans -asrPort 8771 -remoteDir '~/scratch'
+/// The running build, as shown in the window: "v0.1.2" for a release. Local
+/// builds all carry project.yml's placeholder version, so they are marked
+/// rather than passing for whichever release that number once was.
+enum AppVersion {
+    static var display: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return format(version: version, isDebug: isDebug)
+    }
+
+    static func format(version: String?, isDebug: Bool) -> String {
+        let base = version.map { "v\($0)" } ?? "v?"
+        return isDebug ? "\(base) dev" : base
+    }
+
+    private static var isDebug: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
+    }
+}
+
 enum AppSettings {
     static let sshHost = "sshHost"
     static let asrPort = "asrPort"

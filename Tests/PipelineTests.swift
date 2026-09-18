@@ -177,3 +177,17 @@ final class OutputRouterTests: XCTestCase {
         XCTAssertNil(route("unrelated"))
     }
 }
+
+final class AppVersionTests: XCTestCase {
+    func testReleaseShowsPlainVersion() {
+        XCTAssertEqual(AppVersion.format(version: "0.1.2", isDebug: false), "v0.1.2")
+    }
+
+    func testLocalBuildIsMarked() {
+        XCTAssertEqual(AppVersion.format(version: "0.1.0", isDebug: true), "v0.1.0 dev")
+    }
+
+    func testMissingVersion() {
+        XCTAssertEqual(AppVersion.format(version: nil, isDebug: false), "v?")
+    }
+}
