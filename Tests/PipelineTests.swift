@@ -141,3 +141,39 @@ final class FrameChunkerTests: XCTestCase {
         XCTAssertEqual(frames.reduce(Data(), +), stream.prefix(frames.count * AudioFormat.frameBytes))
     }
 }
+
+final class OutputRouterTests: XCTestCase {
+    private let aggregates = [
+        OutputRouter.Aggregate(uid: "multi-speaker", subDeviceUIDs: ["speaker", "blackhole"]),
+        OutputRouter.Aggregate(uid: "multi-airpods-a", subDeviceUIDs: ["airpods-a", "blackhole"]),
+        OutputRouter.Aggregate(uid: "multi-airpods-b", subDeviceUIDs: ["airpods-b", "blackhole"]),
+        OutputRouter.Aggregate(uid: "unrelated", subDeviceUIDs: ["speaker", "hdmi"]),
+    ]
+
+    private func route(_ output: String, capture: String = "blackhole") -> String? {
+        OutputRouter.route(output: output, capture: capture, aggregates: aggregates)
+    }
+
+    func testPicksTheMultiOutputContainingTheCurrentOutput() {
+        XCTAssertEqual(route("airpods-a"), "multi-airpods-a")
+        XCTAssertEqual(route("airpods-b"), "multi-airpods-b")
+        XCTAssertEqual(route("speaker"), "multi-speaker")
+    }
+
+    func testLeavesOutputAloneWhenAlreadyRouted() {
+        XCTAssertNil(route("multi-airpods-b"))
+    }
+
+    func testLeavesOutputAloneWithoutASuitableDevice() {
+        XCTAssertNil(route("hdmi"))
+        // Capturing a microphone: no output device feeds it.
+        XCTAssertNil(route("speaker", capture: "microphone"))
+        XCTAssertNil(OutputRouter.route(output: "speaker", capture: "blackhole", aggregates: []))
+    }
+
+    func testAnAggregateWithoutTheCaptureDeviceIsNotAlreadyRouted() {
+        // Sitting on some other aggregate is not "already routed"; and since no
+        // aggregate contains both it and BlackHole, there is nothing to pick.
+        XCTAssertNil(route("unrelated"))
+    }
+}

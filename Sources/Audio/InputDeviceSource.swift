@@ -43,6 +43,8 @@ final class InputDeviceSource: NSObject, AudioSource, AVCaptureAudioDataOutputSa
 
     /// nil captures from the system default input.
     private let device: AudioInputDevice?
+    /// The device actually opened; set once `start()` has succeeded.
+    private(set) var captureDeviceUID: String?
     private let queue = DispatchQueue(label: "com.larrywang.livetrans.capture")
     private var session: AVCaptureSession?
     private var continuation: AsyncStream<Data>.Continuation?
@@ -82,6 +84,7 @@ final class InputDeviceSource: NSObject, AudioSource, AVCaptureAudioDataOutputSa
         let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
         self.continuation = continuation
         self.session = session
+        captureDeviceUID = captureDevice.uniqueID
 
         // Ending the stream tells the caption engine the input is gone, which
         // it reports; silently captioning nothing would be worse.
