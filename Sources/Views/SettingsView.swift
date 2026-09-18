@@ -21,7 +21,7 @@ struct SettingsView: View {
                     Text("System default").tag("")
                     // A saved device that is unplugged right now stays
                     // selectable rather than silently changing the setting.
-                    if !inputDeviceName.isEmpty, !devices.contains(where: { $0.name == inputDeviceName }) {
+                    if !inputDeviceName.isEmpty, AudioInputDevice.match(inputDeviceName, in: devices) == nil {
                         Text("\(inputDeviceName) (not connected)").tag(inputDeviceName)
                     }
                     ForEach(devices) { device in
@@ -35,7 +35,8 @@ struct SettingsView: View {
             } header: {
                 Text("Audio")
             } footer: {
-                Text("Choose BlackHole to caption what the Mac is playing. While captioning, sound "
+                Text("This is independent of the Mac's own Sound input setting, which LiveTrans ignores. "
+                    + "Choose BlackHole to caption what the Mac is playing. While captioning, sound "
                     + "output moves to the Multi-Output Device that contains BlackHole and your current "
                     + "speakers or headphones, and moves back when you stop. Raise sensitivity if quiet "
                     + "speech is missed; the orange mark on the level meter is the speech threshold.")
@@ -71,6 +72,12 @@ struct SettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             devices = AudioInputDevice.all()
+            // The setting starts out as the fragment "BlackHole", which capture
+            // matches loosely. Settle it to the device's real name, so the
+            // picker shows that device selected instead of a phantom entry.
+            if let match = AudioInputDevice.match(inputDeviceName, in: devices), match.name != inputDeviceName {
+                inputDeviceName = match.name
+            }
         }
     }
 }

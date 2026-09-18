@@ -14,8 +14,15 @@ struct AudioInputDevice: Identifiable, Equatable {
     /// First device whose name contains `name`, case-insensitively, so
     /// "BlackHole" finds "BlackHole 2ch".
     static func matching(_ name: String) -> AudioInputDevice? {
+        match(name, in: all())
+    }
+
+    /// An exact name wins over a partial one, so a saved "USB Mic" is not
+    /// mistaken for "USB Mic 2" when both are connected.
+    static func match(_ name: String, in devices: [AudioInputDevice]) -> AudioInputDevice? {
         guard !name.isEmpty else { return nil }
-        return all().first { $0.name.localizedCaseInsensitiveContains(name) }
+        return devices.first { $0.name == name }
+            ?? devices.first { $0.name.localizedCaseInsensitiveContains(name) }
     }
 }
 
