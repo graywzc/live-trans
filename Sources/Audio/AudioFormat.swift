@@ -19,3 +19,20 @@ protocol AudioSource: AnyObject {
     func start() throws -> AsyncStream<Data>
     func stop()
 }
+
+/// Cuts a byte stream of PCM into fixed 30 ms frames.
+struct FrameChunker {
+    private var residual = Data()
+
+    mutating func push(_ pcm: Data) -> [Data] {
+        residual.append(pcm)
+        var frames: [Data] = []
+        while residual.count >= AudioFormat.frameBytes {
+            // Data is its own slice type and keeps the parent's indices; copy
+            // so every frame and the remainder are zero-based.
+            frames.append(Data(residual.prefix(AudioFormat.frameBytes)))
+            residual = Data(residual.dropFirst(AudioFormat.frameBytes))
+        }
+        return frames
+    }
+}

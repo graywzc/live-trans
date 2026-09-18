@@ -24,7 +24,11 @@ final class CaptionEngine {
         case failed(String)
     }
 
-    private(set) var status: Status = .idle
+    private(set) var status: Status = .idle {
+        didSet {
+            if status != oldValue { print("status: \(status)") }
+        }
+    }
     private(set) var captions: [Caption] = []
     private(set) var partialText = ""
     private(set) var inputLevel: Float = 0
@@ -163,6 +167,11 @@ final class CaptionEngine {
 
         for await frame in frames {
             process(frame, client: client)
+        }
+        // A file source simply runs out. An input device's stream only ends
+        // when the device could not be reopened after a configuration change.
+        if !Task.isCancelled, source is InputDeviceSource {
+            fail("The audio input stopped. Check the input device in Settings, then press Start.")
         }
     }
 

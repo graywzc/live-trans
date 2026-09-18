@@ -13,7 +13,7 @@ final class PCMFramer {
 
     private let converter: AVAudioConverter
     private let outputFormat: AVAudioFormat
-    private var residual = Data()
+    private var chunker = FrameChunker()
 
     init(inputFormat: AVAudioFormat) throws {
         guard
@@ -55,15 +55,6 @@ final class PCMFramer {
         guard status != .error, output.frameLength > 0, let samples = output.int16ChannelData else {
             return []
         }
-        residual.append(UnsafeBufferPointer(start: samples[0], count: Int(output.frameLength)))
-
-        var frames: [Data] = []
-        while residual.count >= AudioFormat.frameBytes {
-            // Data is its own slice type and keeps the parent's indices; copy
-            // so every frame and the remainder are zero-based.
-            frames.append(Data(residual.prefix(AudioFormat.frameBytes)))
-            residual = Data(residual.dropFirst(AudioFormat.frameBytes))
-        }
-        return frames
+        return chunker.push(Data(buffer: UnsafeBufferPointer(start: samples[0], count: Int(output.frameLength))))
     }
 }
