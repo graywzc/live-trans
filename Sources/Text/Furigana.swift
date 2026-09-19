@@ -6,6 +6,9 @@ struct RubyToken: Equatable {
     var reading: String?
     /// Punctuation: must not be wrapped onto the start of a new line.
     var gluesToPrevious = false
+    /// A later piece of a word that was split to put the reading over its
+    /// kanji only. Double-clicking any piece selects the whole word.
+    var continuesWord = false
 }
 
 /// Kanji readings from the system's Japanese tokenizer. It works offline and
@@ -85,6 +88,9 @@ enum Furigana {
         if !prefix.isEmpty { tokens.append(RubyToken(base: String(prefix))) }
         tokens.append(RubyToken(base: String(base), reading: String(kana)))
         if !suffix.isEmpty { tokens.append(RubyToken(base: String(suffix))) }
+        for index in tokens.indices.dropFirst() {
+            tokens[index].continuesWord = true
+        }
         return tokens
     }
 

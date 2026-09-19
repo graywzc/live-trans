@@ -55,7 +55,7 @@ final class FuriganaTests: XCTestCase {
         let tokens = Furigana.annotate("食べる")
         XCTAssertEqual(tokens, [
             RubyToken(base: "食", reading: "た"),
-            RubyToken(base: "べる"),
+            RubyToken(base: "べる", continuesWord: true),
         ])
     }
 

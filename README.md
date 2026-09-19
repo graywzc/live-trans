@@ -8,7 +8,8 @@ furigana above the kanji and an English translation below it.
 
 The Mac only captures audio and draws captions. Transcription (Whisper
 `large-v3`) and translation (an LLM served by ollama) run on **your own GPU
-machine**, reached over ssh. Nothing is sent to a third-party service.
+machine**, reached over ssh. Nothing is sent to a third-party service, except
+the words you choose to look up on [Jisho](https://jisho.org).
 
 ```
  Mac                                         GPU host (Linux + CUDA)
@@ -132,6 +133,14 @@ it is replaced by the final line with furigana and its translation. The level
 meter shows the input level, and the orange mark on it is the current speech
 threshold. If quiet speech is missed, or background noise triggers captions,
 adjust **Sensitivity** in Settings.
+
+To look a word up, select it in the Japanese line: drag across the characters,
+double-click a word, or triple-click the whole line. A **Jisho** button appears
+over the selection and opens [jisho.org](https://jisho.org) on that text in a
+panel on the right of the window, while the captions carry on beside it. Drag
+the divider to resize the panel; ✕ or Esc closes it. Jisho copes with
+conjugated forms and short phrases, so the selection doesn't have to be a
+dictionary form. The button next to the Jisho one copies the selection.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. The share button exports the session as

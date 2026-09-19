@@ -2,22 +2,46 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(CaptionEngine.self) private var engine
+    @Environment(JishoBrowser.self) private var jisho
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
+    @AppStorage(AppSettings.jishoPanelWidth) private var jishoWidth = 440.0
+
+    /// One selection for the whole window, as in any text view.
+    @State private var selection: CaptionSelection?
 
     private static let bottom = "bottom"
+    private static let minCaptionsWidth: CGFloat = 420
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            captionList
-            footer
+        // A lookup opens Jisho beside the captions, not over them or in a
+        // window that has to be found: the captions keep coming meanwhile.
+        GeometryReader { proxy in
+            let widest = max(proxy.size.width - Self.minCaptionsWidth - SplitHandle.width, JishoPanel.minWidth)
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    header
+                    captionList
+                    footer
+                }
+                .frame(minWidth: Self.minCaptionsWidth, maxWidth: .infinity)
+                if jisho.isPresented {
+                    SplitHandle { x in
+                        jishoWidth = min(max(proxy.size.width - x - SplitHandle.width / 2, JishoPanel.minWidth), widest)
+                    }
+                    JishoPanel()
+                        .frame(width: min(max(jishoWidth, JishoPanel.minWidth), widest))
+                }
+            }
         }
+        .frame(
+            minWidth: Self.minCaptionsWidth + (jisho.isPresented ? SplitHandle.width + JishoPanel.minWidth : 0),
+            minHeight: 300
+        )
         .background(Color.black.ignoresSafeArea())
         .background(WindowLevel(floating: keepOnTop))
         .preferredColorScheme(.dark)
-        .frame(minWidth: 420, minHeight: 300)
     }
 
     private var header: some View {
@@ -51,7 +75,10 @@ struct ContentView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
                     ForEach(engine.captions) { caption in
-                        CaptionRow(caption: caption, showFurigana: showFurigana, fontSize: fontSize)
+                        CaptionRow(
+                            caption: caption, showFurigana: showFurigana, fontSize: fontSize,
+                            selection: selectionBinding(for: caption)
+                        )
                     }
                     if !engine.partialText.isEmpty {
                         Text(engine.partialText)
@@ -64,6 +91,7 @@ struct ContentView: View {
                 .padding(.horizontal)
             }
             .defaultScrollAnchor(.bottom)
+            .selectionActions(onLookUp: lookUp)
             .overlay {
                 if engine.captions.isEmpty, engine.partialText.isEmpty {
                     placeholder
@@ -78,6 +106,18 @@ struct ContentView: View {
                 proxy.scrollTo(Self.bottom, anchor: .bottom)
             }
         }
+    }
+
+    private func selectionBinding(for caption: Caption) -> Binding<Range<Int>?> {
+        Binding {
+            selection?.captionID == caption.id ? selection?.range : nil
+        } set: { range in
+            selection = range.map { CaptionSelection(captionID: caption.id, range: $0) }
+        }
+    }
+
+    private func lookUp(_ text: String) {
+        jisho.search(text)
     }
 
     @ViewBuilder
@@ -139,27 +179,31 @@ struct ContentView: View {
     }
 }
 
+private struct CaptionSelection: Equatable {
+    let captionID: Int
+    let range: Range<Int>
+}
+
 private struct CaptionRow: View {
     let caption: Caption
     let showFurigana: Bool
     let fontSize: Double
+    @Binding var selection: Range<Int>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if showFurigana {
-                FuriganaText(tokens: caption.ruby, fontSize: fontSize)
-            } else {
-                Text(caption.japanese)
-                    .font(.system(size: fontSize))
-            }
+            FuriganaText(
+                tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
+                selection: $selection
+            )
             if !caption.english.isEmpty {
                 Text(caption.english)
                     .font(.system(size: fontSize * 0.82))
                     .foregroundStyle(.green)
+                    .textSelection(.enabled)
             }
         }
         .foregroundStyle(.white)
-        .textSelection(.enabled)
     }
 }
 

@@ -41,6 +41,7 @@ enum AppSettings {
     static let captionFontSize = "captionFontSize"
     static let sensitivity = "sensitivity"
     static let keepOnTop = "keepOnTop"
+    static let jishoPanelWidth = "jishoPanelWidth"
     static let demoAudioPath = "demoAudioPath"
     static let autoStart = "autoStart"
 
@@ -57,6 +58,7 @@ enum AppSettings {
             captionFontSize: 22.0,
             sensitivity: 0.5,
             keepOnTop: false,
+            jishoPanelWidth: 440.0,
         ])
     }
 
