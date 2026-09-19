@@ -21,8 +21,6 @@ enum Jisho {
 @MainActor
 @Observable
 final class JishoBrowser {
-    /// Whether the panel is showing. A lookup opens it.
-    var isPresented = false
     private(set) var title = ""
     private(set) var canGoBack = false
     private(set) var canGoForward = false
@@ -36,7 +34,12 @@ final class JishoBrowser {
     func search(_ text: String) {
         guard let url = Jisho.searchURL(for: text) else { return }
         webView.load(URLRequest(url: url))
-        isPresented = true
+    }
+
+    /// For the Jisho tab opened before anything was looked up.
+    func loadHomeIfBlank() {
+        guard webView.url == nil, !webView.isLoading, let url = URL(string: "https://jisho.org") else { return }
+        webView.load(URLRequest(url: url))
     }
 
     private func makeWebView() -> WKWebView {

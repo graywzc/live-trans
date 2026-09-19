@@ -9,7 +9,8 @@ furigana above the kanji and an English translation below it.
 The Mac only captures audio and draws captions. Transcription (Whisper
 `large-v3`) and translation (an LLM served by ollama) run on **your own GPU
 machine**, reached over ssh. Nothing is sent to a third-party service, except
-the words you choose to look up on [Jisho](https://jisho.org).
+the words you choose to look up on [Jisho](https://jisho.org). A sentence can
+also be [taken apart word by word](#sentence-analysis) by an LLM of your own.
 
 ```
  Mac                                         GPU host (Linux + CUDA)
@@ -146,6 +147,37 @@ panel on the right of the window, while the captions carry on beside it. Drag
 the divider to resize the panel; ✕ or Esc closes it. Jisho copes with
 conjugated forms and short phrases, so the selection doesn't have to be a
 dictionary form. The button next to the Jisho one copies the selection.
+
+### Sentence analysis
+
+Point at a caption and a button appears at its end. It has an LLM explain the
+sentence in the same panel as Jisho (the switch at the top of the panel flips
+between the two): the sentence with its readings, a Chinese translation, then a
+table with a row per word giving its dictionary form, how that became the form
+in the sentence (食べる → 可能形 → 否定 → 过去), and what it means here. Rows
+appear as the model writes them, and a word in the analyzed sentence can be
+selected and looked up on Jisho like one in a caption.
+
+Under **Sentence analysis** in Settings, enter an OpenAI-compatible server
+(vLLM, llama.cpp's `llama-server`, or ollama) and a model:
+
+```
+LLM server   http://gpu-host:8000/v1
+Model        qwen3.8-27b
+```
+
+This is separate from the GPU server above, so it works on captions that are
+already on screen after you press Stop, and it can be a bigger model on another
+machine than the one that translates the captions.
+
+Nothing about an analysis is remembered. The app calls the inference server
+directly and each request holds the instructions and that one sentence, never
+an earlier sentence or answer. The result exists only in the panel until the
+next one replaces it: it is not cached, not written to disk, and not part of
+the exported transcript. Give the address of the inference server itself; an
+agent or a memory layer in front of it would see the traffic. Whether the
+server logs its requests (vLLM's `--enable-log-requests`) is up to its own
+configuration.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. The share button exports the session as

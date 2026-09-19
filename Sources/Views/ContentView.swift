@@ -3,10 +3,12 @@ import SwiftUI
 struct ContentView: View {
     @Environment(CaptionEngine.self) private var engine
     @Environment(JishoBrowser.self) private var jisho
+    @Environment(SentenceAnalyzer.self) private var analyzer
+    @Environment(SidePanel.self) private var panel
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
-    @AppStorage(AppSettings.jishoPanelWidth) private var jishoWidth = 440.0
+    @AppStorage(AppSettings.sidePanelWidth) private var panelWidth = 440.0
 
     /// One selection for the whole window, as in any text view.
     @State private var selection: CaptionSelection?
@@ -15,10 +17,10 @@ struct ContentView: View {
     private static let minCaptionsWidth: CGFloat = 420
 
     var body: some View {
-        // A lookup opens Jisho beside the captions, not over them or in a
-        // window that has to be found: the captions keep coming meanwhile.
+        // A lookup or an analysis opens beside the captions, which keep
+        // coming meanwhile.
         GeometryReader { proxy in
-            let widest = max(proxy.size.width - Self.minCaptionsWidth - SplitHandle.width, JishoPanel.minWidth)
+            let widest = max(proxy.size.width - Self.minCaptionsWidth - SplitHandle.width, SidePanelView.minWidth)
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     header
@@ -26,17 +28,17 @@ struct ContentView: View {
                     footer
                 }
                 .frame(minWidth: Self.minCaptionsWidth, maxWidth: .infinity)
-                if jisho.isPresented {
+                if panel.isPresented {
                     SplitHandle { x in
-                        jishoWidth = min(max(proxy.size.width - x - SplitHandle.width / 2, JishoPanel.minWidth), widest)
+                        panelWidth = min(max(proxy.size.width - x - SplitHandle.width / 2, SidePanelView.minWidth), widest)
                     }
-                    JishoPanel()
-                        .frame(width: min(max(jishoWidth, JishoPanel.minWidth), widest))
+                    SidePanelView()
+                        .frame(width: min(max(panelWidth, SidePanelView.minWidth), widest))
                 }
             }
         }
         .frame(
-            minWidth: Self.minCaptionsWidth + (jisho.isPresented ? SplitHandle.width + JishoPanel.minWidth : 0),
+            minWidth: Self.minCaptionsWidth + (panel.isPresented ? SplitHandle.width + SidePanelView.minWidth : 0),
             minHeight: 300
         )
         .background(Color.black.ignoresSafeArea())
@@ -77,7 +79,10 @@ struct ContentView: View {
                     ForEach(engine.captions) { caption in
                         CaptionRow(
                             caption: caption, showFurigana: showFurigana, fontSize: fontSize,
-                            selection: selectionBinding(for: caption)
+                            isAnalyzed: panel.isPresented && panel.tab == .analysis
+                                && analyzer.captionID == caption.id,
+                            selection: selectionBinding(for: caption),
+                            onAnalyze: { analyze(caption) }
                         )
                     }
                     if !engine.partialText.isEmpty {
@@ -118,6 +123,12 @@ struct ContentView: View {
 
     private func lookUp(_ text: String) {
         jisho.search(text)
+        panel.show(.jisho)
+    }
+
+    private func analyze(_ caption: Caption) {
+        analyzer.analyze(caption)
+        panel.show(.analysis)
     }
 
     @ViewBuilder
@@ -184,26 +195,79 @@ private struct CaptionSelection: Equatable {
     let range: Range<Int>
 }
 
-private struct CaptionRow: View {
+struct CaptionRow: View {
     let caption: Caption
     let showFurigana: Bool
     let fontSize: Double
+    /// The side panel is showing this caption's analysis.
+    let isAnalyzed: Bool
     @Binding var selection: Range<Int>?
+    let onAnalyze: () -> Void
+
+    @State private var isHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            FuriganaText(
-                tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
-                selection: $selection
-            )
-            if !caption.english.isEmpty {
-                Text(caption.english)
-                    .font(.system(size: fontSize * 0.82))
-                    .foregroundStyle(.green)
-                    .textSelection(.enabled)
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                FuriganaText(
+                    tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
+                    selection: $selection
+                )
+                if !caption.english.isEmpty {
+                    Text(caption.english)
+                        .font(.system(size: fontSize * 0.82))
+                        .foregroundStyle(.green)
+                        .textSelection(.enabled)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: onAnalyze) {
+                Image(systemName: AnalysisView.symbol)
+                    .font(.system(size: fontSize * 0.7))
+                    .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
+            }
+            .buttonStyle(.plain)
+            .help("Explain this sentence")
+            // Level with the Japanese, below the row of readings.
+            .padding(.top, showFurigana ? fontSize * 0.6 : 0)
+            .opacity(isHovered || isAnalyzed ? 1 : 0)
         }
         .foregroundStyle(.white)
+        .background(HoverTracker(isHovered: $isHovered))
+    }
+}
+
+/// Whether the pointer is over a view. SwiftUI's onHover only reports in the
+/// active app, and the captions usually float over a video player that is.
+struct HoverTracker: NSViewRepresentable {
+    @Binding var isHovered: Bool
+
+    func makeNSView(context: Context) -> TrackerView {
+        TrackerView()
+    }
+
+    func updateNSView(_ view: TrackerView, context: Context) {
+        view.onChange = { isHovered = $0 }
+    }
+
+    final class TrackerView: NSView {
+        var onChange: (Bool) -> Void = { _ in }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(
+                rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self
+            ))
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            onChange(true)
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            onChange(false)
+        }
     }
 }
 
