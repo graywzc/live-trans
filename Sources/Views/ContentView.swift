@@ -232,10 +232,17 @@ private struct LevelMeter: View {
     }
 }
 
-/// Floats the window above other apps, so captions stay visible over the video
-/// they belong to.
+/// Window behaviour SwiftUI has no modifiers for.
 private struct WindowLevel: NSViewRepresentable {
     let floating: Bool
+
+    final class Coordinator {
+        var placed = false
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeNSView(context: Context) -> NSView {
         NSView()
@@ -244,7 +251,38 @@ private struct WindowLevel: NSViewRepresentable {
     func updateNSView(_ view: NSView, context: Context) {
         // The view has no window until after this update pass.
         DispatchQueue.main.async {
-            view.window?.level = floating ? .floating : .normal
+            guard let window = view.window else { return }
+            // Floats above other apps, so captions stay visible over the video
+            // they belong to.
+            window.level = floating ? .floating : .normal
+            // A floating window is treated as a palette and hidden during
+            // Mission Control unless it says it is an ordinary managed window.
+            window.collectionBehavior.insert(.managed)
+            // The black content runs up under the title bar, which leaves no
+            // visible place to grab; let any empty area drag the window.
+            window.isMovableByWindowBackground = true
+
+            if !context.coordinator.placed {
+                context.coordinator.placed = true
+                Self.moveToPointerScreen(window)
+            }
         }
+    }
+
+    /// Open where the user is looking. macOS restores the last position, or
+    /// with none saved picks a display by rules of its own, and on a
+    /// multi-display desk either can be a screen that is rarely looked at. A
+    /// window already on the pointer's screen keeps its remembered position.
+    private static func moveToPointerScreen(_ window: NSWindow) {
+        let pointer = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(pointer, $0.frame, false) }),
+              window.screen != screen
+        else { return }
+        let visible = screen.visibleFrame
+        var frame = window.frame
+        frame.size.width = min(frame.width, visible.width)
+        frame.size.height = min(frame.height, visible.height)
+        frame.origin = CGPoint(x: visible.midX - frame.width / 2, y: visible.midY - frame.height / 2)
+        window.setFrame(frame, display: true)
     }
 }
