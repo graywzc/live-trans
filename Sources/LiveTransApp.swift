@@ -15,6 +15,7 @@ struct LiveTransApp: App {
         Window("LiveTrans", id: "captions") {
             ContentView()
                 .environment(delegate.engine)
+                .environment(delegate.jisho)
                 .task {
                     if UserDefaults.standard.bool(forKey: AppSettings.autoStart) {
                         delegate.engine.start()
@@ -32,6 +33,7 @@ struct LiveTransApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let engine = CaptionEngine()
+    let jisho = JishoBrowser()
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
