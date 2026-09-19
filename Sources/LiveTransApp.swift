@@ -16,6 +16,8 @@ struct LiveTransApp: App {
             ContentView()
                 .environment(delegate.engine)
                 .environment(delegate.jisho)
+                .environment(delegate.analyzer)
+                .environment(delegate.panel)
                 .task {
                     if UserDefaults.standard.bool(forKey: AppSettings.autoStart) {
                         delegate.engine.start()
@@ -34,6 +36,8 @@ struct LiveTransApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let engine = CaptionEngine()
     let jisho = JishoBrowser()
+    let analyzer = SentenceAnalyzer()
+    let panel = SidePanel()
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true

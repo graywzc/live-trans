@@ -64,7 +64,7 @@ enum Furigana {
     }
 
     /// Put the reading over the kanji only: 食べる(たべる) becomes 食(た) + べる.
-    private static func annotate(word: String, reading: String?) -> [RubyToken] {
+    static func annotate(word: String, reading: String?) -> [RubyToken] {
         guard let reading, word.unicodeScalars.contains(where: isKanji) else {
             return [RubyToken(base: word)]
         }

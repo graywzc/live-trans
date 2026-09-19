@@ -11,6 +11,8 @@ struct SettingsView: View {
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.sensitivity) private var sensitivity = 0.5
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
+    @AppStorage(AppSettings.analysisURL) private var analysisURL = ""
+    @AppStorage(AppSettings.analysisModel) private var analysisModel = ""
 
     @State private var devices: [AudioInputDevice] = []
 
@@ -54,6 +56,21 @@ struct SettingsView: View {
             } footer: {
                 Text("The server is started over ssh when captioning starts and shut down when it "
                     + "stops. Changes apply the next time you press Start.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                TextField("LLM server", text: $analysisURL, prompt: Text("http://gpu-host:8000/v1"))
+                TextField("Model", text: $analysisModel, prompt: Text("qwen3.8-27b"))
+            } header: {
+                Text("Sentence analysis")
+            } footer: {
+                Text("An OpenAI-compatible server (vLLM, llama.cpp, ollama) on your own machine, for "
+                    + "the button at the end of a caption that explains the sentence. The app calls it "
+                    + "directly, sends only that one sentence, and keeps the answer only until the "
+                    + "next one; give the inference server's own address, not an agent or proxy in "
+                    + "front of it.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
