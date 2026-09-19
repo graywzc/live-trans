@@ -12,7 +12,7 @@ the text->text NLLB model instead.
 
     python asr_server.py --host 0.0.0.0 --port 8765
 
-POST /shutdown     exit now and release the GPU
+POST /shutdown     exit now and release the GPU (unloads the ollama model too)
 POST /transcribe   body: raw PCM s16le mono 16kHz
                    query: beam_size=3, translate=1
                    -> {"ja": "...", "en": "...", "rtf": 0.05,
@@ -24,6 +24,7 @@ GET /health       -> {"status": "ok", "asr": "...", "device": "cuda"}
 import argparse
 import json
 import os
+import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -194,6 +195,34 @@ def warm_ollama():
               "falling back to whisper task=translate", flush=True)
 
 
+def unload_ollama():
+    """Ask ollama to drop the model now rather than after OLLAMA_KEEP_ALIVE.
+
+    ollama is a separate process, so exiting this one frees only Whisper; the
+    LLM would otherwise sit in GPU memory for the whole keep-alive window.
+    """
+    if TRANSLATE_BACKEND != "ollama":
+        return
+    import urllib.request
+
+    req = urllib.request.Request(
+        OLLAMA_URL + "/api/generate",
+        data=json.dumps({"model": OLLAMA_MODEL, "keep_alive": 0}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        print(f"unloaded ollama {OLLAMA_MODEL}", flush=True)
+    except Exception as exc:
+        print(f"could not unload ollama {OLLAMA_MODEL} ({exc})", flush=True)
+
+
+def exit_releasing_gpu():
+    unload_ollama()
+    os._exit(0)
+
+
 def _content(text):
     return "".join(ch for ch in text if ch not in _BOUNDARY_NOISE)
 
@@ -298,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
             # instead of waiting out the idle timeout.
             self._send(200, {"status": "shutting down"})
             self.wfile.flush()
-            threading.Timer(0.2, lambda: os._exit(0)).start()
+            threading.Timer(0.2, exit_releasing_gpu).start()
             return
         if not self.path.startswith("/transcribe"):
             self._send(404, {"error": "not found"})
@@ -355,7 +384,7 @@ def start_idle_watchdog(timeout):
             idle = time.time() - _last_request_at
             if idle > timeout:
                 print(f"idle {idle:.0f}s > {timeout}s, shutting down", flush=True)
-                os._exit(0)
+                exit_releasing_gpu()
 
     threading.Thread(target=watch, daemon=True).start()
 
@@ -373,6 +402,8 @@ def main():
     args = parser.parse_args()
 
     load_models()
+    # A plain `kill` should release the LLM too, not just this process.
+    signal.signal(signal.SIGTERM, lambda *_: exit_releasing_gpu())
     if args.idle_timeout > 0:
         print(f"idle timeout: {args.idle_timeout:.0f}s", flush=True)
         start_idle_watchdog(args.idle_timeout)
