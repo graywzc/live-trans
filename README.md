@@ -93,6 +93,11 @@ when you stop or quit, so the GPU is only held while you are captioning.
   server is really gone, restarts it over ssh in the background. The status dot
   turns orange meanwhile.
 
+Whichever way the server exits, it also tells ollama to unload the translation
+model, so the LLM's VRAM is freed along with Whisper's instead of lingering for
+the keep-alive window. Anything else using that model in ollama simply reloads
+it on its next request.
+
 If a server is already running on the port, the app uses it and leaves it
 running.
 
@@ -114,7 +119,7 @@ The port only needs to be reachable from the Mac, not from the internet.
 | `LIVETRANS_TRANSLATE_BACKEND` | `ollama` | `ollama` (LLM; falls back to `whisper` when ollama is unreachable), `whisper` (a second Whisper pass with `task=translate`) or `nllb`. |
 | `LIVETRANS_OLLAMA_URL` | `http://localhost:11434` | ollama server. |
 | `LIVETRANS_OLLAMA_MODEL` | `qwen3.5:9b` | Model used to split sentences and translate. |
-| `LIVETRANS_OLLAMA_KEEP_ALIVE` | `30m` | How long ollama keeps the model loaded between requests. |
+| `LIVETRANS_OLLAMA_KEEP_ALIVE` | `30m` | How long ollama keeps the model loaded between requests while the server is running; it is unloaded when the server exits. |
 | `LIVETRANS_OLLAMA_TIMEOUT` | `30` | Seconds before a translation falls back to the Whisper pass. |
 | `LIVETRANS_NLLB_MODEL` | `models/nllb-200-distilled-600M-ct2` | Converted NLLB directory (`nllb` only; also needs `transformers` and `sentencepiece`). |
 
