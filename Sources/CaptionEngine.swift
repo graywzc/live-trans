@@ -220,6 +220,7 @@ final class CaptionEngine {
                 finals?.yield((id: utterance, audio: audio))
             case .discarded(let utterance):
                 isSpeaking = false
+                print("utterance \(utterance) discarded: too brief to be speech")
                 settle(utterance)
             }
         }
@@ -248,18 +249,21 @@ final class CaptionEngine {
         finals = continuation
         finalWorker = Task {
             for await final in stream {
-                await transcribeFinal(final.audio, client: client)
+                await transcribeFinal(final.audio, utterance: final.id, client: client)
                 settle(final.id)
             }
         }
     }
 
-    private func transcribeFinal(_ audio: Data, client: ASRClient) async {
+    private func transcribeFinal(_ audio: Data, utterance: Int, client: ASRClient) async {
         for attempt in 1...Self.remoteRetries {
             do {
                 let result = try await client.transcribe(pcm: audio, beamSize: 3, translate: true)
                 guard !Task.isCancelled else { return }
                 status = .listening(serverLabel)
+                if result.lines.allSatisfy(\.ja.isEmpty) {
+                    print("utterance \(utterance): the server heard no words")
+                }
                 append(result)
                 return
             } catch {
@@ -270,6 +274,8 @@ final class CaptionEngine {
                 await session?.ensureUp()
                 if attempt < Self.remoteRetries {
                     try? await Task.sleep(nanoseconds: Self.remoteRetryDelay)
+                } else {
+                    print("utterance \(utterance) dropped after \(attempt) attempts: \(error.localizedDescription)")
                 }
             }
         }
