@@ -70,14 +70,7 @@ final class SelectableTextTests: XCTestCase {
         // too close to for the button to be centred on it.
         let view = try textView()
         let frame = view.convert(view.bounds, to: nil)
-        // The button comes up some updates after the selection, and how many
-        // depends on the machine: a CI runner needs more than a laptop does.
-        // Until it is there the click lands on nothing, so click until it takes.
-        let deadline = Date().addingTimeInterval(5)
-        repeat {
-            click(x: 45, y: 140 - frame.maxY - 16)
-        } while model.lookedUp.isEmpty && Date() < deadline
-        snapshot("text-after-click")
+        click(x: 45, y: 140 - frame.maxY - 16)
         XCTAssertEqual(
             model.lookedUp, ["school"],
             "text at \(frame), selected \(view.selectedRange()), first responder \(String(describing: window.firstResponder))"
