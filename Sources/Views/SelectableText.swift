@@ -126,6 +126,10 @@ private struct TextBox: NSViewRepresentable {
     }
 
     final class BoxView: NSTextView {
+        // The window is movable by its background, which a view that draws
+        // none counts as; a drag over the text has to select.
+        override var mouseDownCanMoveWindow: Bool { false }
+
         // Captions float over another app, which is usually the active one:
         // the click that selects must not be spent on activating the window.
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }

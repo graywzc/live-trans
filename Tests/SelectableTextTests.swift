@@ -25,6 +25,7 @@ final class SelectableTextTests: XCTestCase {
                         tokens: Furigana.annotate("食べる、学校"), fontSize: 20,
                         selection: $model.selection
                     )
+                    Color.clear.frame(height: 300)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
@@ -94,6 +95,18 @@ final class SelectableTextTests: XCTestCase {
         try select(NSRange(location: 7, length: 2))
         XCTAssertNil(model.selection)
         snapshot("text-selected-after-furigana")
+    }
+
+    func testScrollingOverTheTextScrollsTheContainer() throws {
+        let view = try textView()
+        let scrollView = try XCTUnwrap(view.enclosingScrollView)
+        let before = scrollView.contentView.bounds.origin.y
+        let wheel = try XCTUnwrap(CGEvent(
+            scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -30, wheel2: 0, wheel3: 0
+        ))
+        view.scrollWheel(with: try XCTUnwrap(NSEvent(cgEvent: wheel)))
+        pump()
+        XCTAssertNotEqual(scrollView.contentView.bounds.origin.y, before)
     }
 
     private func select(_ range: NSRange) throws {
