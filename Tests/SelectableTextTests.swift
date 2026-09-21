@@ -77,6 +77,7 @@ final class SelectableTextTests: XCTestCase {
         repeat {
             click(x: 45, y: 140 - frame.maxY - 16)
         } while model.lookedUp.isEmpty && Date() < deadline
+        snapshot("text-after-click")
         XCTAssertEqual(
             model.lookedUp, ["school"],
             "text at \(frame), selected \(view.selectedRange()), first responder \(String(describing: window.firstResponder))"
