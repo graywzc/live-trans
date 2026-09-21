@@ -72,13 +72,11 @@ enum AnalysisFormat {
     }
 }
 
-/// Turns the streamed answer, which arrives in arbitrary pieces, into events.
-struct AnalysisStreamParser {
-    private var pending = ""
-    private var wordCount = 0
-
-    /// One line of the HTTP response: server-sent events, `data: {json}`.
-    mutating func consume(sseLine: String) -> [AnalysisEvent] {
+/// A streamed chat completion as it comes over HTTP.
+enum ChatStream {
+    /// The text in one line of the response: server-sent events,
+    /// `data: {json}`. Reasoning comes in a field of its own and is not text.
+    static func content(ofLine sseLine: String) -> String? {
         struct Chunk: Decodable {
             struct Choice: Decodable {
                 struct Delta: Decodable {
@@ -88,12 +86,21 @@ struct AnalysisStreamParser {
             }
             var choices: [Choice]?
         }
-        guard sseLine.hasPrefix("data:") else { return [] }
+        guard sseLine.hasPrefix("data:") else { return nil }
         let payload = sseLine.dropFirst(5).trimmingCharacters(in: .whitespaces)
-        guard payload != "[DONE]", let chunk = try? JSONDecoder().decode(Chunk.self, from: Data(payload.utf8)),
-              let content = chunk.choices?.first?.delta?.content
-        else { return [] }
-        return consume(content: content)
+        guard payload != "[DONE]", let chunk = try? JSONDecoder().decode(Chunk.self, from: Data(payload.utf8))
+        else { return nil }
+        return chunk.choices?.first?.delta?.content
+    }
+}
+
+/// Turns the streamed answer, which arrives in arbitrary pieces, into events.
+struct AnalysisStreamParser {
+    private var pending = ""
+    private var wordCount = 0
+
+    mutating func consume(sseLine: String) -> [AnalysisEvent] {
+        ChatStream.content(ofLine: sseLine).map { consume(content: $0) } ?? []
     }
 
     mutating func consume(content: String) -> [AnalysisEvent] {
