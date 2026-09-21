@@ -104,13 +104,16 @@ struct SidePanelView: View {
     @ViewBuilder
     private var analysisControls: some View {
         Spacer(minLength: 0)
-        if analyzer.phase == .running || analyzer.isAnswering {
+        if analyzer.isBusy {
             ProgressView()
                 .controlSize(.small)
             Button(action: analyzer.cancel) {
                 Image(systemName: "stop.fill")
             }
-            .help(analyzer.isAnswering ? "Stop the answer" : "Stop the analysis")
+            .help(
+                analyzer.phase == .running ? "Stop the analysis"
+                    : analyzer.isAnswering ? "Stop the answer" : "Stop the lookup"
+            )
         }
     }
 }

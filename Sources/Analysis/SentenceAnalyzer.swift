@@ -6,7 +6,8 @@ import Observation
 ///
 /// Nothing about an analysis is remembered. A request carries the instructions
 /// and the one sentence, and for a follow-up question what the panel is
-/// showing about that sentence; never anything about an earlier sentence. It
+/// showing about that sentence, for a lookup the selected text; never
+/// anything about an earlier sentence. It
 /// goes to the inference server itself, not through an agent or a memory
 /// layer in front of one; and the session keeps no cache or cookies.
 struct AnalysisClient {
@@ -56,6 +57,14 @@ struct AnalysisClient {
         return stream(request(for: sentence)) { parser.consume(content: $0) } atEnd: { parser.finish() }
     }
 
+    /// A dictionary entry for text selected while reading the sentence.
+    func lookUp(_ text: String, in sentence: String) -> AsyncThrowingStream<LookupEvent, Error> {
+        var parser = LookupStreamParser()
+        return stream(request(messages: LookupFormat.messages(lookingUp: text, in: sentence))) {
+            parser.consume(content: $0)
+        } atEnd: { parser.finish() }
+    }
+
     /// The answer to a follow-up question, in the pieces it is generated in.
     func answer(_ messages: [[String: String]]) -> AsyncThrowingStream<String, Error> {
         stream(request(messages: messages)) { [$0] } atEnd: { [] }
@@ -92,9 +101,9 @@ struct AnalysisClient {
     }
 }
 
-/// The analysis showing in the side panel, and the questions asked about it.
-/// There is only ever this one: the next sentence replaces it, questions and
-/// all, and it is never written anywhere.
+/// The analysis showing in the side panel, with the questions asked about it
+/// and the selections looked up in it. There is only ever this one: the next
+/// sentence replaces it, questions and all, and it is never written anywhere.
 @MainActor
 @Observable
 final class SentenceAnalyzer {
@@ -115,6 +124,9 @@ final class SentenceAnalyzer {
     private(set) var words: [AnalyzedWord] = []
     private(set) var followUps: [FollowUp] = []
     private(set) var isAnswering = false
+    private(set) var lookups: [Lookup] = []
+    /// The lookup whose entry is being written.
+    private(set) var lookingUp: Int?
     /// The question being typed. Here rather than in the view, which is gone
     /// while the panel shows Jisho: looking a word up doesn't lose the question.
     var draft = ""
@@ -130,8 +142,31 @@ final class SentenceAnalyzer {
         (phase == .done ? Furigana.annotate(sentence, words: words) : nil) ?? tokenizerRuby
     }
 
+    /// What is under the analysis, in the order it was asked for.
+    enum ThreadItem: Identifiable {
+        case followUp(FollowUp)
+        case lookup(Lookup)
+
+        var id: Int {
+            switch self {
+            case .followUp(let followUp): followUp.id
+            case .lookup(let lookup): lookup.id
+            }
+        }
+    }
+
+    var thread: [ThreadItem] {
+        (followUps.map(ThreadItem.followUp) + lookups.map(ThreadItem.lookup)).sorted { $0.id < $1.id }
+    }
+
     private var tokenizerRuby: [RubyToken] = []
+    /// Questions and lookups are numbered in one sequence: their place in
+    /// the thread.
+    private var nextID = 0
     private var task: Task<Void, Never>?
+    /// A lookup doesn't wait for the analysis or an answer to finish, nor
+    /// they for it.
+    private var lookupTask: Task<Void, Never>?
     private let makeClient: () -> AnalysisClient?
 
     init(makeClient: @escaping () -> AnalysisClient? = { AppSettings.analysisClient }) {
@@ -146,6 +181,8 @@ final class SentenceAnalyzer {
         chinese = ""
         words = []
         followUps = []
+        lookups = []
+        nextID = 0
         draft = ""
         guard let client = makeClient() else {
             phase = .unconfigured
@@ -186,7 +223,8 @@ final class SentenceAnalyzer {
             asking: question, after: followUps, sentence: sentence, chinese: chinese, words: words
         )
         let index = followUps.count
-        followUps.append(FollowUp(id: (followUps.last?.id ?? -1) + 1, question: question))
+        followUps.append(FollowUp(id: nextID, question: question))
+        nextID += 1
         guard let client = makeClient() else {
             followUps[index].error = "No LLM server is set in Settings."
             return
@@ -218,11 +256,64 @@ final class SentenceAnalyzer {
         ask(last.question)
     }
 
-    /// Stops the request, which also stops the generation on the server. What
-    /// has arrived so far stays.
+    /// Look up text selected in the panel: a word, a conjugated form, a
+    /// phrase, a term from an explanation. Its entry goes under the analysis
+    /// with the questions. One at a time; the one before keeps what it has.
+    func lookUp(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !sentence.isEmpty else { return }
+        lookupTask?.cancel()
+        let id = nextID
+        nextID += 1
+        lookups.append(Lookup(id: id, text: text))
+        guard let client = makeClient() else {
+            lookups[lookups.count - 1].error = "No LLM server is set in Settings."
+            lookingUp = nil
+            return
+        }
+        lookingUp = id
+        lookupTask = Task {
+            do {
+                for try await event in client.lookUp(text, in: sentence) {
+                    guard !Task.isCancelled else { return }
+                    update(id) { $0.apply(event) }
+                }
+                guard !Task.isCancelled else { return }
+                update(id) { if $0.isEmpty { $0.error = "The LLM's answer was not in the expected format." } }
+            } catch {
+                guard !Task.isCancelled else { return }
+                update(id) { $0.error = error.localizedDescription }
+            }
+            lookingUp = nil
+        }
+    }
+
+    /// By id: a lookup that failed earlier may be retried, and so taken out
+    /// from under this one, while this one is being written.
+    private func update(_ id: Int, _ change: (inout Lookup) -> Void) {
+        guard let index = lookups.firstIndex(where: { $0.id == id }) else { return }
+        change(&lookups[index])
+    }
+
+    /// Look the same text up again, after it failed.
+    func retryLookup(_ id: Int) {
+        guard let index = lookups.firstIndex(where: { $0.id == id }), lookups[index].error != nil else { return }
+        lookUp(lookups.remove(at: index).text)
+    }
+
+    /// Anything being written: the analysis, an answer, an entry.
+    var isBusy: Bool {
+        phase == .running || isAnswering || lookingUp != nil
+    }
+
+    /// Stops the requests, which also stops the generation on the server.
+    /// What has arrived so far stays.
     func cancel() {
         task?.cancel()
         task = nil
+        lookupTask?.cancel()
+        lookupTask = nil
+        lookingUp = nil
         isAnswering = false
         if phase == .running {
             phase = words.isEmpty && chinese.isEmpty ? .idle : .done

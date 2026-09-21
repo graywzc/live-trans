@@ -2,13 +2,13 @@ import SwiftUI
 
 /// One sentence taken apart by the LLM: the sentence with its readings, the
 /// Chinese translation, then a row per word. Rows appear as they arrive. Under
-/// them, the questions asked about the sentence in the field at the bottom.
+/// them, the questions asked about the sentence in the field at the bottom,
+/// and an entry for each selection that was looked up. Any of the text can be
+/// selected and looked up, an entry's own included.
 struct AnalysisView: View {
     static let symbol = "text.magnifyingglass"
 
     @Environment(SentenceAnalyzer.self) private var analyzer
-    @Environment(JishoBrowser.self) private var jisho
-    @Environment(SidePanel.self) private var panel
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
 
     @State private var selection: Range<Int>?
@@ -44,9 +44,10 @@ struct AnalysisView: View {
             GeometryReader { viewport in
                 ScrollViewReader { scroller in
                     thread(viewportHeight: viewport.size.height)
-                        // The question goes to the top, with its answer
-                        // growing into the room under it.
-                        .onChange(of: analyzer.followUps.last?.id) { _, asked in
+                        // The question or the looked-up text goes to the top,
+                        // with what is written about it growing into the room
+                        // under it.
+                        .onChange(of: analyzer.thread.last?.id) { _, asked in
                             guard let asked else { return }
                             withAnimation { scroller.scrollTo(asked, anchor: .top) }
                         }
@@ -67,10 +68,7 @@ struct AnalysisView: View {
                 // captions are set to.
                 FuriganaText(tokens: analyzer.ruby, fontSize: fontSize, selection: $selection)
                 if !analyzer.chinese.isEmpty {
-                    Text(analyzer.chinese)
-                        .font(.system(size: fontSize * 0.82))
-                        .foregroundStyle(.orange)
-                        .textSelection(.enabled)
+                    SelectableText(analyzer.chinese, size: fontSize * 0.82, color: .systemOrange)
                 }
                 if !analyzer.words.isEmpty {
                     table
@@ -84,29 +82,40 @@ struct AnalysisView: View {
                     }
                     .font(.callout)
                 }
-                ForEach(analyzer.followUps) { followUp in
+                ForEach(analyzer.thread) { item in
                     Divider()
-                    FollowUpView(
-                        followUp: followUp, fontSize: tableFontSize,
-                        isLast: followUp.id == analyzer.followUps.last?.id
-                    )
-                    // Room for the newest question to reach the top of the
-                    // panel before its answer has been written.
+                    Group {
+                        switch item {
+                        case .followUp(let followUp):
+                            FollowUpView(
+                                followUp: followUp, fontSize: tableFontSize,
+                                isLast: followUp.id == analyzer.followUps.last?.id
+                            )
+                        case .lookup(let lookup):
+                            LookupView(
+                                lookup: lookup, fontSize: tableFontSize,
+                                isLoading: analyzer.lookingUp == lookup.id
+                            ) {
+                                analyzer.retryLookup(lookup.id)
+                            }
+                        }
+                    }
+                    // Room for the newest one to reach the top of the panel
+                    // before anything has been written under it.
                     .frame(
-                        minHeight: followUp.id == analyzer.followUps.last?.id ? viewportHeight - 45 : nil,
+                        minHeight: item.id == analyzer.thread.last?.id ? viewportHeight - 45 : nil,
                         alignment: .top
                     )
-                    .id(followUp.id)
+                    .id(item.id)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
-        // A word in the analyzed sentence can be looked up like one in a caption.
-        .selectionActions { text in
-            jisho.search(text)
-            panel.show(.jisho)
-        }
+        // The button a caption's selection gets, but the entry is the LLM's
+        // and stays here: what is selected in an explanation is as often a
+        // form or a term as a word, and jisho.org has the captions.
+        .selectionActions(lookUpHelp: { "Look up \($0) with the LLM" }, onLookUp: analyzer.lookUp)
     }
 
     private var questionField: some View {
@@ -162,28 +171,27 @@ struct AnalysisView: View {
                 GridRow {
                     VStack(alignment: .leading, spacing: 1) {
                         if word.reading != word.surface {
-                            Text(word.reading)
-                                .font(.system(size: tableFontSize * 0.7))
-                                .foregroundStyle(.secondary)
+                            SelectableText(word.reading, size: tableFontSize * 0.7, color: .secondaryLabelColor)
                         }
-                        Text(word.surface)
+                        SelectableText(word.surface, size: tableFontSize)
                     }
                     .fixedSize()
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(word.base)
-                        Text(word.partOfSpeech)
-                            .font(.system(size: tableFontSize * 0.75))
-                            .foregroundStyle(.secondary)
+                        SelectableText(word.base, size: tableFontSize)
+                        SelectableText(word.partOfSpeech, size: tableFontSize * 0.75, color: .secondaryLabelColor)
                     }
                     .fixedSize()
-                    Text(word.change.isEmpty ? "—" : word.change)
-                        .foregroundStyle(word.change.isEmpty ? .secondary : .primary)
-                    Text(word.meaning)
+                    if word.change.isEmpty {
+                        Text("—")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        SelectableText(word.change, size: tableFontSize)
+                    }
+                    SelectableText(word.meaning, size: tableFontSize)
                 }
             }
         }
         .font(.system(size: tableFontSize))
-        .textSelection(.enabled)
     }
 }
 
@@ -196,11 +204,9 @@ private struct FollowUpView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(followUp.question)
-                .foregroundStyle(.orange)
+            SelectableText(followUp.question, size: fontSize, color: .systemOrange)
             if !followUp.answer.isEmpty {
-                Text(Self.rendered(followUp.answer))
-                    .lineSpacing(3)
+                SelectableText(Self.rendered(followUp.answer), size: fontSize, lineSpacing: 3)
             } else if followUp.error == nil, isLast, analyzer.isAnswering {
                 ProgressView()
                     .controlSize(.small)
@@ -216,7 +222,6 @@ private struct FollowUpView: View {
             }
         }
         .font(.system(size: fontSize))
-        .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
