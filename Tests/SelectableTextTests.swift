@@ -66,9 +66,15 @@ final class SelectableTextTests: XCTestCase {
     func testJishoButtonLooksUpTheSelection() throws {
         try select(NSRange(location: 0, length: 6))
         snapshot("text-selected")
-        // Centred over the word, above it.
-        click(x: 45, y: 24)
-        XCTAssertEqual(model.lookedUp, ["school"])
+        // Over the word, above it; against the left edge, which the word is
+        // too close to for the button to be centred on it.
+        let view = try textView()
+        let frame = view.convert(view.bounds, to: nil)
+        click(x: 45, y: 140 - frame.maxY - 16)
+        XCTAssertEqual(
+            model.lookedUp, ["school"],
+            "text at \(frame), selected \(view.selectedRange()), first responder \(String(describing: window.firstResponder))"
+        )
     }
 
     func testNoSelectionNoButton() throws {
@@ -113,6 +119,8 @@ final class SelectableTextTests: XCTestCase {
         let view = try textView()
         window.makeFirstResponder(view)
         view.setSelectedRange(range)
+        // The button is a few updates behind the selection.
+        pump()
         pump()
     }
 
