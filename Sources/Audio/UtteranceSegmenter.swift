@@ -20,8 +20,9 @@ struct UtteranceSegmenter {
         /// Silence kept after the last speech frame. The full silence timeout
         /// is not sent: Whisper tends to hallucinate over trailing silence.
         var postRoll: TimeInterval = 0.3
-        /// Utterances with less speech than this are dropped. A door slam or a
-        /// cough is a few frames; transcribing it yields an invented sentence.
+        /// Utterances whose speech lasted less than this are dropped. A door
+        /// slam or a cough is a few frames; transcribing it yields an invented
+        /// sentence.
         var minSpeech: TimeInterval = 0.3
     }
 
@@ -38,7 +39,7 @@ struct UtteranceSegmenter {
     private var utteranceFrames: [Data] = []
     private var isActive = false
     private var utteranceID = 0
-    private var speechFrames = 0
+    private var firstSpeechIndex = 0
     private var lastSpeechIndex = 0
     private var framesSincePartial = 0
 
@@ -59,8 +60,8 @@ struct UtteranceSegmenter {
             isActive = true
             utteranceFrames = preRollFrames + [frame]
             preRollFrames = []
-            speechFrames = 1
-            lastSpeechIndex = utteranceFrames.count - 1
+            firstSpeechIndex = utteranceFrames.count - 1
+            lastSpeechIndex = firstSpeechIndex
             // Due immediately, so the first partial appears as soon as there
             // is enough audio to be worth transcribing.
             framesSincePartial = AudioFormat.frameCount(seconds: config.partialInterval)
@@ -70,7 +71,6 @@ struct UtteranceSegmenter {
         utteranceFrames.append(frame)
         framesSincePartial += 1
         if isSpeech {
-            speechFrames += 1
             lastSpeechIndex = utteranceFrames.count - 1
         }
 
@@ -81,7 +81,10 @@ struct UtteranceSegmenter {
             return [finish()]
         }
 
-        if utteranceFrames.count >= AudioFormat.frameCount(seconds: config.minPartialAudio),
+        // No partial for an utterance that could still be discarded: text that
+        // has been on screen must not vanish without a caption taking its place.
+        if hasEnoughSpeech,
+           utteranceFrames.count >= AudioFormat.frameCount(seconds: config.minPartialAudio),
            framesSincePartial >= AudioFormat.frameCount(seconds: config.partialInterval) {
             framesSincePartial = 0
             let window = utteranceFrames.suffix(AudioFormat.frameCount(seconds: config.partialWindow))
@@ -90,13 +93,21 @@ struct UtteranceSegmenter {
         return []
     }
 
+    /// Measured from the first speech frame to the last, not by counting
+    /// speech frames. Over a music bed the VAD's threshold sits so high that
+    /// only the peaks of a spoken sentence clear it, and a count would mistake
+    /// the whole sentence for a cough.
+    private var hasEnoughSpeech: Bool {
+        lastSpeechIndex - firstSpeechIndex + 1 >= AudioFormat.frameCount(seconds: config.minSpeech)
+    }
+
     private mutating func finish() -> Event {
         defer {
             utteranceID += 1
             isActive = false
             utteranceFrames = []
         }
-        guard speechFrames >= AudioFormat.frameCount(seconds: config.minSpeech) else {
+        guard hasEnoughSpeech else {
             return .discarded(utterance: utteranceID)
         }
         let end = min(

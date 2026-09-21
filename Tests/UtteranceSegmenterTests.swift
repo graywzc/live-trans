@@ -62,6 +62,30 @@ final class UtteranceSegmenterTests: XCTestCase {
         XCTAssertEqual(events, [.discarded(utterance: 0)])
     }
 
+    /// Over a music bed only the peaks of a sentence clear the VAD threshold.
+    /// That is still a sentence, however few frames were flagged.
+    func testSparseSpeechFramesAreNotMistakenForNoise() {
+        var events: [UtteranceSegmenter.Event] = []
+        for _ in 0..<4 {
+            events += feed(seconds: 0.03, speech: true)
+            events += feed(seconds: 0.27, speech: false)
+        }
+        events += feed(seconds: 1, speech: false)
+        guard case .final? = events.last else {
+            return XCTFail("expected a final, got \(String(describing: events.last))")
+        }
+    }
+
+    /// A partial puts text on screen. An utterance that ends up discarded must
+    /// never have shown any, or the text vanishes with nothing to replace it.
+    func testNoPartialForAnUtteranceThatIsDiscarded() {
+        // Long enough to reach the first partial, during the trailing silence.
+        feed(seconds: 2, speech: false)
+        var events = feed(seconds: 0.24, speech: true)
+        events += feed(seconds: 1, speech: false)
+        XCTAssertEqual(events, [.started(utterance: 0), .discarded(utterance: 0)])
+    }
+
     func testUtteranceNumbersAdvance() {
         feed(seconds: 0.09, speech: true)
         feed(seconds: 1, speech: false)

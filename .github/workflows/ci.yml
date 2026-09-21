@@ -18,7 +18,18 @@ jobs:
           xcodegen generate
 
       - name: Build and test
+        env:
+          # The GUI tests draw their windows to PNGs here.
+          TEST_RUNNER_SNAPSHOT_DIR: ${{ runner.temp }}/snapshots
         run: |
+          mkdir -p "${TEST_RUNNER_SNAPSHOT_DIR}"
           xcodebuild test -project LiveTrans.xcodeproj -scheme LiveTrans \
             -destination platform=macOS -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
+
+      - name: Upload GUI snapshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-snapshots
+          path: ${{ runner.temp }}/snapshots

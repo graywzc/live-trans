@@ -116,11 +116,12 @@ private struct TextBox: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let view = notification.object as? BoxView else { return }
-            let selected = view.selected
             if isUpdating {
-                DispatchQueue.main.async { [onSelect] in onSelect(selected) }
+                // The selection as it is by then, not as it is now: one made in
+                // between would otherwise be reported and then taken back.
+                DispatchQueue.main.async { [onSelect, weak view] in onSelect(view?.selected) }
             } else {
-                onSelect(selected)
+                onSelect(view.selected)
             }
         }
     }
