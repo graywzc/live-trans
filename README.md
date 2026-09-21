@@ -155,8 +155,17 @@ sentence in the same panel as Jisho (the switch at the top of the panel flips
 between the two): the sentence with its readings, a Chinese translation, then a
 table with a row per word giving its dictionary form, how that became the form
 in the sentence (食べる → 可能形 → 否定 → 过去), and what it means here. Rows
-appear as the model writes them, and a word in the analyzed sentence can be
-selected and looked up on Jisho like one in a caption.
+appear as the model writes them.
+
+Anything in the panel can be selected: the sentence, the translation, a cell of
+the table, part of an answer. The **Jisho** button over the selection works
+here too, but the entry comes from the LLM instead of jisho.org and is added
+under the table: set out like a Jisho entry, in Chinese, with the word's
+dictionary form and reading, its meanings with an example each (本句 marks the
+one it has in this sentence), and the grammar in what was selected, such as the
+steps of a conjugation. It also explains what Jisho can't, like a grammar term
+in an answer, and an entry's own text can be looked up in turn. It is as
+reliable as the model is; jisho.org is a selection in a caption away.
 
 To ask more about the sentence (why は and not が, what else a word can mean,
 how to say it more politely), type in the field at the bottom of the panel and
@@ -180,9 +189,10 @@ Nothing about an analysis is remembered. The app calls the inference server
 directly and each request holds the instructions and that one sentence, never
 an earlier sentence or answer. A follow-up question is the one exception to
 "or answer": the server keeps no conversation, so the app sends what the panel
-shows about the current sentence with it. The analysis and its questions exist
-only in the panel until the next sentence replaces them: they are not cached,
-not written to disk, and not part of the exported transcript. Give the address of the inference server itself; an
+shows about the current sentence with it. A lookup sends the selected text and
+the sentence. The analysis with its questions and entries exists only in the
+panel until the next sentence replaces it: nothing is cached, written to disk,
+or part of the exported transcript. Give the address of the inference server itself; an
 agent or a memory layer in front of it would see the traffic. Whether the
 server logs its requests (vLLM's `--enable-log-requests`) is up to its own
 configuration.

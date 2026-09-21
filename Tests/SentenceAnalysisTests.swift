@@ -149,6 +149,7 @@ final class FollowUpTests: XCTestCase {
         ScriptedServer.requests = []
         ScriptedServer.answers = []
         ScriptedServer.analyses = []
+        ScriptedServer.entries = []
     }
 
     private func analyze(_ japanese: String, id: Int) async throws {
@@ -159,7 +160,7 @@ final class FollowUpTests: XCTestCase {
     }
 
     private func settle() async throws {
-        for _ in 0..<200 where analyzer.phase == .running || analyzer.isAnswering {
+        for _ in 0..<200 where analyzer.isBusy {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
     }
@@ -227,9 +228,70 @@ final class FollowUpTests: XCTestCase {
     }
 }
 
+extension FollowUpTests {
+    private static let entry = #"{"head": "最初", "r": "さいしょ", "tags": []}"# + "\n"
+        + #"{"pos": "名词", "def": "最初；起初", "here": true}"#
+
+    func testLookupsGoIntoTheThreadWithTheQuestions() async throws {
+        analyzer.lookUp("还没有句子")
+        XCTAssertTrue(analyzer.lookups.isEmpty)
+
+        try await analyze("最初", id: 1)
+        ScriptedServer.entries = [Self.entry, #"{"grammar": "名词", "explain": "…"}"#]
+        ScriptedServer.answers = ["回答"]
+        analyzer.lookUp(" 最初\n")
+        XCTAssertEqual(analyzer.lookingUp, 0)
+        // Neither waits for the other.
+        XCTAssertTrue(analyzer.canAsk)
+        analyzer.ask("问题")
+        try await settle()
+        analyzer.lookUp("名词")
+        try await settle()
+
+        XCTAssertEqual(analyzer.thread.map(\.id), [0, 1, 2])
+        XCTAssertEqual(analyzer.lookups.map(\.text), ["最初", "名词"])
+        XCTAssertEqual(analyzer.lookups[0].entries.first?.senses.map(\.definition), ["最初；起初"])
+        XCTAssertEqual(analyzer.lookups[1].grammar.map(\.form), ["名词"])
+        XCTAssertEqual(analyzer.followUps.map(\.answer), ["回答"])
+        XCTAssertNil(analyzer.lookingUp)
+
+        // The selection and the sentence, and nothing of the thread.
+        XCTAssertEqual(try contents(ofRequest: 3), [LookupFormat.instructions, "句子：最初\n选中的文字：名词"])
+
+        try await analyze("次", id: 2)
+        XCTAssertTrue(analyzer.thread.isEmpty)
+    }
+
+    func testAFailedLookupCanBeRetried() async throws {
+        try await analyze("最初", id: 1)
+        ScriptedServer.entries = ["好的，以下是词条。"]
+        analyzer.lookUp("最初")
+        try await settle()
+        XCTAssertNotNil(analyzer.lookups.first?.error)
+
+        ScriptedServer.entries = [Self.entry]
+        analyzer.retryLookup(0)
+        try await settle()
+        XCTAssertEqual(analyzer.lookups.count, 1)
+        XCTAssertNil(analyzer.lookups[0].error)
+        XCTAssertEqual(analyzer.lookups[0].entries.map(\.headword), ["最初"])
+    }
+
+    func testTheNextLookupStopsTheOneBeingWritten() async throws {
+        try await analyze("最初", id: 1)
+        ScriptedServer.entries = [Self.entry, Self.entry]
+        analyzer.lookUp("最")
+        analyzer.lookUp("初")
+        XCTAssertEqual(analyzer.lookingUp, 1)
+        try await settle()
+        XCTAssertNil(analyzer.lookups[0].error)
+        XCTAssertEqual(analyzer.lookups[1].entries.count, 1)
+    }
+}
+
 /// Answers each request with the next of `answers`, streamed the way an
-/// OpenAI-compatible server does; HTTP 500 once they run out. An analysis and
-/// a question draw from separate scripts: a cancelled question may or may not
+/// OpenAI-compatible server does; HTTP 500 once they run out. An analysis, a
+/// lookup and a question draw from separate scripts: a cancelled question may or may not
 /// reach the server before the analysis that replaced it, and must not be able
 /// to take its answer.
 private final class ScriptedServer: URLProtocol {
@@ -237,6 +299,7 @@ private final class ScriptedServer: URLProtocol {
     private static var _requests: [Data] = []
     private static var _answers: [String] = []
     private static var _analyses: [String] = []
+    private static var _entries: [String] = []
 
     static var requests: [Data] {
         get { lock.withLock { _requests } }
@@ -251,11 +314,21 @@ private final class ScriptedServer: URLProtocol {
         set { lock.withLock { _analyses = newValue } }
     }
 
+    static var entries: [String] {
+        get { lock.withLock { _entries } }
+        set { lock.withLock { _entries = newValue } }
+    }
+
     private static func take(for body: Data) -> String? {
         lock.withLock {
             _requests.append(body)
-            let isAnalysis = String(decoding: body, as: UTF8.self).contains("JSON")
-            if isAnalysis {
+            let text = String(decoding: body, as: UTF8.self)
+            // JSON escapes what is not ASCII, or may.
+            let isLookup = text.contains("jisho.org")
+            if isLookup {
+                return _entries.isEmpty ? nil : _entries.removeFirst()
+            }
+            if text.contains("JSON") {
                 return _analyses.isEmpty ? nil : _analyses.removeFirst()
             }
             return _answers.isEmpty ? nil : _answers.removeFirst()
@@ -341,6 +414,41 @@ final class AnalysisPanelTests: XCTestCase {
         XCTAssertTrue(analyzer.ruby.contains(RubyToken(base: "辛", reading: "から")))
         try await Task.sleep(nanoseconds: 300_000_000)
         snapshot(window, "analysis-done")
+
+        // Select the word in its row of the table, as a drag over it would,
+        // and click the button that comes up over it.
+        func textViews(in view: NSView) -> [NSTextView] {
+            ((view as? NSTextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews)
+        }
+        let cell = try XCTUnwrap(textViews(in: try XCTUnwrap(window.contentView)).first { $0.string == "食べられなかった" })
+        window.makeFirstResponder(cell)
+        cell.setSelectedRange(NSRange(location: 0, length: cell.string.utf16.count))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        snapshot(window, "lookup-selected")
+        let frame = cell.convert(cell.bounds, to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            NSApp.postEvent(try XCTUnwrap(NSEvent.mouseEvent(
+                with: type, location: NSPoint(x: frame.midX - 20, y: frame.maxY + 17), modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+            )), atStart: false)
+        }
+        while let event = NSApp.nextEvent(
+            matching: .any, until: Date().addingTimeInterval(0.1), inMode: .default, dequeue: true
+        ) {
+            NSApp.sendEvent(event)
+        }
+        XCTAssertNotNil(analyzer.lookingUp)
+        for _ in 0..<600 where analyzer.lookingUp != nil {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let lookup = try XCTUnwrap(analyzer.lookups.first)
+        XCTAssertEqual(lookup.text, "食べられなかった")
+        XCTAssertNil(lookup.error)
+        XCTAssertEqual(lookup.entries.first?.headword, "食べる")
+        XCTAssertFalse(lookup.grammar.isEmpty)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        snapshot(window, "lookup-done")
 
         analyzer.ask("「辛くて」的て在这里是什么用法？能换成「辛いから」吗？")
         XCTAssertTrue(analyzer.isAnswering)

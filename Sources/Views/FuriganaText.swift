@@ -56,7 +56,11 @@ struct FuriganaText: View {
                 let map = map(anchors, in: proxy)
                 PointerTracker(
                     onDown: { point, clicks in pointerDown(at: point, clicks: clicks, map: map) },
-                    onDrag: { point in pointerDragged(to: point, map: map) }
+                    onDrag: { point in pointerDragged(to: point, map: map) },
+                    onResign: {
+                        anchor = nil
+                        if selection != nil { selection = nil }
+                    }
                 )
             }
         }
@@ -102,8 +106,9 @@ struct FuriganaText: View {
 
 }
 
-/// The selection of a FuriganaText somewhere below, for `selectionActions`.
-private struct SelectedText {
+/// The selection of a FuriganaText or a SelectableText somewhere below, for
+/// `selectionActions`.
+struct SelectedText {
     let text: String
     let bounds: Anchor<CGRect>
 
@@ -121,7 +126,10 @@ extension View {
     /// this view. It belongs to the container and not to the text because it
     /// reaches outside its caption, where a row of a lazy stack is neither
     /// clickable nor safe from being drawn over by the next row.
-    func selectionActions(onLookUp: @escaping (String) -> Void) -> some View {
+    func selectionActions(
+        lookUpHelp: @escaping (String) -> String = { "Look up \($0) on jisho.org" },
+        onLookUp: @escaping (String) -> Void
+    ) -> some View {
         overlayPreferenceValue(SelectedText.Key.self) { selected in
             GeometryReader { proxy in
                 if let selected {
@@ -129,7 +137,9 @@ extension View {
                     // Nothing to point at once the selection is scrolled away.
                     if rect.maxY > 0, rect.minY < proxy.size.height {
                         Color.clear.overlay(alignment: .topLeading) {
-                            SelectionActions(text: selected.text, onLookUp: onLookUp)
+                            SelectionActions(
+                                text: selected.text, help: lookUpHelp(selected.text), onLookUp: onLookUp
+                            )
                                 .fixedSize()
                                 .alignmentGuide(.leading) { size in
                                     // Centred on the selection, but not past either edge.
@@ -150,6 +160,7 @@ extension View {
 
 private struct SelectionActions: View {
     let text: String
+    let help: String
     let onLookUp: (String) -> Void
 
     var body: some View {
@@ -159,7 +170,7 @@ private struct SelectionActions: View {
             } label: {
                 Label("Jisho", systemImage: "character.book.closed")
             }
-            .help("Look up \(text) on jisho.org")
+            .help(help)
             Divider()
                 .frame(height: 12)
             Button {
@@ -188,6 +199,8 @@ private struct SelectionActions: View {
 private struct PointerTracker: NSViewRepresentable {
     let onDown: (CGPoint, Int) -> Void
     let onDrag: (CGPoint) -> Void
+    /// Something else in the window was clicked: other text, a text field.
+    let onResign: () -> Void
 
     func makeNSView(context: Context) -> TrackerView {
         TrackerView()
@@ -196,11 +209,13 @@ private struct PointerTracker: NSViewRepresentable {
     func updateNSView(_ view: TrackerView, context: Context) {
         view.onDown = onDown
         view.onDrag = onDrag
+        view.onResign = onResign
     }
 
     final class TrackerView: NSView {
         var onDown: (CGPoint, Int) -> Void = { _, _ in }
         var onDrag: (CGPoint) -> Void = { _ in }
+        var onResign: () -> Void = {}
 
         // Top-left origin, as in SwiftUI.
         override var isFlipped: Bool { true }
@@ -210,7 +225,18 @@ private struct PointerTracker: NSViewRepresentable {
         // the click that selects must not be spent on activating the window.
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+        // The text clicked last is the first responder, as a text view would
+        // be, and the one before it hears that its selection is over: a
+        // SelectableText's, or another caption's.
+        override var acceptsFirstResponder: Bool { true }
+
+        override func resignFirstResponder() -> Bool {
+            onResign()
+            return true
+        }
+
         override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
             onDown(convert(event.locationInWindow, from: nil), event.clickCount)
         }
 
