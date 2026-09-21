@@ -37,7 +37,8 @@ struct UtteranceSegmenter {
 
     private var preRollFrames: [Data] = []
     private var utteranceFrames: [Data] = []
-    private var isActive = false
+    /// An utterance is open: from its first speech frame until its final.
+    private(set) var isActive = false
     private var utteranceID = 0
     private var firstSpeechIndex = 0
     private var lastSpeechIndex = 0
