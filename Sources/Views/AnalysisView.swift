@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// One sentence taken apart by the LLM: the sentence with its readings, the
-/// Chinese translation, then a row per word. Rows appear as they arrive.
+/// Chinese translation, then a row per word. Rows appear as they arrive. Under
+/// them, the questions asked about the sentence in the field at the bottom.
 struct AnalysisView: View {
     static let symbol = "text.magnifyingglass"
 
@@ -11,6 +12,7 @@ struct AnalysisView: View {
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
 
     @State private var selection: Range<Int>?
+    @FocusState private var questionIsFocused: Bool
 
     private var tableFontSize: CGFloat { max(fontSize * 0.7, 13) }
 
@@ -38,6 +40,27 @@ struct AnalysisView: View {
     }
 
     private var analysis: some View {
+        VStack(spacing: 0) {
+            GeometryReader { viewport in
+                ScrollViewReader { scroller in
+                    thread(viewportHeight: viewport.size.height)
+                        // The question goes to the top, with its answer
+                        // growing into the room under it.
+                        .onChange(of: analyzer.followUps.last?.id) { _, asked in
+                            guard let asked else { return }
+                            withAnimation { scroller.scrollTo(asked, anchor: .top) }
+                        }
+                }
+            }
+            Divider()
+            questionField
+        }
+        .foregroundStyle(.white)
+        // The selection is a range of the sentence that was showing.
+        .onChange(of: analyzer.sentence) { selection = nil }
+    }
+
+    private func thread(viewportHeight: CGFloat) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 // Readings always: they are the point here, whatever the
@@ -61,6 +84,20 @@ struct AnalysisView: View {
                     }
                     .font(.callout)
                 }
+                ForEach(analyzer.followUps) { followUp in
+                    Divider()
+                    FollowUpView(
+                        followUp: followUp, fontSize: tableFontSize,
+                        isLast: followUp.id == analyzer.followUps.last?.id
+                    )
+                    // Room for the newest question to reach the top of the
+                    // panel before its answer has been written.
+                    .frame(
+                        minHeight: followUp.id == analyzer.followUps.last?.id ? viewportHeight - 45 : nil,
+                        alignment: .top
+                    )
+                    .id(followUp.id)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
@@ -70,9 +107,40 @@ struct AnalysisView: View {
             jisho.search(text)
             panel.show(.jisho)
         }
-        .foregroundStyle(.white)
-        // The selection is a range of the sentence that was showing.
-        .onChange(of: analyzer.sentence) { selection = nil }
+    }
+
+    private var questionField: some View {
+        @Bindable var analyzer = analyzer
+        return HStack(alignment: .bottom, spacing: 8) {
+            TextField("Ask about this sentence", text: $analyzer.draft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...5)
+                .focused($questionIsFocused)
+                .onSubmit(ask)
+            Button(action: ask) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: tableFontSize * 1.3))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(canSend ? Color.accentColor : .gray)
+            .disabled(!canSend)
+            .help("Ask (Return)")
+        }
+        .font(.system(size: tableFontSize))
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+    }
+
+    private var canSend: Bool {
+        analyzer.canAsk && !analyzer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The question stays in the field if it can't be asked yet.
+    private func ask() {
+        guard canSend else { return }
+        analyzer.ask(analyzer.draft)
+        analyzer.draft = ""
+        questionIsFocused = true
     }
 
     private var table: some View {
@@ -116,5 +184,50 @@ struct AnalysisView: View {
         }
         .font(.system(size: tableFontSize))
         .textSelection(.enabled)
+    }
+}
+
+private struct FollowUpView: View {
+    @Environment(SentenceAnalyzer.self) private var analyzer
+
+    let followUp: FollowUp
+    let fontSize: CGFloat
+    let isLast: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(followUp.question)
+                .foregroundStyle(.orange)
+            if !followUp.answer.isEmpty {
+                Text(Self.rendered(followUp.answer))
+                    .lineSpacing(3)
+            } else if followUp.error == nil, isLast, analyzer.isAnswering {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            if let error = followUp.error {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .font(.callout)
+                if isLast {
+                    Button("Try Again", action: analyzer.retryFollowUp)
+                        .font(.callout)
+                }
+            }
+        }
+        .font(.system(size: fontSize))
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Bold, italics and code as such; lists and line breaks as written. An
+    /// answer that is still arriving, with its markup half open, reads as text.
+    private static func rendered(_ answer: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace, failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        // Inline-only parsing leaves a list's markers as typed.
+        let bulleted = answer.replacing(/(?m)^(\s*)[*-] +/) { "\($0.1)•  " }
+        return (try? AttributedString(markdown: bulleted, options: options)) ?? AttributedString(answer)
     }
 }

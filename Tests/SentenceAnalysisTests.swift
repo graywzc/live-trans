@@ -80,6 +80,43 @@ final class SentenceAnalysisTests: XCTestCase {
         XCTAssertEqual(client.session.configuration.urlCache?.diskCapacity ?? 0, 0)
     }
 
+    /// A follow-up carries what the panel shows about this sentence, and the
+    /// questions already asked about it, since the server has kept neither.
+    func testFollowUpCarriesTheAnalysisAndTheEarlierQuestions() throws {
+        let all = events(from: answer, pieceLength: 50)
+        let earlier = [
+            FollowUp(id: 0, question: "为什么用は？", raw: "<think>は…</think>\n表示**对比**。"),
+            FollowUp(id: 1, question: "没有回答的问题", error: "timed out"),
+        ]
+        let messages = FollowUpFormat.messages(
+            asking: "那が呢？", after: earlier, sentence: sentence, chinese: "昨天没能吃。", words: words(all)
+        )
+        XCTAssertEqual(messages.map { $0["role"] }, ["system", "user", "assistant", "user"])
+        let context = try XCTUnwrap(messages[0]["content"])
+        XCTAssertTrue(context.hasPrefix(FollowUpFormat.instructions))
+        XCTAssertTrue(context.contains("句子：\(sentence)"))
+        XCTAssertTrue(context.contains("翻译：昨天没能吃。"))
+        XCTAssertTrue(context.contains("食べられなかった｜たべられなかった｜食べる｜动词｜食べる → 可能形 → 否定 → 过去｜没能吃"))
+        XCTAssertTrue(context.contains("昨日｜きのう｜昨日｜名词｜—｜昨天"))
+        XCTAssertFalse(context.contains("。｜"))
+        XCTAssertEqual(messages[1]["content"], "为什么用は？")
+        XCTAssertEqual(messages[2]["content"], "表示**对比**。")
+        XCTAssertEqual(messages[3]["content"], "那が呢？")
+
+        let client = AnalysisClient(baseURL: URL(string: "http://gpu:8020/v1")!, model: "qwen")
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: XCTUnwrap(client.request(messages: messages).httpBody)) as? [String: Any]
+        )
+        XCTAssertEqual(body["messages"] as? [[String: String]], messages)
+    }
+
+    func testThinkingIsNotPartOfAnAnswer() {
+        XCTAssertEqual(FollowUpFormat.visible("表示对比。\n"), "表示对比。")
+        XCTAssertEqual(FollowUpFormat.visible("<think>\nは or が"), "")
+        XCTAssertEqual(FollowUpFormat.visible("<think>\nは or が\n</think>\n\n表示对比。"), "表示对比。")
+        XCTAssertEqual(FollowUpFormat.visible("「<think>」不是日语。"), "「<think>」不是日语。")
+    }
+
     func testTheLLMsReadingsGoOverTheKanji() throws {
         let tokens = try XCTUnwrap(Furigana.annotate(sentence, words: words(events(from: answer, pieceLength: 50))))
         XCTAssertEqual(tokens.map(\.base), ["昨日", "は", "食", "べられなかった", "。"])
@@ -96,6 +133,165 @@ final class SentenceAnalysisTests: XCTestCase {
         romanized[0].reading = "kinou"
         XCTAssertEqual(Furigana.annotate(sentence, words: romanized)?.first, RubyToken(base: "昨日"))
     }
+}
+
+/// The analyzer against a server that answers from a script.
+@MainActor
+final class FollowUpTests: XCTestCase {
+    private var analyzer: SentenceAnalyzer!
+
+    override func setUp() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ScriptedServer.self]
+        var client = AnalysisClient(baseURL: URL(string: "http://gpu:8020/v1")!, model: "qwen")
+        client.session = URLSession(configuration: configuration)
+        analyzer = SentenceAnalyzer { client }
+        ScriptedServer.requests = []
+        ScriptedServer.answers = []
+        ScriptedServer.analyses = []
+    }
+
+    private func analyze(_ japanese: String, id: Int) async throws {
+        ScriptedServer.analyses.append(#"{"zh": "译文"}"# + "\n" + #"{"w": "\#(japanese)", "r": "", "base": "\#(japanese)", "pos": "名词", "change": "", "meaning": "意思"}"#)
+        analyzer.analyze(Caption(id: id, japanese: japanese, ruby: [], english: ""))
+        try await settle()
+        XCTAssertEqual(analyzer.phase, .done)
+    }
+
+    private func settle() async throws {
+        for _ in 0..<200 where analyzer.phase == .running || analyzer.isAnswering {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private func contents(ofRequest index: Int) throws -> [String] {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: ScriptedServer.requests[index]) as? [String: Any])
+        return try XCTUnwrap(body["messages"] as? [[String: String]]).compactMap { $0["content"] }
+    }
+
+    func testQuestionsAreAnsweredInTurnAndGoWithTheSentence() async throws {
+        analyzer.ask("还没有句子")
+        XCTAssertTrue(analyzer.followUps.isEmpty)
+
+        try await analyze("最初", id: 1)
+        ScriptedServer.answers = ["第一个**回答**", "第二个回答"]
+        analyzer.ask("  第一个问题\n")
+        XCTAssertTrue(analyzer.isAnswering)
+        XCTAssertFalse(analyzer.canAsk)
+        try await settle()
+        analyzer.ask("第二个问题")
+        try await settle()
+        XCTAssertEqual(analyzer.followUps.map(\.question), ["第一个问题", "第二个问题"])
+        XCTAssertEqual(analyzer.followUps.map(\.answer), ["第一个**回答**", "第二个回答"])
+        XCTAssertEqual(analyzer.followUps.map(\.id), [0, 1])
+
+        let second = try contents(ofRequest: 2)
+        XCTAssertTrue(second[0].contains("句子：最初"))
+        XCTAssertEqual(Array(second.dropFirst()), ["第一个问题", "第一个**回答**", "第二个问题"])
+
+        // The next sentence starts from nothing.
+        try await analyze("次", id: 2)
+        XCTAssertTrue(analyzer.followUps.isEmpty)
+        ScriptedServer.answers = ["第三个回答"]
+        analyzer.ask("第三个问题")
+        try await settle()
+        let third = try contents(ofRequest: 4)
+        XCTAssertEqual(third.count, 2)
+        XCTAssertTrue(third[0].contains("句子：次"))
+        XCTAssertFalse(third.joined().contains("最初"))
+        XCTAssertFalse(third.joined().contains("第一个"))
+    }
+
+    func testAFailedQuestionCanBeAskedAgain() async throws {
+        try await analyze("最初", id: 1)
+        analyzer.ask("问题")
+        try await settle()
+        XCTAssertNotNil(analyzer.followUps.first?.error)
+        XCTAssertTrue(analyzer.canAsk)
+
+        ScriptedServer.answers = ["回答"]
+        analyzer.retryFollowUp()
+        try await settle()
+        XCTAssertEqual(analyzer.followUps.map(\.answer), ["回答"])
+        XCTAssertNil(analyzer.followUps[0].error)
+        XCTAssertEqual(try contents(ofRequest: 2).last, "问题")
+    }
+
+    func testAnotherSentenceStopsTheAnswer() async throws {
+        try await analyze("最初", id: 1)
+        ScriptedServer.answers = ["回答"]
+        analyzer.ask("问题")
+        try await analyze("次", id: 2)
+        XCTAssertFalse(analyzer.isAnswering)
+        XCTAssertTrue(analyzer.followUps.isEmpty)
+    }
+}
+
+/// Answers each request with the next of `answers`, streamed the way an
+/// OpenAI-compatible server does; HTTP 500 once they run out. An analysis and
+/// a question draw from separate scripts: a cancelled question may or may not
+/// reach the server before the analysis that replaced it, and must not be able
+/// to take its answer.
+private final class ScriptedServer: URLProtocol {
+    private static let lock = NSLock()
+    private static var _requests: [Data] = []
+    private static var _answers: [String] = []
+    private static var _analyses: [String] = []
+
+    static var requests: [Data] {
+        get { lock.withLock { _requests } }
+        set { lock.withLock { _requests = newValue } }
+    }
+    static var answers: [String] {
+        get { lock.withLock { _answers } }
+        set { lock.withLock { _answers = newValue } }
+    }
+    static var analyses: [String] {
+        get { lock.withLock { _analyses } }
+        set { lock.withLock { _analyses = newValue } }
+    }
+
+    private static func take(for body: Data) -> String? {
+        lock.withLock {
+            _requests.append(body)
+            let isAnalysis = String(decoding: body, as: UTF8.self).contains("JSON")
+            if isAnalysis {
+                return _analyses.isEmpty ? nil : _analyses.removeFirst()
+            }
+            return _answers.isEmpty ? nil : _answers.removeFirst()
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        // URLSession hands a protocol the body as a stream.
+        var body = Data()
+        if let stream = request.httpBodyStream {
+            stream.open()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                body.append(buffer, count: count)
+            }
+        }
+        let answer = Self.take(for: body)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: answer == nil ? 500 : 200, httpVersion: nil,
+            headerFields: ["Content-Type": "text/event-stream"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        for piece in (answer ?? "").map(String.init) {
+            let chunk = try! JSONSerialization.data(withJSONObject: ["choices": [["delta": ["content": piece]]]])
+            client?.urlProtocol(self, didLoad: Data("data: ".utf8) + chunk + Data("\n\n".utf8))
+        }
+        client?.urlProtocol(self, didLoad: Data("data: [DONE]\n\n".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 /// The panel as it is drawn, fed by the real server when there is one:
@@ -145,6 +341,32 @@ final class AnalysisPanelTests: XCTestCase {
         XCTAssertTrue(analyzer.ruby.contains(RubyToken(base: "辛", reading: "から")))
         try await Task.sleep(nanoseconds: 300_000_000)
         snapshot(window, "analysis-done")
+
+        analyzer.ask("「辛くて」的て在这里是什么用法？能换成「辛いから」吗？")
+        XCTAssertTrue(analyzer.isAnswering)
+        var snappedAnswer = false
+        for _ in 0..<600 where analyzer.isAnswering {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            if !snappedAnswer, (analyzer.followUps.last?.answer.count ?? 0) >= 40 {
+                snappedAnswer = true
+                snapshot(window, "follow-up-streaming")
+            }
+        }
+        let first = try XCTUnwrap(analyzer.followUps.first)
+        XCTAssertNil(first.error)
+        XCTAssertFalse(first.answer.isEmpty)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        snapshot(window, "follow-up-done")
+
+        // Only makes sense to a model that was sent the first question.
+        analyzer.ask("用你刚才说的另一种说法，把整句重写一遍。")
+        for _ in 0..<600 where analyzer.isAnswering {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertEqual(analyzer.followUps.count, 2)
+        XCTAssertTrue(analyzer.followUps[1].answer.contains("から"))
+        try await Task.sleep(nanoseconds: 600_000_000)
+        snapshot(window, "follow-up-second")
     }
 
     private func snapshot(_ window: NSWindow, _ name: String) {

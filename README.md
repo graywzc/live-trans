@@ -158,6 +158,12 @@ in the sentence (食べる → 可能形 → 否定 → 过去), and what it mea
 appear as the model writes them, and a word in the analyzed sentence can be
 selected and looked up on Jisho like one in a caption.
 
+To ask more about the sentence (why は and not が, what else a word can mean,
+how to say it more politely), type in the field at the bottom of the panel and
+press Return. The answers collect under the table, and each question is sent
+along with the analysis on screen and the earlier questions about this
+sentence, so it can refer back to them.
+
 Under **Sentence analysis** in Settings, enter an OpenAI-compatible server
 (vLLM, llama.cpp's `llama-server`, or ollama) and a model:
 
@@ -172,9 +178,11 @@ machine than the one that translates the captions.
 
 Nothing about an analysis is remembered. The app calls the inference server
 directly and each request holds the instructions and that one sentence, never
-an earlier sentence or answer. The result exists only in the panel until the
-next one replaces it: it is not cached, not written to disk, and not part of
-the exported transcript. Give the address of the inference server itself; an
+an earlier sentence or answer. A follow-up question is the one exception to
+"or answer": the server keeps no conversation, so the app sends what the panel
+shows about the current sentence with it. The analysis and its questions exist
+only in the panel until the next sentence replaces them: they are not cached,
+not written to disk, and not part of the exported transcript. Give the address of the inference server itself; an
 agent or a memory layer in front of it would see the traffic. Whether the
 server logs its requests (vLLM's `--enable-log-requests`) is up to its own
 configuration.
