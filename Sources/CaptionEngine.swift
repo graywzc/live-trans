@@ -199,14 +199,16 @@ final class CaptionEngine {
     }
 
     private func process(_ frame: Data, client: ASRClient) {
-        let isSpeech = vad.isSpeech(frame)
+        let isSpeech = vad.isSpeech(frame, inUtterance: segmenter.isActive)
         frameCount += 1
         if frameCount % 3 == 0 {
             // ~10 Hz is plenty for a level meter, and for picking up a
             // sensitivity change made in Settings while captioning.
             vad.speechRatio = AppSettings.speechRatio
             inputLevel = vad.lastRMS
-            speechThreshold = vad.threshold
+            // The bar a frame has to clear right now, so the mark steps down
+            // while an utterance is open.
+            speechThreshold = segmenter.isActive ? vad.continuationThreshold : vad.threshold
         }
 
         for event in segmenter.process(frame: frame, isSpeech: isSpeech) {
@@ -217,6 +219,11 @@ final class CaptionEngine {
                 requestPartial(audio, utterance: utterance, client: client)
             case .final(let audio, let utterance):
                 isSpeaking = false
+                let seconds = Double(audio.count / AudioFormat.frameBytes) * AudioFormat.frameDuration
+                print(String(
+                    format: "utterance %d: %.1f s, noise floor %.0f, threshold %.0f",
+                    utterance, seconds, vad.noiseFloor ?? 0, vad.threshold
+                ))
                 finals?.yield((id: utterance, audio: audio))
             case .discarded(let utterance):
                 isSpeaking = false

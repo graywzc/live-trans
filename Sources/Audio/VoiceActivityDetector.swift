@@ -12,15 +12,34 @@ struct VoiceActivityDetector {
     /// Never treat anything quieter than this as speech, however silent the
     /// room is; otherwise the faintest rustle clears a near-zero floor.
     var minimumThreshold: Float = 60
+    /// Inside an utterance the bar drops to this fraction of `speechRatio`
+    /// (about -4 dB). A sentence is not evenly loud: what has to stand out to
+    /// open an utterance is its loudest syllable, and the soft words and the
+    /// trailing particle after it should not read as the speaker stopping.
+    var continuationFactor: Float = 0.6
+    /// However sensitive the setting, continuing still takes a frame clearly
+    /// above the floor, or the background alone would hold an utterance open.
+    var minimumContinuationRatio: Float = 1.5
+    /// How long an unbroken run of speech frames may hold the floor still.
+    /// Talking pauses for breath well within this; a fan never does.
+    var floorHold: TimeInterval = 5.0
 
     private(set) var noiseFloor: Float?
     private(set) var lastRMS: Float = 0
+    private var speechRun = 0
 
+    /// What a frame must exceed to open an utterance.
     var threshold: Float {
         max(minimumThreshold, (noiseFloor ?? 0) * speechRatio)
     }
 
-    mutating func isSpeech(_ frame: Data) -> Bool {
+    /// What a frame must exceed to count as speech once an utterance is open.
+    var continuationThreshold: Float {
+        let ratio = min(speechRatio, max(minimumContinuationRatio, speechRatio * continuationFactor))
+        return max(minimumThreshold, (noiseFloor ?? 0) * ratio)
+    }
+
+    mutating func isSpeech(_ frame: Data, inUtterance: Bool = false) -> Bool {
         let rms = Self.rms(frame)
         lastRMS = rms
 
@@ -33,14 +52,22 @@ struct VoiceActivityDetector {
         }
         if rms < floor {
             // The gaps between words drop to the true floor, so follow
-            // quickly on the way down ...
+            // quickly on the way down.
             noiseFloor = floor + (rms - floor) * 0.2
-        } else {
-            // ... and creep up slowly (doubling takes ~10 s), so speech itself
-            // doesn't raise the bar but a fan switching on eventually does.
+        }
+        let isSpeech = rms > (inUtterance ? continuationThreshold : threshold)
+        speechRun = isSpeech ? speechRun + 1 : 0
+
+        // On the way up, creep slowly (doubling takes ~10 s), so a fan
+        // switching on eventually becomes the floor. Not while someone is
+        // talking, though: a monologue over a music bed never dips below the
+        // floor, and would otherwise raise the bar on its own next sentence
+        // by 6% a second.
+        let held = speechRun > 0 && speechRun <= AudioFormat.frameCount(seconds: floorHold)
+        if rms >= floor, !held {
             noiseFloor = max(floor, 1) * 1.002
         }
-        return rms > threshold
+        return isSpeech
     }
 
     /// RMS on the int16 scale (0...32768).

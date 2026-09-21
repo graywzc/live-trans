@@ -48,6 +48,34 @@ final class VoiceActivityDetectorTests: XCTestCase {
         }
         XCTAssertFalse(vad.isSpeech(frame(amplitude: 400)))
     }
+
+    /// The soft end of a sentence is too quiet to open an utterance, but must
+    /// not read as the speaker having stopped.
+    func testQuieterSpeechCountsOnceAnUtteranceIsOpen() {
+        var vad = VoiceActivityDetector()
+        for _ in 0..<100 {
+            _ = vad.isSpeech(frame(amplitude: 100))
+        }
+        XCTAssertFalse(vad.isSpeech(frame(amplitude: 250)))
+        XCTAssertTrue(vad.isSpeech(frame(amplitude: 250), inUtterance: true))
+        // The background itself never does, however sensitive the setting.
+        vad.speechRatio = 1.8
+        XCTAssertFalse(vad.isSpeech(frame(amplitude: 120), inUtterance: true))
+    }
+
+    /// Over a music bed nothing dips below the floor, so a floor that rose
+    /// through a sentence would make the next one harder to hear.
+    func testTalkingDoesNotRaiseTheFloor() {
+        var vad = VoiceActivityDetector()
+        for _ in 0..<100 {
+            _ = vad.isSpeech(frame(amplitude: 100))
+        }
+        let before = vad.threshold
+        for _ in 0..<AudioFormat.frameCount(seconds: 4) {
+            XCTAssertTrue(vad.isSpeech(frame(amplitude: 1500), inUtterance: true))
+        }
+        XCTAssertEqual(vad.threshold, before)
+    }
 }
 
 final class FuriganaTests: XCTestCase {
