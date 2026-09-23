@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 struct ContentView: View {
     @Environment(CaptionEngine.self) private var engine
@@ -50,6 +51,7 @@ struct ContentView: View {
         HStack(spacing: 16) {
             StatusPill(status: engine.status)
             Spacer()
+            VideoControls()
             if !engine.captions.isEmpty {
                 ShareLink(item: engine.transcript) {
                     Image(systemName: "square.and.arrow.up")
@@ -187,6 +189,227 @@ struct ContentView: View {
             .keyboardShortcut(.return, modifiers: .command)
         }
         .padding()
+    }
+}
+
+/// Play/pause and 5-second skips for the video in Chrome.
+private struct VideoControls: View {
+    @Environment(ChromeVideo.self) private var video
+
+    var body: some View {
+        HStack(spacing: 12) {
+            TabPicker()
+            Button {
+                video.send(.skip(seconds: -5))
+            } label: {
+                Image(systemName: "gobackward.5")
+            }
+            .help("Back 5 seconds in the Chrome video")
+            Button {
+                video.send(.toggle)
+            } label: {
+                Image(systemName: playSymbol)
+                    .frame(width: 18)
+            }
+            .help("Play or pause the Chrome video (Space)")
+            Button {
+                video.send(.skip(seconds: 5))
+            } label: {
+                Image(systemName: "goforward.5")
+            }
+            .help("Forward 5 seconds in the Chrome video")
+        }
+        .background(SpaceKey { video.send(.toggle) })
+        .alert(
+            "Can't control the video",
+            isPresented: Binding { video.problem != nil } set: { if !$0 { video.problem = nil } }
+        ) {
+            Button("OK") {}
+        } message: {
+            Text(video.problem ?? "")
+        }
+    }
+
+    /// What clicking would do, as on a player's own button.
+    private var playSymbol: String {
+        switch video.state {
+        case .playing: "pause.fill"
+        case .paused: "play.fill"
+        case .unknown: "playpause.fill"
+        }
+    }
+}
+
+/// Space plays and pauses, as in a video player, except where Space types:
+/// an editable text view (the follow-up box, any field being edited) or the
+/// Jisho page, whose search box can't be told apart from the outside.
+struct SpaceKey: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        MonitorView()
+    }
+
+    func updateNSView(_ view: MonitorView, context: Context) {
+        view.action = action
+    }
+
+    static func typesSpace(_ responder: NSResponder?) -> Bool {
+        if let text = responder as? NSTextView, text.isEditable { return true }
+        var view = responder as? NSView
+        while let current = view {
+            if current is WKWebView { return true }
+            view = current.superview
+        }
+        return false
+    }
+
+    final class MonitorView: NSView {
+        var action: () -> Void = {}
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let window = self.window, event.window === window,
+                      event.keyCode == 49,
+                      event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock).isEmpty,
+                      !SpaceKey.typesSpace(window.firstResponder)
+                else { return event }
+                if !event.isARepeat { self.action() }
+                return nil
+            }
+        }
+    }
+}
+
+/// Which Chrome tab the video buttons control: found automatically, or
+/// chosen from all of Chrome's tabs.
+private struct TabPicker: View {
+    @Environment(ChromeVideo.self) private var video
+    @State private var isOpen = false
+
+    var body: some View {
+        Button {
+            isOpen.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: video.pinned == nil ? "sparkle.magnifyingglass" : "pin.fill")
+                Text(label)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 160, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
+                Image(systemName: "chevron.down")
+                    .font(.caption2)
+            }
+            .font(.caption)
+            .foregroundStyle(.gray)
+        }
+        .help("Choose which Chrome tab the video buttons control")
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+            TabList { isOpen = false }
+        }
+    }
+
+    private var label: String {
+        if let pinned = video.pinned { return pinned.title }
+        if let linked = video.linked { return "Auto: \(linked.title)" }
+        return "Auto"
+    }
+}
+
+private struct TabList: View {
+    @Environment(ChromeVideo.self) private var video
+    let dismiss: () -> Void
+
+    var body: some View {
+        let windows = Dictionary(grouping: video.tabs, by: \.window)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                row(
+                    title: "Automatic", detail: "The front tab of a Chrome window that has a video",
+                    symbol: "sparkle.magnifyingglass", isChosen: video.pinned == nil
+                ) {
+                    video.pin(nil)
+                }
+                if video.isLoadingTabs, video.tabs.isEmpty {
+                    ProgressView().controlSize(.small).padding(8)
+                }
+                ForEach(windows.keys.sorted(), id: \.self) { window in
+                    Divider().padding(.vertical, 4)
+                    Text("Window \(window)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                    ForEach(windows[window] ?? []) { tab in
+                        row(
+                            title: tab.title.isEmpty ? tab.url : tab.title,
+                            detail: Self.detail(tab),
+                            symbol: Self.symbol(tab),
+                            isChosen: video.pinned?.id == tab.id
+                        ) {
+                            video.pin(tab)
+                        }
+                    }
+                }
+            }
+            .padding(6)
+        }
+        .frame(width: 380)
+        .frame(maxHeight: 480)
+        .fixedSize(horizontal: false, vertical: true)
+        .onAppear(perform: video.refreshTabs)
+    }
+
+    private func row(
+        title: String, detail: String, symbol: String, isChosen: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            action()
+            dismiss()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .frame(width: 16)
+                    .foregroundStyle(symbol == "circle" ? .clear : .orange)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).lineLimit(1)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if isChosen {
+                    Image(systemName: "checkmark")
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private static func symbol(_ tab: ChromeScript.Tab) -> String {
+        switch tab.video {
+        case .playing: "play.fill"
+        case .paused: "pause.fill"
+        default: "circle"
+        }
+    }
+
+    private static func detail(_ tab: ChromeScript.Tab) -> String {
+        let host = URL(string: tab.url)?.host() ?? tab.url
+        return switch tab.video {
+        case .playing: "\(host) · playing"
+        case .paused: "\(host) · paused"
+        default: host
+        }
     }
 }
 

@@ -18,6 +18,7 @@ struct LiveTransApp: App {
                 .environment(delegate.jisho)
                 .environment(delegate.analyzer)
                 .environment(delegate.panel)
+                .environment(delegate.video)
                 .task {
                     if UserDefaults.standard.bool(forKey: AppSettings.autoStart) {
                         delegate.engine.start()
@@ -38,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let jisho = JishoBrowser()
     let analyzer = SentenceAnalyzer()
     let panel = SidePanel()
+    let video = ChromeVideo()
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
