@@ -111,10 +111,15 @@ struct SidePanelView: View {
                 Image(systemName: "stop.fill")
             }
             .help(
-                analyzer.phase == .running ? "Stop the analysis"
+                analyzer.analyzing != nil ? "Stop the analysis"
                     : analyzer.isAnswering ? "Stop the answer" : "Stop the lookup"
             )
         }
+        Button(action: analyzer.clear) {
+            Image(systemName: "trash")
+        }
+        .disabled(analyzer.analyses.isEmpty)
+        .help("Clear the analyses, and start the questions over")
     }
 }
 

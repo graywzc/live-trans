@@ -80,7 +80,7 @@ struct ContentView: View {
                         CaptionRow(
                             caption: caption, showFurigana: showFurigana, fontSize: fontSize,
                             isAnalyzed: panel.isPresented && panel.tab == .analysis
-                                && analyzer.captionID == caption.id,
+                                && analyzer.hasAnalyzed(caption),
                             selection: selectionBinding(for: caption),
                             onAnalyze: { analyze(caption) }
                         )
@@ -199,7 +199,7 @@ struct CaptionRow: View {
     let caption: Caption
     let showFurigana: Bool
     let fontSize: Double
-    /// The side panel is showing this caption's analysis.
+    /// The side panel has this caption's analysis.
     let isAnalyzed: Bool
     @Binding var selection: Range<Int>?
     let onAnalyze: () -> Void

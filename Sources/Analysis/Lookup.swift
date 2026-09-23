@@ -34,6 +34,8 @@ struct GrammarPoint: Equatable, Identifiable {
 struct Lookup: Equatable, Identifiable {
     let id: Int
     let text: String
+    /// The sentence it was selected while reading, which goes along with it.
+    var sentence = ""
     var entries: [DictionaryEntry] = []
     var grammar: [GrammarPoint] = []
     var error: String?
