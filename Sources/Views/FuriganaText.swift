@@ -175,6 +175,8 @@ private struct SelectionActions: View {
                 onLookUp(text)
             } label: {
                 Label("Jisho", systemImage: "character.book.closed")
+                    // All of it clicks, not just the strokes of its glyphs.
+                    .contentShape(Rectangle())
             }
             .help(help)
             if let onGrammar {
@@ -184,6 +186,7 @@ private struct SelectionActions: View {
                     onGrammar(text)
                 } label: {
                     Label("Grammar", systemImage: "text.book.closed")
+                        .contentShape(Rectangle())
                 }
                 .disabled(!canAskGrammar)
                 .opacity(canAskGrammar ? 1 : 0.4)
@@ -196,6 +199,7 @@ private struct SelectionActions: View {
                 NSPasteboard.general.setString(text, forType: .string)
             } label: {
                 Image(systemName: "doc.on.doc")
+                    .contentShape(Rectangle())
             }
             .help("Copy")
         }

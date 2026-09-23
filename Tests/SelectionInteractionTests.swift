@@ -86,8 +86,8 @@ final class SelectionInteractionTests: XCTestCase {
         click(x: 110, y: 82, count: 2)
         XCTAssertEqual(model.selection, 4..<6)
         snapshot("selected")
-        // Over 学校 and its reading, held in from the left edge.
-        click(x: 40, y: 48)
+        // On "Jisho", at the pill's left end.
+        click(x: 55, y: 44)
         XCTAssertEqual(model.lookedUp, ["学校"])
     }
 
@@ -95,7 +95,7 @@ final class SelectionInteractionTests: XCTestCase {
         click(x: 110, y: 82, count: 2)
         snapshot("grammar")
         // Between Jisho and Copy.
-        click(x: 120, y: 48)
+        click(x: 125, y: 44)
         XCTAssertEqual(model.grammar, ["学校"])
         XCTAssertTrue(model.lookedUp.isEmpty)
     }
