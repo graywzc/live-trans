@@ -26,6 +26,11 @@ enum FollowUpFormat {
         - 可以使用粗体和列表，不要使用标题、表格和代码块。
         """
 
+    /// The question the Grammar button asks about a selection.
+    static func grammarQuestion(about text: String) -> String {
+        "「\(text)」在这句话里是什么语法？请说明它的接续、含义和用法。"
+    }
+
     /// The system message: the instructions, then what the panel is showing.
     static func context(sentence: String, chinese: String, words: [AnalyzedWord]) -> String {
         var lines = [instructions, "", "句子：\(sentence)"]

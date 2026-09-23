@@ -114,8 +114,12 @@ struct AnalysisView: View {
         }
         // The button a caption's selection gets, but the entry is the LLM's
         // and stays here: what is selected in an explanation is as often a
-        // form or a term as a word, and jisho.org has the captions.
-        .selectionActions(lookUpHelp: { "Look up \($0) with the LLM" }, onLookUp: analyzer.lookUp)
+        // form or a term as a word, and jisho.org has the captions. Grammar
+        // asks about it as a question, so it can be asked about further.
+        .selectionActions(
+            lookUpHelp: { "Look up \($0) with the LLM" }, onLookUp: analyzer.lookUp,
+            canAskGrammar: analyzer.canAsk, onGrammar: analyzer.askAboutGrammar
+        )
     }
 
     private var questionField: some View {
