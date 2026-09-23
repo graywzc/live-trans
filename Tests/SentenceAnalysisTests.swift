@@ -277,12 +277,12 @@ final class FollowUpTests: XCTestCase {
     func testACaptionAnalyzedBeforeIsShownNotAnalyzedAgain() async throws {
         try await analyze("最初", id: 1)
         try await analyze("次", id: 2)
-        XCTAssertNil(analyzer.revealed)
+        XCTAssertEqual(analyzer.revealed, SentenceAnalyzer.Reveal(id: 1, serial: 2))
         analyzer.analyze(Caption(id: 1, japanese: "最初", ruby: [], english: ""))
-        XCTAssertEqual(analyzer.revealed?.id, 0)
+        XCTAssertEqual(analyzer.revealed, SentenceAnalyzer.Reveal(id: 0, serial: 3))
         XCTAssertFalse(analyzer.isBusy)
         analyzer.analyze(Caption(id: 1, japanese: "最初", ruby: [], english: ""))
-        XCTAssertEqual(analyzer.revealed, SentenceAnalyzer.Reveal(id: 0, serial: 2))
+        XCTAssertEqual(analyzer.revealed, SentenceAnalyzer.Reveal(id: 0, serial: 4))
         XCTAssertEqual(analyzer.analyses.count, 2)
         XCTAssertEqual(ScriptedServer.requests.count, 2)
         XCTAssertTrue(analyzer.hasAnalyzed(Caption(id: 2, japanese: "次", ruby: [], english: "")))
@@ -394,6 +394,65 @@ extension FollowUpTests {
         try await settle()
         XCTAssertNil(analyzer.lookups[0].error)
         XCTAssertEqual(analyzer.lookups[1].entries.count, 1)
+    }
+}
+
+extension FollowUpTests {
+    /// The panel shows the sentence just added even when it wasn't there to
+    /// see it added: it was on the Jisho tab, and comes back as a new scroll
+    /// view, which would start at the top, at the first sentence.
+    func testTheNewestSentenceIsInViewAfterComingBackFromJisho() async throws {
+        let panel = SidePanel()
+        panel.show(.analysis)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: SidePanelView()
+            .environment(analyzer).environment(panel).environment(JishoBrowser())
+            .frame(width: 480, height: 360)
+            .background(Color.black))
+        window.orderFrontRegardless()
+        defer { window.close() }
+
+        // Tall enough to fill the panel on its own.
+        let rows = (1...12).map { #"{"w": "語\#($0)", "r": "ご", "base": "語", "pos": "名词", "change": "", "meaning": "词"}"# }
+        ScriptedServer.analyses = [([#"{"zh": "第一句的译文"}"#] + rows).joined(separator: "\n")]
+        analyzer.analyze(Caption(id: 1, japanese: "最初", ruby: [], english: ""))
+        try await settle()
+        pump()
+        panel.show(.jisho)
+        pump()
+        ScriptedServer.analyses = [#"{"zh": "第二句的译文"}"#]
+        analyzer.analyze(Caption(id: 2, japanese: "次", ruby: [], english: ""))
+        panel.show(.analysis)
+        try await settle()
+        pump()
+
+        func text(_ string: String) throws -> NSTextView {
+            func textViews(in view: NSView) -> [NSTextView] {
+                ((view as? NSTextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews)
+            }
+            return try XCTUnwrap(textViews(in: XCTUnwrap(window.contentView)).first { $0.string == string })
+        }
+        // Where in the window, since the scroll view clips without the text
+        // views knowing.
+        let bounds = try XCTUnwrap(window.contentView).bounds
+        func isShown(_ string: String) throws -> Bool {
+            let view = try text(string)
+            return bounds.contains(view.convert(view.bounds, to: nil))
+        }
+        XCTAssertTrue(try isShown("第二句的译文"))
+        XCTAssertFalse(try isShown("第一句的译文"))
+    }
+
+    private func pump() {
+        while let event = NSApp.nextEvent(
+            matching: .any, until: Date().addingTimeInterval(0.2), inMode: .default, dequeue: true
+        ) {
+            NSApp.sendEvent(event)
+        }
     }
 }
 

@@ -34,10 +34,13 @@ struct AnalysisView: View {
                     thread(viewportHeight: viewport.size.height)
                         // The sentence, the question or the looked-up text
                         // goes to the top, with what is written about it
-                        // growing into the room under it.
-                        .onChange(of: analyzer.thread.last?.id) { _, asked in
-                            guard let asked else { return }
-                            withAnimation { scroller.scrollTo(asked, anchor: .top) }
+                        // growing into the room under it. Also when this
+                        // view was not there to see it added: the panel was
+                        // closed, or showing Jisho, and a new scroll view
+                        // starts at the top, at the first sentence.
+                        .onAppear {
+                            guard let revealed = analyzer.revealed else { return }
+                            scroller.scrollTo(revealed.id, anchor: .top)
                         }
                         .onChange(of: analyzer.revealed) { _, revealed in
                             guard let revealed else { return }

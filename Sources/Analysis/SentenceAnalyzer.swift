@@ -116,8 +116,9 @@ final class SentenceAnalyzer {
     private(set) var analyzing: Int?
     /// The lookup whose entry is being written.
     private(set) var lookingUp: Int?
-    /// An item already in the thread to bring into view: a caption analyzed
-    /// before, clicked again.
+    /// The item to have in view: the one last added, or a caption analyzed
+    /// before, clicked again. Kept here for the view to go back to when it
+    /// comes back, from the Jisho tab or a closed panel, having missed it.
     private(set) var revealed: Reveal?
     /// The question being typed. Here rather than in the view, which is gone
     /// while the panel shows Jisho: looking a word up doesn't lose the question.
@@ -185,13 +186,18 @@ final class SentenceAnalyzer {
             case .failed, .unconfigured: run(existing.id)
             case .running, .done: break
             }
-            revealed = Reveal(id: existing.id, serial: (revealed?.serial ?? 0) + 1)
+            reveal(existing.id)
             return
         }
         let id = nextID
         nextID += 1
         analyses.append(Analysis(id: id, captionID: caption.id, sentence: caption.japanese, tokenizerRuby: caption.ruby))
+        reveal(id)
         run(id)
+    }
+
+    private func reveal(_ id: Int) {
+        revealed = Reveal(id: id, serial: (revealed?.serial ?? 0) + 1)
     }
 
     /// Run a sentence again: after a failure, or a change in Settings.
@@ -263,6 +269,7 @@ final class SentenceAnalyzer {
         let messages = FollowUpFormat.messages(asking: question, after: thread)
         let index = followUps.count
         followUps.append(FollowUp(id: nextID, question: question))
+        reveal(nextID)
         nextID += 1
         guard let client = makeClient() else {
             followUps[index].error = "No LLM server is set in Settings."
@@ -325,6 +332,7 @@ final class SentenceAnalyzer {
         let id = nextID
         nextID += 1
         lookups.append(Lookup(id: id, text: text, sentence: sentence))
+        reveal(id)
         guard let client = makeClient() else {
             lookups[lookups.count - 1].error = "No LLM server is set in Settings."
             lookingUp = nil
