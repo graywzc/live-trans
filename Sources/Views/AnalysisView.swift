@@ -87,11 +87,15 @@ struct AnalysisView: View {
                     // The button a caption's selection gets, but the entry is
                     // the LLM's and stays here: what is selected in an
                     // explanation is as often a form or a term as a word, and
-                    // jisho.org has the captions. It is about the sentence the
-                    // selection is under.
-                    .selectionActions(lookUpHelp: { "Look up \($0) with the LLM" }) {
-                        analyzer.lookUp($0, under: item.id)
-                    }
+                    // jisho.org has the captions. Grammar asks about it as a
+                    // question, so it can be asked about further. Both are
+                    // about the sentence the selection is under.
+                    .selectionActions(
+                        lookUpHelp: { "Look up \($0) with the LLM" },
+                        onLookUp: { analyzer.lookUp($0, under: item.id) },
+                        canAskGrammar: analyzer.canAsk,
+                        onGrammar: { analyzer.askAboutGrammar($0, under: item.id) }
+                    )
                     // Room for the newest one to reach the top of the panel
                     // before anything has been written under it.
                     .frame(

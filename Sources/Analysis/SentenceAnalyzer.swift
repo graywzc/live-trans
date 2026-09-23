@@ -288,6 +288,15 @@ final class SentenceAnalyzer {
         }
     }
 
+    /// Ask how text selected in the panel works grammatically in the sentence
+    /// it is under (see `lookUp`). A question like any other, so the answer
+    /// is there to ask further about.
+    func askAboutGrammar(_ text: String, under itemID: Int? = nil) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let sentence = sentence(under: itemID) else { return }
+        ask(FollowUpFormat.grammarQuestion(about: text, in: sentence))
+    }
+
     /// Ask the last question again, after it failed.
     func retryFollowUp() {
         guard !isAnswering, let last = followUps.last, last.error != nil else { return }
@@ -302,9 +311,13 @@ final class SentenceAnalyzer {
     /// the thread. One at a time; the one before keeps what it has.
     func lookUp(_ text: String, under itemID: Int? = nil) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let analysis = analyses.last { $0.id <= itemID ?? .max } ?? analyses.first
-        guard !text.isEmpty, let sentence = analysis?.sentence else { return }
+        guard !text.isEmpty, let sentence = sentence(under: itemID) else { return }
         lookUp(text, in: sentence)
+    }
+
+    /// That of the analysis at or before the item, the newest without one.
+    private func sentence(under itemID: Int?) -> String? {
+        (analyses.last { $0.id <= itemID ?? .max } ?? analyses.first)?.sentence
     }
 
     private func lookUp(_ text: String, in sentence: String) {

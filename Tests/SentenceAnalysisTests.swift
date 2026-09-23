@@ -217,6 +217,30 @@ final class FollowUpTests: XCTestCase {
         XCTAssertEqual(third.last, "第三个问题")
     }
 
+    func testGrammarIsAskedAsAQuestionAboutTheSelection() async throws {
+        analyzer.askAboutGrammar("食べて")
+        XCTAssertTrue(analyzer.followUps.isEmpty)
+
+        try await analyze("最初", id: 1)
+        ScriptedServer.answers = ["て形"]
+        analyzer.askAboutGrammar(" 食べて\n")
+        try await settle()
+        XCTAssertEqual(
+            analyzer.followUps.map(\.question), [FollowUpFormat.grammarQuestion(about: "食べて", in: "最初")]
+        )
+        XCTAssertEqual(analyzer.followUps.first?.answer, "て形")
+        let request = try contents(ofRequest: 1)
+        XCTAssertEqual(request[1], "句子：最初")
+        XCTAssertTrue(request.last!.contains("「食べて」"))
+
+        // Selected under the first of two sentences, it names the first.
+        try await analyze("次", id: 2)
+        ScriptedServer.answers = ["名词"]
+        analyzer.askAboutGrammar("最初", under: 0)
+        try await settle()
+        XCTAssertEqual(analyzer.followUps.last?.question, FollowUpFormat.grammarQuestion(about: "最初", in: "最初"))
+    }
+
     func testAFailedQuestionCanBeAskedAgain() async throws {
         try await analyze("最初", id: 1)
         analyzer.ask("问题")

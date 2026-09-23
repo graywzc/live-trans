@@ -123,12 +123,15 @@ struct SelectedText {
 
 extension View {
     /// Floats a Jisho button over the text selected in any FuriganaText inside
-    /// this view. It belongs to the container and not to the text because it
+    /// this view, and a Grammar button beside it when there is `onGrammar`;
+    /// `canAskGrammar` greys it out while a question can't be asked. It belongs to the container and not to the text because it
     /// reaches outside its caption, where a row of a lazy stack is neither
     /// clickable nor safe from being drawn over by the next row.
     func selectionActions(
         lookUpHelp: @escaping (String) -> String = { "Look up \($0) on jisho.org" },
-        onLookUp: @escaping (String) -> Void
+        onLookUp: @escaping (String) -> Void,
+        canAskGrammar: Bool = true,
+        onGrammar: ((String) -> Void)? = nil
     ) -> some View {
         overlayPreferenceValue(SelectedText.Key.self) { selected in
             GeometryReader { proxy in
@@ -138,7 +141,8 @@ extension View {
                     if rect.maxY > 0, rect.minY < proxy.size.height {
                         Color.clear.overlay(alignment: .topLeading) {
                             SelectionActions(
-                                text: selected.text, help: lookUpHelp(selected.text), onLookUp: onLookUp
+                                text: selected.text, help: lookUpHelp(selected.text), onLookUp: onLookUp,
+                                canAskGrammar: canAskGrammar, onGrammar: onGrammar
                             )
                                 .fixedSize()
                                 .alignmentGuide(.leading) { size in
@@ -162,6 +166,8 @@ private struct SelectionActions: View {
     let text: String
     let help: String
     let onLookUp: (String) -> Void
+    let canAskGrammar: Bool
+    let onGrammar: ((String) -> Void)?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -169,8 +175,23 @@ private struct SelectionActions: View {
                 onLookUp(text)
             } label: {
                 Label("Jisho", systemImage: "character.book.closed")
+                    // All of it clicks, not just the strokes of its glyphs.
+                    .contentShape(Rectangle())
             }
             .help(help)
+            if let onGrammar {
+                Divider()
+                    .frame(height: 12)
+                Button {
+                    onGrammar(text)
+                } label: {
+                    Label("Grammar", systemImage: "text.book.closed")
+                        .contentShape(Rectangle())
+                }
+                .disabled(!canAskGrammar)
+                .opacity(canAskGrammar ? 1 : 0.4)
+                .help(canAskGrammar ? "Ask about the grammar of \(text)" : "Wait for the analysis or answer to finish")
+            }
             Divider()
                 .frame(height: 12)
             Button {
@@ -178,6 +199,7 @@ private struct SelectionActions: View {
                 NSPasteboard.general.setString(text, forType: .string)
             } label: {
                 Image(systemName: "doc.on.doc")
+                    .contentShape(Rectangle())
             }
             .help("Copy")
         }
