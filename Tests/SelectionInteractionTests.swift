@@ -10,6 +10,7 @@ final class SelectionInteractionTests: XCTestCase {
     final class Model {
         var selection: Range<Int>?
         var lookedUp: [String] = []
+        var grammar: [String] = []
     }
 
     struct Host: View {
@@ -32,7 +33,7 @@ final class SelectionInteractionTests: XCTestCase {
                 }
                 .padding(.horizontal, 16)
             }
-            .selectionActions { model.lookedUp.append($0) }
+            .selectionActions(onLookUp: { model.lookedUp.append($0) }, onGrammar: { model.grammar.append($0) })
             .foregroundStyle(.white)
             .frame(width: 400, height: 140)
             .background(Color.black)
@@ -85,9 +86,18 @@ final class SelectionInteractionTests: XCTestCase {
         click(x: 110, y: 82, count: 2)
         XCTAssertEqual(model.selection, 4..<6)
         snapshot("selected")
-        // Centred over 学校, above its reading.
-        click(x: 100, y: 48)
+        // Over 学校 and its reading, held in from the left edge.
+        click(x: 40, y: 48)
         XCTAssertEqual(model.lookedUp, ["学校"])
+    }
+
+    func testGrammarButtonAsksAboutTheSelection() {
+        click(x: 110, y: 82, count: 2)
+        snapshot("grammar")
+        // Between Jisho and Copy.
+        click(x: 120, y: 48)
+        XCTAssertEqual(model.grammar, ["学校"])
+        XCTAssertTrue(model.lookedUp.isEmpty)
     }
 
     private func click(x: CGFloat, y: CGFloat, count: Int = 1) {

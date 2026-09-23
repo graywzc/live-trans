@@ -249,6 +249,14 @@ final class SentenceAnalyzer {
         }
     }
 
+    /// Ask how text selected in the panel works grammatically in the sentence.
+    /// A question like any other, so the answer is there to ask further about.
+    func askAboutGrammar(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        ask(FollowUpFormat.grammarQuestion(about: text))
+    }
+
     /// Ask the last question again, after it failed.
     func retryFollowUp() {
         guard !isAnswering, let last = followUps.last, last.error != nil else { return }
