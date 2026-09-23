@@ -149,3 +149,34 @@ extension Furigana {
         (0x3041...0x309F).contains(scalar.value) || (0x30A0...0x30FF).contains(scalar.value)
     }
 }
+
+/// One caption's sentence taken apart, as far as it has got.
+struct Analysis: Equatable, Identifiable {
+    enum Phase: Equatable {
+        case running
+        case done
+        case failed(String)
+        /// No LLM server in Settings yet.
+        case unconfigured
+    }
+
+    /// Its place in the thread.
+    let id: Int
+    let captionID: Int
+    let sentence: String
+    /// The tokenizer's readings, the caption's.
+    let tokenizerRuby: [RubyToken]
+    var chinese = ""
+    var words: [AnalyzedWord] = []
+    var phase = Phase.running
+
+    var isEmpty: Bool {
+        chinese.isEmpty && words.isEmpty
+    }
+
+    /// The tokenizer's readings until the breakdown is complete, then the
+    /// LLM's if its words add up to the sentence.
+    var ruby: [RubyToken] {
+        (phase == .done ? Furigana.annotate(sentence, words: words) : nil) ?? tokenizerRuby
+    }
+}

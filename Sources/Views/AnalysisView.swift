@@ -1,40 +1,28 @@
 import SwiftUI
 
-/// One sentence taken apart by the LLM: the sentence with its readings, the
-/// Chinese translation, then a row per word. Rows appear as they arrive. Under
-/// them, the questions asked about the sentence in the field at the bottom,
-/// and an entry for each selection that was looked up. Any of the text can be
-/// selected and looked up, an entry's own included.
+/// The sentences taken apart by the LLM, one after another in one scroll:
+/// each with its readings, the Chinese translation, then a row per word, rows
+/// appearing as they arrive. In between, in the order they were asked, the
+/// questions asked in the field at the bottom, and an entry for each selection
+/// that was looked up. Any of the text can be selected and looked up, an
+/// entry's own included.
 struct AnalysisView: View {
     static let symbol = "text.magnifyingglass"
 
     @Environment(SentenceAnalyzer.self) private var analyzer
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
 
-    @State private var selection: Range<Int>?
     @FocusState private var questionIsFocused: Bool
 
     private var tableFontSize: CGFloat { max(fontSize * 0.7, 13) }
 
     var body: some View {
-        switch analyzer.phase {
-        case .idle:
+        if analyzer.analyses.isEmpty {
             ContentUnavailableView(
                 "Sentence analysis", systemImage: Self.symbol,
                 description: Text("Point at a caption and click the button at its end to have the sentence explained.")
             )
-        case .unconfigured:
-            ContentUnavailableView {
-                Label("No LLM server", systemImage: Self.symbol)
-            } description: {
-                Text("Enter the server and model to analyze sentences with under Sentence analysis in Settings.")
-            } actions: {
-                SettingsLink {
-                    Text("Open Settings")
-                }
-                Button("Try Again", action: analyzer.retry)
-            }
-        case .running, .done, .failed:
+        } else {
             analysis
         }
     }
@@ -44,12 +32,16 @@ struct AnalysisView: View {
             GeometryReader { viewport in
                 ScrollViewReader { scroller in
                     thread(viewportHeight: viewport.size.height)
-                        // The question or the looked-up text goes to the top,
-                        // with what is written about it growing into the room
-                        // under it.
+                        // The sentence, the question or the looked-up text
+                        // goes to the top, with what is written about it
+                        // growing into the room under it.
                         .onChange(of: analyzer.thread.last?.id) { _, asked in
                             guard let asked else { return }
                             withAnimation { scroller.scrollTo(asked, anchor: .top) }
+                        }
+                        .onChange(of: analyzer.revealed) { _, revealed in
+                            guard let revealed else { return }
+                            withAnimation { scroller.scrollTo(revealed.id, anchor: .top) }
                         }
                 }
             }
@@ -57,35 +49,27 @@ struct AnalysisView: View {
             questionField
         }
         .foregroundStyle(.white)
-        // The selection is a range of the sentence that was showing.
-        .onChange(of: analyzer.sentence) { selection = nil }
     }
 
     private func thread(viewportHeight: CGFloat) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                // Readings always: they are the point here, whatever the
-                // captions are set to.
-                FuriganaText(tokens: analyzer.ruby, fontSize: fontSize, selection: $selection)
-                if !analyzer.chinese.isEmpty {
-                    SelectableText(analyzer.chinese, size: fontSize * 0.82, color: .systemOrange)
-                }
-                if !analyzer.words.isEmpty {
-                    table
-                }
-                if case .failed(let message) = analyzer.phase {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label(message, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.red)
-                            .textSelection(.enabled)
-                        Button("Try Again", action: analyzer.retry)
+                ForEach(Array(analyzer.thread.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 {
+                        // A new sentence starts a new section.
+                        if case .analysis = item {
+                            Rectangle()
+                                .fill(.gray.opacity(0.6))
+                                .frame(height: 2)
+                                .padding(.vertical, 10)
+                        } else {
+                            Divider()
+                        }
                     }
-                    .font(.callout)
-                }
-                ForEach(analyzer.thread) { item in
-                    Divider()
                     Group {
                         switch item {
+                        case .analysis(let analysis):
+                            AnalysisSection(analysis: analysis, fontSize: fontSize, tableFontSize: tableFontSize)
                         case .followUp(let followUp):
                             FollowUpView(
                                 followUp: followUp, fontSize: tableFontSize,
@@ -100,6 +84,14 @@ struct AnalysisView: View {
                             }
                         }
                     }
+                    // The button a caption's selection gets, but the entry is
+                    // the LLM's and stays here: what is selected in an
+                    // explanation is as often a form or a term as a word, and
+                    // jisho.org has the captions. It is about the sentence the
+                    // selection is under.
+                    .selectionActions(lookUpHelp: { "Look up \($0) with the LLM" }) {
+                        analyzer.lookUp($0, under: item.id)
+                    }
                     // Room for the newest one to reach the top of the panel
                     // before anything has been written under it.
                     .frame(
@@ -112,16 +104,12 @@ struct AnalysisView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
         }
-        // The button a caption's selection gets, but the entry is the LLM's
-        // and stays here: what is selected in an explanation is as often a
-        // form or a term as a word, and jisho.org has the captions.
-        .selectionActions(lookUpHelp: { "Look up \($0) with the LLM" }, onLookUp: analyzer.lookUp)
     }
 
     private var questionField: some View {
         @Bindable var analyzer = analyzer
         return HStack(alignment: .bottom, spacing: 8) {
-            TextField("Ask about this sentence", text: $analyzer.draft, axis: .vertical)
+            TextField("Ask about the sentences", text: $analyzer.draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...5)
                 .focused($questionIsFocused)
@@ -151,6 +139,65 @@ struct AnalysisView: View {
         analyzer.draft = ""
         questionIsFocused = true
     }
+}
+
+/// One sentence of the thread: its readings, its translation, its words.
+private struct AnalysisSection: View {
+    @Environment(SentenceAnalyzer.self) private var analyzer
+
+    let analysis: Analysis
+    let fontSize: CGFloat
+    let tableFontSize: CGFloat
+
+    /// A range of this sentence.
+    @State private var selection: Range<Int>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Readings always: they are the point here, whatever the captions
+            // are set to.
+            FuriganaText(tokens: analysis.ruby, fontSize: fontSize, selection: $selection)
+            if !analysis.chinese.isEmpty {
+                SelectableText(analysis.chinese, size: fontSize * 0.82, color: .systemOrange)
+            }
+            if !analysis.words.isEmpty {
+                table
+            }
+            switch analysis.phase {
+            case .running:
+                if analysis.isEmpty {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            case .done:
+                EmptyView()
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                    Button("Try Again") { analyzer.retry(analysis.id) }
+                }
+                .font(.callout)
+            case .unconfigured:
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(
+                        "Enter the server and model to analyze sentences with under Sentence analysis in Settings.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .foregroundStyle(.orange)
+                    HStack {
+                        SettingsLink {
+                            Text("Open Settings")
+                        }
+                        Button("Try Again") { analyzer.retry(analysis.id) }
+                    }
+                }
+                .font(.callout)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
     private var table: some View {
         Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 8) {
@@ -165,7 +212,7 @@ struct AnalysisView: View {
             }
             .font(.system(size: tableFontSize * 0.85, weight: .semibold))
             .foregroundStyle(.gray)
-            ForEach(analyzer.words.filter { !$0.isPunctuation }) { word in
+            ForEach(analysis.words.filter { !$0.isPunctuation }) { word in
                 Divider()
                     .gridCellUnsizedAxes(.horizontal)
                 GridRow {

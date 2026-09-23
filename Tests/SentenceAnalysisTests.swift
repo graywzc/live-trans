@@ -80,28 +80,41 @@ final class SentenceAnalysisTests: XCTestCase {
         XCTAssertEqual(client.session.configuration.urlCache?.diskCapacity ?? 0, 0)
     }
 
-    /// A follow-up carries what the panel shows about this sentence, and the
-    /// questions already asked about it, since the server has kept neither.
-    func testFollowUpCarriesTheAnalysisAndTheEarlierQuestions() throws {
+    /// A follow-up carries what the panel shows: each sentence analyzed,
+    /// with the questions asked after it, since the server has kept none of it.
+    func testFollowUpCarriesTheAnalysesAndTheEarlierQuestions() throws {
         let all = events(from: answer, pieceLength: 50)
-        let earlier = [
-            FollowUp(id: 0, question: "为什么用は？", raw: "<think>は…</think>\n表示**对比**。"),
-            FollowUp(id: 1, question: "没有回答的问题", error: "timed out"),
+        var first = Analysis(id: 0, captionID: 3, sentence: sentence, tokenizerRuby: [])
+        first.chinese = "昨天没能吃。"
+        first.words = words(all)
+        first.phase = .done
+        var second = Analysis(id: 3, captionID: 4, sentence: "次", tokenizerRuby: [])
+        second.chinese = "下一个"
+        second.phase = .done
+        let thread: [SentenceAnalyzer.ThreadItem] = [
+            .analysis(first),
+            .followUp(FollowUp(id: 1, question: "为什么用は？", raw: "<think>は…</think>\n表示**对比**。")),
+            .lookup(Lookup(id: 2, text: "昨日", sentence: sentence)),
+            .analysis(second),
+            .followUp(FollowUp(id: 4, question: "没有回答的问题", error: "timed out")),
+            .analysis(Analysis(id: 5, captionID: 5, sentence: "失敗", tokenizerRuby: [], phase: .failed("timed out"))),
         ]
-        let messages = FollowUpFormat.messages(
-            asking: "那が呢？", after: earlier, sentence: sentence, chinese: "昨天没能吃。", words: words(all)
+        let messages = FollowUpFormat.messages(asking: "那が呢？", after: thread)
+        XCTAssertEqual(
+            messages.map { $0["role"] }, ["system", "user", "assistant", "user", "assistant", "user", "assistant", "user"]
         )
-        XCTAssertEqual(messages.map { $0["role"] }, ["system", "user", "assistant", "user"])
-        let context = try XCTUnwrap(messages[0]["content"])
-        XCTAssertTrue(context.hasPrefix(FollowUpFormat.instructions))
-        XCTAssertTrue(context.contains("句子：\(sentence)"))
-        XCTAssertTrue(context.contains("翻译：昨天没能吃。"))
-        XCTAssertTrue(context.contains("食べられなかった｜たべられなかった｜食べる｜动词｜食べる → 可能形 → 否定 → 过去｜没能吃"))
-        XCTAssertTrue(context.contains("昨日｜きのう｜昨日｜名词｜—｜昨天"))
-        XCTAssertFalse(context.contains("。｜"))
-        XCTAssertEqual(messages[1]["content"], "为什么用は？")
-        XCTAssertEqual(messages[2]["content"], "表示**对比**。")
-        XCTAssertEqual(messages[3]["content"], "那が呢？")
+        XCTAssertEqual(messages[0]["content"], FollowUpFormat.instructions)
+        XCTAssertEqual(messages[1]["content"], "句子：\(sentence)")
+        let breakdown = try XCTUnwrap(messages[2]["content"])
+        XCTAssertTrue(breakdown.hasPrefix("翻译：昨天没能吃。"))
+        XCTAssertTrue(breakdown.contains("食べられなかった｜たべられなかった｜食べる｜动词｜食べる → 可能形 → 否定 → 过去｜没能吃"))
+        XCTAssertTrue(breakdown.contains("昨日｜きのう｜昨日｜名词｜—｜昨天"))
+        XCTAssertFalse(breakdown.contains("。｜"))
+        XCTAssertEqual(messages[3]["content"], "为什么用は？")
+        XCTAssertEqual(messages[4]["content"], "表示**对比**。")
+        XCTAssertEqual(messages[5]["content"], "句子：次")
+        XCTAssertEqual(messages[6]["content"], "翻译：下一个")
+        XCTAssertEqual(messages[7]["content"], "那が呢？")
 
         let client = AnalysisClient(baseURL: URL(string: "http://gpu:8020/v1")!, model: "qwen")
         let body = try XCTUnwrap(
@@ -156,7 +169,7 @@ final class FollowUpTests: XCTestCase {
         ScriptedServer.analyses.append(#"{"zh": "译文"}"# + "\n" + #"{"w": "\#(japanese)", "r": "", "base": "\#(japanese)", "pos": "名词", "change": "", "meaning": "意思"}"#)
         analyzer.analyze(Caption(id: id, japanese: japanese, ruby: [], english: ""))
         try await settle()
-        XCTAssertEqual(analyzer.phase, .done)
+        XCTAssertEqual(analyzer.analyses.last?.phase, .done)
     }
 
     private func settle() async throws {
@@ -184,23 +197,24 @@ final class FollowUpTests: XCTestCase {
         try await settle()
         XCTAssertEqual(analyzer.followUps.map(\.question), ["第一个问题", "第二个问题"])
         XCTAssertEqual(analyzer.followUps.map(\.answer), ["第一个**回答**", "第二个回答"])
-        XCTAssertEqual(analyzer.followUps.map(\.id), [0, 1])
+        XCTAssertEqual(analyzer.followUps.map(\.id), [1, 2])
 
         let second = try contents(ofRequest: 2)
-        XCTAssertTrue(second[0].contains("句子：最初"))
-        XCTAssertEqual(Array(second.dropFirst()), ["第一个问题", "第一个**回答**", "第二个问题"])
+        XCTAssertEqual(second[1], "句子：最初")
+        XCTAssertEqual(Array(second.dropFirst(3)), ["第一个问题", "第一个**回答**", "第二个问题"])
 
-        // The next sentence starts from nothing.
+        // The next sentence joins the same conversation.
         try await analyze("次", id: 2)
-        XCTAssertTrue(analyzer.followUps.isEmpty)
+        XCTAssertEqual(analyzer.followUps.count, 2)
+        XCTAssertEqual(analyzer.thread.map(\.id), [0, 1, 2, 3])
         ScriptedServer.answers = ["第三个回答"]
         analyzer.ask("第三个问题")
         try await settle()
         let third = try contents(ofRequest: 4)
-        XCTAssertEqual(third.count, 2)
-        XCTAssertTrue(third[0].contains("句子：次"))
-        XCTAssertFalse(third.joined().contains("最初"))
-        XCTAssertFalse(third.joined().contains("第一个"))
+        XCTAssertEqual(third.count, 10)
+        XCTAssertEqual(third[1], "句子：最初")
+        XCTAssertEqual(third[7], "句子：次")
+        XCTAssertEqual(third.last, "第三个问题")
     }
 
     func testAFailedQuestionCanBeAskedAgain() async throws {
@@ -218,13 +232,73 @@ final class FollowUpTests: XCTestCase {
         XCTAssertEqual(try contents(ofRequest: 2).last, "问题")
     }
 
-    func testAnotherSentenceStopsTheAnswer() async throws {
+    func testAQuestionWaitsForTheSentenceBeingAnalyzed() async throws {
+        try await analyze("最初", id: 1)
+        ScriptedServer.analyses = [#"{"zh": "译文"}"#]
+        analyzer.analyze(Caption(id: 2, japanese: "次", ruby: [], english: ""))
+        XCTAssertFalse(analyzer.canAsk)
+        try await settle()
+        XCTAssertTrue(analyzer.canAsk)
+    }
+
+    func testAnotherSentenceDoesNotStopTheAnswer() async throws {
         try await analyze("最初", id: 1)
         ScriptedServer.answers = ["回答"]
         analyzer.ask("问题")
         try await analyze("次", id: 2)
-        XCTAssertFalse(analyzer.isAnswering)
-        XCTAssertTrue(analyzer.followUps.isEmpty)
+        XCTAssertEqual(analyzer.followUps.map(\.answer), ["回答"])
+        XCTAssertEqual(analyzer.analyses.map(\.sentence), ["最初", "次"])
+    }
+
+    func testACaptionAnalyzedBeforeIsShownNotAnalyzedAgain() async throws {
+        try await analyze("最初", id: 1)
+        try await analyze("次", id: 2)
+        XCTAssertNil(analyzer.revealed)
+        analyzer.analyze(Caption(id: 1, japanese: "最初", ruby: [], english: ""))
+        XCTAssertEqual(analyzer.revealed?.id, 0)
+        XCTAssertFalse(analyzer.isBusy)
+        analyzer.analyze(Caption(id: 1, japanese: "最初", ruby: [], english: ""))
+        XCTAssertEqual(analyzer.revealed, SentenceAnalyzer.Reveal(id: 0, serial: 2))
+        XCTAssertEqual(analyzer.analyses.count, 2)
+        XCTAssertEqual(ScriptedServer.requests.count, 2)
+        XCTAssertTrue(analyzer.hasAnalyzed(Caption(id: 2, japanese: "次", ruby: [], english: "")))
+        XCTAssertFalse(analyzer.hasAnalyzed(Caption(id: 3, japanese: "次", ruby: [], english: "")))
+    }
+
+    func testAFailedSentenceIsAnalyzedAgainInItsPlace() async throws {
+        analyzer.analyze(Caption(id: 1, japanese: "最初", ruby: [], english: ""))
+        try await settle()
+        guard case .failed = analyzer.analyses.first?.phase else { return XCTFail("should have failed") }
+        try await analyze("次", id: 2)
+        ScriptedServer.analyses = [#"{"zh": "译文"}"#]
+        analyzer.analyze(Caption(id: 1, japanese: "最初", ruby: [], english: ""))
+        try await settle()
+        XCTAssertEqual(analyzer.analyses.map(\.phase), [.done, .done])
+        XCTAssertEqual(analyzer.analyses.map(\.sentence), ["最初", "次"])
+    }
+
+    func testAnAnalysisStoppedBeforeItsFirstLineGoes() async throws {
+        try await analyze("最初", id: 1)
+        analyzer.analyze(Caption(id: 2, japanese: "次", ruby: [], english: ""))
+        analyzer.cancel()
+        XCTAssertEqual(analyzer.analyses.map(\.sentence), ["最初"])
+        XCTAssertTrue(analyzer.canAsk)
+    }
+
+    func testClearingStartsOver() async throws {
+        try await analyze("最初", id: 1)
+        ScriptedServer.answers = ["回答"]
+        analyzer.ask("问题")
+        try await settle()
+        analyzer.clear()
+        XCTAssertTrue(analyzer.thread.isEmpty)
+        try await analyze("次", id: 2)
+        ScriptedServer.answers = ["回答"]
+        analyzer.ask("问题")
+        try await settle()
+        let request = try contents(ofRequest: 3)
+        XCTAssertEqual(request.count, 4)
+        XCTAssertFalse(request.joined().contains("最初"))
     }
 }
 
@@ -240,7 +314,7 @@ extension FollowUpTests {
         ScriptedServer.entries = [Self.entry, #"{"grammar": "名词", "explain": "…"}"#]
         ScriptedServer.answers = ["回答"]
         analyzer.lookUp(" 最初\n")
-        XCTAssertEqual(analyzer.lookingUp, 0)
+        XCTAssertEqual(analyzer.lookingUp, 1)
         // Neither waits for the other.
         XCTAssertTrue(analyzer.canAsk)
         analyzer.ask("问题")
@@ -248,7 +322,7 @@ extension FollowUpTests {
         analyzer.lookUp("名词")
         try await settle()
 
-        XCTAssertEqual(analyzer.thread.map(\.id), [0, 1, 2])
+        XCTAssertEqual(analyzer.thread.map(\.id), [0, 1, 2, 3])
         XCTAssertEqual(analyzer.lookups.map(\.text), ["最初", "名词"])
         XCTAssertEqual(analyzer.lookups[0].entries.first?.senses.map(\.definition), ["最初；起初"])
         XCTAssertEqual(analyzer.lookups[1].grammar.map(\.form), ["名词"])
@@ -258,8 +332,18 @@ extension FollowUpTests {
         // The selection and the sentence, and nothing of the thread.
         XCTAssertEqual(try contents(ofRequest: 3), [LookupFormat.instructions, "句子：最初\n选中的文字：名词"])
 
+        // A selection goes with the sentence it is under.
         try await analyze("次", id: 2)
-        XCTAssertTrue(analyzer.thread.isEmpty)
+        ScriptedServer.entries = [Self.entry, Self.entry, Self.entry]
+        analyzer.lookUp("甲", under: 1)
+        try await settle()
+        analyzer.lookUp("乙", under: 5)
+        try await settle()
+        analyzer.lookUp("丙")
+        try await settle()
+        XCTAssertEqual(analyzer.lookups.suffix(3).map(\.sentence), ["最初", "次", "次"])
+        XCTAssertEqual(try contents(ofRequest: 5).last, "句子：最初\n选中的文字：甲")
+        XCTAssertEqual(try contents(ofRequest: 6).last, "句子：次\n选中的文字：乙")
     }
 
     func testAFailedLookupCanBeRetried() async throws {
@@ -270,7 +354,7 @@ extension FollowUpTests {
         XCTAssertNotNil(analyzer.lookups.first?.error)
 
         ScriptedServer.entries = [Self.entry]
-        analyzer.retryLookup(0)
+        analyzer.retryLookup(1)
         try await settle()
         XCTAssertEqual(analyzer.lookups.count, 1)
         XCTAssertNil(analyzer.lookups[0].error)
@@ -282,7 +366,7 @@ extension FollowUpTests {
         ScriptedServer.entries = [Self.entry, Self.entry]
         analyzer.lookUp("最")
         analyzer.lookUp("初")
-        XCTAssertEqual(analyzer.lookingUp, 1)
+        XCTAssertEqual(analyzer.lookingUp, 2)
         try await settle()
         XCTAssertNil(analyzer.lookups[0].error)
         XCTAssertEqual(analyzer.lookups[1].entries.count, 1)
@@ -399,19 +483,20 @@ final class AnalysisPanelTests: XCTestCase {
         // The tokenizer can't tell spicy from painful.
         XCTAssertTrue(Furigana.annotate(japanese).contains(RubyToken(base: "辛", reading: "つら")))
         analyzer.analyze(Caption(id: 7, japanese: japanese, ruby: Furigana.annotate(japanese), english: ""))
-        XCTAssertEqual(analyzer.phase, .running)
+        XCTAssertEqual(analyzer.analyses.last?.phase, .running)
         var snappedPartial = false
-        for _ in 0..<600 where analyzer.phase == .running {
+        for _ in 0..<600 where analyzer.analyzing != nil {
             try await Task.sleep(nanoseconds: 100_000_000)
-            if !snappedPartial, analyzer.words.count >= 3 {
+            if !snappedPartial, (analyzer.analyses.last?.words.count ?? 0) >= 3 {
                 snappedPartial = true
                 snapshot(window, "analysis-streaming")
             }
         }
-        XCTAssertEqual(analyzer.phase, .done)
-        XCTAssertFalse(analyzer.chinese.isEmpty)
-        XCTAssertEqual(analyzer.words.map(\.surface).joined(), japanese)
-        XCTAssertTrue(analyzer.ruby.contains(RubyToken(base: "辛", reading: "から")))
+        let analysis = try XCTUnwrap(analyzer.analyses.last)
+        XCTAssertEqual(analysis.phase, .done)
+        XCTAssertFalse(analysis.chinese.isEmpty)
+        XCTAssertEqual(analysis.words.map(\.surface).joined(), japanese)
+        XCTAssertTrue(analysis.ruby.contains(RubyToken(base: "辛", reading: "から")))
         try await Task.sleep(nanoseconds: 300_000_000)
         snapshot(window, "analysis-done")
 
@@ -467,7 +552,7 @@ final class AnalysisPanelTests: XCTestCase {
         snapshot(window, "follow-up-done")
 
         // Only makes sense to a model that was sent the first question.
-        analyzer.ask("用你刚才说的另一种说法，把整句重写一遍。")
+        analyzer.ask("把你刚才说的「辛いから」那种说法用到整句里，重写一遍。")
         for _ in 0..<600 where analyzer.isAnswering {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -475,6 +560,32 @@ final class AnalysisPanelTests: XCTestCase {
         XCTAssertTrue(analyzer.followUps[1].answer.contains("から"))
         try await Task.sleep(nanoseconds: 600_000_000)
         snapshot(window, "follow-up-second")
+
+        // The next sentence goes under the first, in the same conversation.
+        let next = "でも、スープは最後まで飲んだ。"
+        analyzer.analyze(Caption(id: 8, japanese: next, ruby: Furigana.annotate(next), english: ""))
+        for _ in 0..<600 where analyzer.analyzing != nil {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertEqual(analyzer.analyses.map(\.phase), [.done, .done])
+        try await Task.sleep(nanoseconds: 600_000_000)
+        snapshot(window, "second-sentence")
+
+        // Only makes sense to a model that was sent both sentences.
+        analyzer.ask("这句和上一句是什么关系？上一句没吃完的是什么？")
+        for _ in 0..<600 where analyzer.isAnswering {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let third = try XCTUnwrap(analyzer.followUps.last)
+        XCTAssertNil(third.error)
+        XCTAssertTrue(third.answer.contains("ラーメン") || third.answer.contains("拉面"), third.answer)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        snapshot(window, "follow-up-across-sentences")
+
+        // The first sentence is still there, above.
+        analyzer.analyze(Caption(id: 7, japanese: japanese, ruby: [], english: ""))
+        try await Task.sleep(nanoseconds: 800_000_000)
+        snapshot(window, "first-sentence-revealed")
     }
 
     private func snapshot(_ window: NSWindow, _ name: String) {
