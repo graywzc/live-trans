@@ -24,10 +24,23 @@ final class ChromeVideoTests: XCTestCase {
             ["2", "12", "none", "https://example.com/shop", ""],
         ].map { $0.joined(separator: "\u{1F}") + "\u{1E}" }.joined()
         XCTAssertEqual(ChromeScript.tabs(fromListing: listing), [
-            .init(id: 1_173_479_941, window: 1, title: "Episode 12 | example", url: "https://example.tv/play/x", video: .paused, isChecked: true),
-            .init(id: 1_173_479_942, window: 1, title: "GitHub", url: "https://github.com/", video: nil, isChecked: false),
-            .init(id: 12, window: 2, title: "", url: "https://example.com/shop", video: nil, isChecked: true),
+            .init(id: 1_173_479_941, window: 1, title: "Episode 12 | example", url: "https://example.tv/play/x", video: .paused, isChecked: true, isFront: true),
+            .init(id: 1_173_479_942, window: 1, title: "GitHub", url: "https://github.com/", video: nil, isChecked: false, isFront: false),
+            .init(id: 12, window: 2, title: "", url: "https://example.com/shop", video: nil, isChecked: true, isFront: true),
         ])
+    }
+
+    func testAutomaticPicksAFrontTabWithAVideo() {
+        let background = ChromeScript.Tab(id: 1, title: "", video: .playing, isChecked: true, isFront: false)
+        let pausedFront = ChromeScript.Tab(id: 2, title: "", video: .paused, isChecked: true, isFront: true)
+        let playingFront = ChromeScript.Tab(id: 3, window: 2, title: "", video: .playing, isChecked: true, isFront: true)
+        let noVideo = ChromeScript.Tab(id: 4, title: "", isChecked: true, isFront: true)
+        let tabs = [background, pausedFront, playingFront, noVideo]
+        XCTAssertEqual(ChromeScript.automaticTarget(in: tabs, remembered: nil), playingFront)
+        XCTAssertEqual(ChromeScript.automaticTarget(in: tabs, remembered: 2), pausedFront)
+        XCTAssertEqual(ChromeScript.automaticTarget(in: tabs, remembered: 1), playingFront)
+        XCTAssertEqual(ChromeScript.automaticTarget(in: [pausedFront, noVideo], remembered: nil), pausedFront)
+        XCTAssertNil(ChromeScript.automaticTarget(in: [background, noVideo], remembered: nil))
     }
 
     func testErrorsSayWhatToTurnOn() {

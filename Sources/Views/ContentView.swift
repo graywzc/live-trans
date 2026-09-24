@@ -220,6 +220,11 @@ private struct VideoControls: View {
             .help("Forward 5 seconds in the Chrome video")
         }
         .background(SpaceKey { video.send(.toggle) })
+        // Keeps the picker's label on the tab the buttons would control,
+        // which changes while LiveTrans is in the background.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            video.refreshTabsQuietly()
+        }
         .alert(
             "Can't control the video",
             isPresented: Binding { video.problem != nil } set: { if !$0 { video.problem = nil } }
@@ -334,7 +339,7 @@ private struct TabList: View {
             VStack(alignment: .leading, spacing: 2) {
                 row(
                     title: "Automatic", detail: "The front tab of a Chrome window that has a video",
-                    symbol: "sparkle.magnifyingglass", isChosen: video.pinned == nil
+                    symbol: "sparkle.magnifyingglass", isChosen: video.pinned == nil, isControlled: false
                 ) {
                     video.pin(nil)
                 }
@@ -347,9 +352,10 @@ private struct TabList: View {
                     ForEach(windows[window] ?? []) { tab in
                         row(
                             title: tab.title.isEmpty ? tab.url : tab.title,
-                            detail: Self.detail(tab),
-                            symbol: Self.symbol(tab),
-                            isChosen: video.pinned?.id == tab.id
+                            detail: Self.detail(tab, isControlled: video.controlled?.id == tab.id),
+                            symbol: video.controlled?.id == tab.id ? "play.rectangle.fill" : "play.rectangle",
+                            isChosen: video.pinned?.id == tab.id,
+                            isControlled: video.controlled?.id == tab.id
                         ) {
                             video.pin(tab)
                         }
@@ -381,7 +387,8 @@ private struct TabList: View {
     }
 
     private func row(
-        title: String, detail: String, symbol: String, isChosen: Bool, action: @escaping () -> Void
+        title: String, detail: String, symbol: String, isChosen: Bool, isControlled: Bool,
+        action: @escaping () -> Void
     ) -> some View {
         Button {
             action()
@@ -390,7 +397,7 @@ private struct TabList: View {
             HStack(spacing: 8) {
                 Image(systemName: symbol)
                     .frame(width: 16)
-                    .foregroundStyle(symbol == "circle" ? .clear : .orange)
+                    .foregroundStyle(isControlled || isChosen ? .orange : .secondary)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).lineLimit(1)
                     Text(detail)
@@ -405,26 +412,24 @@ private struct TabList: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isControlled ? Color.orange.opacity(0.15) : .clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
-    private static func symbol(_ tab: ChromeScript.Tab) -> String {
+    private static func detail(_ tab: ChromeScript.Tab, isControlled: Bool) -> String {
+        var parts = [URL(string: tab.url)?.host() ?? tab.url]
         switch tab.video {
-        case .playing: "play.fill"
-        case .paused: "pause.fill"
-        default: "circle"
+        case .playing: parts.append("playing")
+        case .paused: parts.append("paused")
+        default: break
         }
-    }
-
-    private static func detail(_ tab: ChromeScript.Tab) -> String {
-        let host = URL(string: tab.url)?.host() ?? tab.url
-        return switch tab.video {
-        case .playing: "\(host) · playing"
-        case .paused: "\(host) · paused"
-        default: host
-        }
+        if isControlled { parts.append("controlled by the buttons") }
+        return parts.joined(separator: " · ")
     }
 }
 
