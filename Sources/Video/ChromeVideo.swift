@@ -30,14 +30,22 @@ final class ChromeVideo {
     /// The tab the user chose. Nil means automatic: whichever front tab has a
     /// video.
     private(set) var pinned: ChromeScript.Tab?
-    /// The tab the buttons last controlled, whether chosen or found.
+    /// The tab the buttons last controlled, whether chosen or found, or in
+    /// automatic the one they would control as of the last listing.
     private(set) var linked: ChromeScript.Tab?
+
+    /// What the buttons control now.
+    var controlled: ChromeScript.Tab? { pinned ?? linked }
     /// Chrome's tabs, as of the last `refreshTabs`, each marked with its
     /// video once checked.
     private(set) var tabs: [ChromeScript.Tab] = []
     private(set) var isLoadingTabs = false
 
     private var inFlight = false
+    /// Chrome has answered this session, so it's running and LiveTrans is
+    /// allowed to ask, and a refresh no one asked for can't bring up the
+    /// Automation prompt.
+    private var hasReachedChrome = false
     private let queue = DispatchQueue(label: "ChromeVideo")
 
     func send(_ command: Command) {
@@ -66,6 +74,19 @@ final class ChromeVideo {
     /// to sleep costs a short timeout; it can't be playing anything.
     func refreshTabs() {
         guard !isLoadingTabs, chromeIsRunning() else { return }
+        list(reportingProblems: true)
+    }
+
+    /// For keeping the label current: says nothing, and does nothing until
+    /// the user has used the video controls.
+    func refreshTabsQuietly() {
+        guard !isLoadingTabs, hasReachedChrome,
+              !NSRunningApplication.runningApplications(withBundleIdentifier: ChromeScript.bundleID).isEmpty
+        else { return }
+        list(reportingProblems: false)
+    }
+
+    private func list(reportingProblems: Bool) {
         isLoadingTabs = true
         let source = ChromeScript.listSource
         queue.async {
@@ -73,10 +94,16 @@ final class ChromeVideo {
             Task { @MainActor in
                 switch listing {
                 case .success(let text):
-                    self.checkRemaining(ChromeScript.tabs(fromListing: text))
+                    self.hasReachedChrome = true
+                    let listed = ChromeScript.tabs(fromListing: text)
+                    if self.pinned == nil {
+                        self.linked = ChromeScript.automaticTarget(in: listed, remembered: self.linked?.id)
+                        self.state = self.linked?.video ?? .unknown
+                    }
+                    self.checkRemaining(listed)
                 case .failure(let failure):
                     self.isLoadingTabs = false
-                    self.problem = failure.message
+                    if reportingProblems { self.problem = failure.message }
                 }
             }
         }
@@ -91,18 +118,25 @@ final class ChromeVideo {
             if !tab.isChecked { tab.video = known[tab.id] ?? nil }
             return tab
         }
-        let unchecked = listed.filter { !$0.isChecked }.map(\.id)
+        checkNext(listed.filter { !$0.isChecked }.map(\.id))
+    }
+
+    /// One tab per trip through the queue, so a button pressed meanwhile
+    /// waits for at most one check rather than all of them.
+    private func checkNext(_ ids: [Int]) {
+        guard let id = ids.first else {
+            isLoadingTabs = false
+            return
+        }
         queue.async {
-            for id in unchecked {
-                let video = ChromeScript.probe(tab: id)
-                Task { @MainActor in
-                    guard let index = self.tabs.firstIndex(where: { $0.id == id }) else { return }
+            let video = ChromeScript.probe(tab: id)
+            Task { @MainActor in
+                if let index = self.tabs.firstIndex(where: { $0.id == id }) {
                     self.tabs[index].video = video
                     self.tabs[index].isChecked = true
+                    if id == self.pinned?.id { self.state = video ?? .unknown }
                 }
-            }
-            Task { @MainActor in
-                self.isLoadingTabs = false
+                self.checkNext(Array(ids.dropFirst()))
             }
         }
     }
@@ -117,6 +151,7 @@ final class ChromeVideo {
     private func apply(_ outcome: ChromeScript.Outcome) {
         switch outcome {
         case .controlled(let tab, let playing):
+            hasReachedChrome = true
             linked = tab
             // Keep what the listing knew; the title may have changed with
             // the next episode.
@@ -156,6 +191,8 @@ enum ChromeScript {
         /// The listing checks only each window's front tab; the rest are
         /// checked afterwards, as a sleeping tab only answers with a timeout.
         var isChecked = false
+        /// The tab in front in its window, the only kind automatic controls.
+        var isFront = false
     }
 
     enum Outcome: Equatable {
@@ -283,6 +320,16 @@ enum ChromeScript {
         """
     }
 
+    /// The tab automatic mode would pick, mirroring `source`: the one last
+    /// controlled if it's still a front tab with a video, else the first front
+    /// tab playing one, else the first with a paused one.
+    static func automaticTarget(in tabs: [Tab], remembered: Int?) -> Tab? {
+        let candidates = tabs.filter { $0.isFront && $0.video != nil }
+        return candidates.first { $0.id == remembered }
+            ?? candidates.first { $0.video == .playing }
+            ?? candidates.first
+    }
+
     /// Checks one tab for a video. Awake tabs answer in milliseconds; a
     /// sleeping one only times out, so the wait is short.
     static func probeSource(tab id: Int) -> String {
@@ -339,7 +386,7 @@ enum ChromeScript {
             }
             return Tab(
                 id: id, window: window, title: String(fields[4]), url: String(fields[3]),
-                video: video, isChecked: !fields[2].isEmpty
+                video: video, isChecked: !fields[2].isEmpty, isFront: !fields[2].isEmpty
             )
         }
     }
