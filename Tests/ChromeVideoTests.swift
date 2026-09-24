@@ -81,6 +81,37 @@ final class ChromeVideoTests: XCTestCase {
         }
         XCTAssertTrue(ChromeScript.action(for: .seek(moment)).contains(#"!== "https:\/\/example.tv\/\"quoted\"\\path")"#))
         XCTAssertTrue(ChromeScript.action(for: .seek(moment)).contains("Math.max(12.0, 0)"))
+        XCTAssertFalse(ChromeScript.action(for: .seek(moment)).contains("timeupdate"))
+    }
+
+    /// Playing one sentence pauses at its end, and only that once.
+    func testPlayingASentenceStopsAtItsEnd() throws {
+        let context = try XCTUnwrap(JSContext())
+        context.evaluateScript("""
+            const listeners = []; const log = [];
+            const v = {
+                currentTime: 0, paused: true, playbackRate: 1,
+                play() { this.paused = false; log.push('play'); }, pause() { this.paused = true; log.push('pause'); },
+                addEventListener(_, f) { listeners.push(f); }, removeEventListener(_, f) { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); },
+            };
+            const location = { href: 'u' };
+            const tick = t => { v.currentTime = t; [...listeners].forEach(f => f()); };
+            """)
+        let moment = VideoMoment(tabID: 1, url: "u", seconds: 10, end: 14)
+        let seek = "(() => { \(ChromeScript.action(for: .seek(moment))) })();"
+        context.evaluateScript(seek)
+        XCTAssertNil(context.exception)
+        XCTAssertEqual(context.evaluateScript("v.currentTime").toDouble(), 9.5)
+        context.evaluateScript("tick(11); tick(13.5); tick(14.31);")
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "play,pause")
+        XCTAssertEqual(context.evaluateScript("listeners.length").toInt32(), 0, "the stop is spent")
+        // Seeking again while a stop is pending replaces it rather than stacking.
+        context.evaluateScript(seek + seek)
+        XCTAssertEqual(context.evaluateScript("listeners.length").toInt32(), 1)
+        // Going back before the sentence (a skip, an earlier sentence) drops it.
+        context.evaluateScript("tick(3)")
+        XCTAssertEqual(context.evaluateScript("listeners.length").toInt32(), 0)
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "play,pause,play,play")
     }
 
     func testScriptsCompile() throws {
@@ -130,6 +161,8 @@ final class SentenceMomentTests: XCTestCase {
         let start = VideoMoment(tabID: 1, url: "u", seconds: 60, rate: 1.5)
         let moments = CaptionEngine.moments(of: ["ああ", "いいいいいい"], from: start, spoken: 4)
         XCTAssertEqual(moments.map { $0?.seconds }, [60, 61.5])
+        // Each ends where the next begins; the last where the speech did.
+        XCTAssertEqual(moments.map { $0?.end }, [61.5, 66])
         XCTAssertEqual(CaptionEngine.moments(of: ["ああ", "いい"], from: nil, spoken: 4), [nil, nil])
     }
 
