@@ -6,6 +6,8 @@ struct Caption: Identifiable, Equatable {
     let japanese: String
     let ruby: [RubyToken]
     let english: String
+    /// Where the sentence starts in the Chrome video it was heard from.
+    var moment: VideoMoment?
 }
 
 /// Runs the pipeline: audio -> VAD -> utterances -> GPU server -> captions.
@@ -34,6 +36,10 @@ final class CaptionEngine {
     private(set) var inputLevel: Float = 0
     private(set) var speechThreshold: Float = 0
     private(set) var isSpeaking = false
+
+    /// Where the video is at a given time, asked as each utterance starts so
+    /// its captions can take the video back to it.
+    var videoClock: (@MainActor (Date) async -> VideoMoment?)?
 
     var isRunning: Bool {
         switch status {
@@ -66,6 +72,7 @@ final class CaptionEngine {
     /// final has landed, a late partial for it must not overwrite the screen.
     private var partialUtterance = -1
     private var settledUtterance = -1
+    private var utteranceMoments: [Int: Task<VideoMoment?, Never>] = [:]
     /// Held while captioning so the display doesn't sleep under the captions.
     private var activity: NSObjectProtocol?
 
@@ -86,6 +93,7 @@ final class CaptionEngine {
         partialTask = nil
         finals?.finish()
         finals = nil
+        utteranceMoments = [:]
         source?.stop()
         source = nil
         outputRouter.restore()
@@ -213,8 +221,12 @@ final class CaptionEngine {
 
         for event in segmenter.process(frame: frame, isSpeech: isSpeech) {
             switch event {
-            case .started:
+            case .started(let utterance):
                 isSpeaking = true
+                if let videoClock {
+                    let now = Date()
+                    utteranceMoments[utterance] = Task { await videoClock(now) }
+                }
             case .partial(let audio, let utterance):
                 requestPartial(audio, utterance: utterance, client: client)
             case .final(let audio, let utterance):
@@ -228,6 +240,7 @@ final class CaptionEngine {
             case .discarded(let utterance):
                 isSpeaking = false
                 print("utterance \(utterance) discarded: too brief to be speech")
+                utteranceMoments[utterance] = nil
                 settle(utterance)
             }
         }
@@ -263,6 +276,10 @@ final class CaptionEngine {
     }
 
     private func transcribeFinal(_ audio: Data, utterance: Int, client: ASRClient) async {
+        let moment = utteranceMoments.removeValue(forKey: utterance)
+        // The moment is when the first speech was noticed, after the pre-roll.
+        let spoken = Double(audio.count / AudioFormat.frameBytes) * AudioFormat.frameDuration
+            - segmenter.config.preRoll - segmenter.config.postRoll
         for attempt in 1...Self.remoteRetries {
             do {
                 let result = try await client.transcribe(pcm: audio, beamSize: 3, translate: true)
@@ -271,7 +288,7 @@ final class CaptionEngine {
                 if result.lines.allSatisfy(\.ja.isEmpty) {
                     print("utterance \(utterance): the server heard no words")
                 }
-                append(result)
+                append(result, from: await moment?.value, spoken: spoken)
                 return
             } catch {
                 guard !Task.isCancelled else { return }
@@ -288,16 +305,32 @@ final class CaptionEngine {
         }
     }
 
-    private func append(_ result: Transcription) {
-        for line in result.lines where !line.ja.isEmpty {
+    private func append(_ result: Transcription, from moment: VideoMoment?, spoken: TimeInterval) {
+        let lines = result.lines.filter { !$0.ja.isEmpty }
+        let moments = Self.moments(of: lines.map(\.ja), from: moment, spoken: spoken)
+        for (line, moment) in zip(lines, moments) {
             print("\(line.ja)\n-> \(line.en)")
             captions.append(Caption(
                 id: nextCaptionID,
                 japanese: line.ja,
                 ruby: Furigana.annotate(line.ja),
-                english: line.en
+                english: line.en,
+                moment: moment
             ))
             nextCaptionID += 1
+        }
+    }
+
+    /// Where each sentence of an utterance starts. Only the utterance's start
+    /// was noted, so the later sentences are placed by their share of the
+    /// text, which is close enough to land on the right sentence.
+    nonisolated static func moments(of lines: [String], from start: VideoMoment?, spoken: TimeInterval) -> [VideoMoment?] {
+        guard let start else { return lines.map { _ in nil } }
+        let total = Double(max(lines.reduce(0) { $0 + $1.count }, 1))
+        var before = 0
+        return lines.map { line in
+            defer { before += line.count }
+            return start.advanced(by: max(spoken, 0) * Double(before) / total)
         }
     }
 

@@ -6,6 +6,7 @@ struct ContentView: View {
     @Environment(JishoBrowser.self) private var jisho
     @Environment(SentenceAnalyzer.self) private var analyzer
     @Environment(SidePanel.self) private var panel
+    @Environment(ChromeVideo.self) private var video
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
@@ -84,7 +85,8 @@ struct ContentView: View {
                             isAnalyzed: panel.isPresented && panel.tab == .analysis
                                 && analyzer.hasAnalyzed(caption),
                             selection: selectionBinding(for: caption),
-                            onAnalyze: { analyze(caption) }
+                            onAnalyze: { analyze(caption) },
+                            onSeek: caption.moment.map { moment in { video.send(.seek(moment)) } }
                         )
                     }
                     if !engine.partialText.isEmpty {
@@ -446,6 +448,8 @@ struct CaptionRow: View {
     let isAnalyzed: Bool
     @Binding var selection: Range<Int>?
     let onAnalyze: () -> Void
+    /// Plays the video from this sentence. Nil when it wasn't heard from one.
+    var onSeek: (() -> Void)?
 
     @State private var isHovered = false
 
@@ -464,6 +468,17 @@ struct CaptionRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            if let onSeek, let moment = caption.moment {
+                Button(action: onSeek) {
+                    Text(Self.timestamp(moment.seconds))
+                        .font(.system(size: fontSize * 0.55).monospacedDigit())
+                        .foregroundStyle(.gray)
+                }
+                .buttonStyle(.plain)
+                .help("Play the video from this sentence")
+                // On the Japanese's baseline, below the row of readings.
+                .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
+            }
             Button(action: onAnalyze) {
                 Image(systemName: AnalysisView.symbol)
                     .font(.system(size: fontSize * 0.7))
@@ -477,6 +492,15 @@ struct CaptionRow: View {
         }
         .foregroundStyle(.white)
         .background(HoverTracker(isHovered: $isHovered))
+    }
+
+    /// "4:05", or "1:02:03" past the hour, as a player shows it.
+    static func timestamp(_ seconds: Double) -> String {
+        let total = Int(max(seconds, 0))
+        let (hours, minutes, secs) = (total / 3600, total / 60 % 60, total % 60)
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, secs)
+            : String(format: "%d:%02d", minutes, secs)
     }
 }
 
