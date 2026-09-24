@@ -32,7 +32,8 @@ final class ChromeVideo {
     private(set) var pinned: ChromeScript.Tab?
     /// The tab the buttons last controlled, whether chosen or found.
     private(set) var linked: ChromeScript.Tab?
-    /// Chrome's tabs, as of the last `refreshTabs`.
+    /// Chrome's tabs, as of the last `refreshTabs`, each marked with its
+    /// video once checked.
     private(set) var tabs: [ChromeScript.Tab] = []
     private(set) var isLoadingTabs = false
 
@@ -60,6 +61,9 @@ final class ChromeVideo {
         state = tab?.video ?? .unknown
     }
 
+    /// Lists Chrome's tabs with the front tabs checked, then checks the rest
+    /// one at a time, publishing each answer as it comes. A tab Chrome has put
+    /// to sleep costs a short timeout; it can't be playing anything.
     func refreshTabs() {
         guard !isLoadingTabs, chromeIsRunning() else { return }
         isLoadingTabs = true
@@ -67,13 +71,38 @@ final class ChromeVideo {
         queue.async {
             let listing = ChromeScript.runForText(source)
             Task { @MainActor in
-                self.isLoadingTabs = false
                 switch listing {
                 case .success(let text):
-                    self.tabs = ChromeScript.tabs(fromListing: text)
+                    self.checkRemaining(ChromeScript.tabs(fromListing: text))
                 case .failure(let failure):
+                    self.isLoadingTabs = false
                     self.problem = failure.message
                 }
+            }
+        }
+    }
+
+    private func checkRemaining(_ listed: [ChromeScript.Tab]) {
+        // Until a tab is checked again, keep what the last refresh found, so
+        // reopening the list doesn't empty it.
+        let known = Dictionary(tabs.map { ($0.id, $0.video) }, uniquingKeysWith: { first, _ in first })
+        tabs = listed.map { tab in
+            var tab = tab
+            if !tab.isChecked { tab.video = known[tab.id] ?? nil }
+            return tab
+        }
+        let unchecked = listed.filter { !$0.isChecked }.map(\.id)
+        queue.async {
+            for id in unchecked {
+                let video = ChromeScript.probe(tab: id)
+                Task { @MainActor in
+                    guard let index = self.tabs.firstIndex(where: { $0.id == id }) else { return }
+                    self.tabs[index].video = video
+                    self.tabs[index].isChecked = true
+                }
+            }
+            Task { @MainActor in
+                self.isLoadingTabs = false
             }
         }
     }
@@ -122,10 +151,11 @@ enum ChromeScript {
         var window = 1
         var title: String
         var url = ""
-        /// Known only for the front tab of each window: the rest may be
-        /// asleep, and a sleeping tab doesn't answer.
+        /// Nil for a tab with no video, or one not checked yet.
         var video: ChromeVideo.State?
-        var isFront = false
+        /// The listing checks only each window's front tab; the rest are
+        /// checked afterwards, as a sleeping tab only answers with a timeout.
+        var isChecked = false
     }
 
     enum Outcome: Equatable {
@@ -253,6 +283,34 @@ enum ChromeScript {
         """
     }
 
+    /// Checks one tab for a video. Awake tabs answer in milliseconds; a
+    /// sleeping one only times out, so the wait is short.
+    static func probeSource(tab id: Int) -> String {
+        """
+        tell application id "\(bundleID)"
+            repeat with wi from 1 to count windows
+                set ids to (get id of every tab of window wi)
+                repeat with ti from 1 to count ids
+                    if item ti of ids = "\(id)" then
+                        with timeout of 0.2 seconds
+                            return execute tab ti of window wi javascript \(appleScriptString(javaScript("")))
+                        end timeout
+                    end if
+                end repeat
+            end repeat
+            return "none"
+        end tell
+        """
+    }
+
+    nonisolated static func probe(tab id: Int) -> ChromeVideo.State? {
+        switch runForText(probeSource(tab: id)) {
+        case .success("playing"): .playing
+        case .success("paused"): .paused
+        default: nil
+        }
+    }
+
     static func appleScriptString(_ text: String) -> String {
         "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
@@ -281,7 +339,7 @@ enum ChromeScript {
             }
             return Tab(
                 id: id, window: window, title: String(fields[4]), url: String(fields[3]),
-                video: video, isFront: !fields[2].isEmpty
+                video: video, isChecked: !fields[2].isEmpty
             )
         }
     }

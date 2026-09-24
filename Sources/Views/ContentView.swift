@@ -327,7 +327,9 @@ private struct TabList: View {
     let dismiss: () -> Void
 
     var body: some View {
-        let windows = Dictionary(grouping: video.tabs, by: \.window)
+        // Only tabs with a video, and the chosen one even without.
+        let shown = video.tabs.filter { $0.video != nil || $0.id == video.pinned?.id }
+        let windows = Dictionary(grouping: shown, by: \.window)
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
                 row(
@@ -335,9 +337,6 @@ private struct TabList: View {
                     symbol: "sparkle.magnifyingglass", isChosen: video.pinned == nil
                 ) {
                     video.pin(nil)
-                }
-                if video.isLoadingTabs, video.tabs.isEmpty {
-                    ProgressView().controlSize(.small).padding(8)
                 }
                 ForEach(windows.keys.sorted(), id: \.self) { window in
                     Divider().padding(.vertical, 4)
@@ -355,6 +354,22 @@ private struct TabList: View {
                             video.pin(tab)
                         }
                     }
+                }
+                if video.isLoadingTabs {
+                    Divider().padding(.vertical, 4)
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking tabs for videos…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                } else if shown.isEmpty {
+                    Divider().padding(.vertical, 4)
+                    Text("No Chrome tab has a video.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
                 }
             }
             .padding(6)

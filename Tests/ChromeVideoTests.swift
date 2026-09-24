@@ -24,9 +24,9 @@ final class ChromeVideoTests: XCTestCase {
             ["2", "12", "none", "https://example.com/shop", ""],
         ].map { $0.joined(separator: "\u{1F}") + "\u{1E}" }.joined()
         XCTAssertEqual(ChromeScript.tabs(fromListing: listing), [
-            .init(id: 1_173_479_941, window: 1, title: "Episode 12 | example", url: "https://example.tv/play/x", video: .paused, isFront: true),
-            .init(id: 1_173_479_942, window: 1, title: "GitHub", url: "https://github.com/", video: nil, isFront: false),
-            .init(id: 12, window: 2, title: "", url: "https://example.com/shop", video: nil, isFront: true),
+            .init(id: 1_173_479_941, window: 1, title: "Episode 12 | example", url: "https://example.tv/play/x", video: .paused, isChecked: true),
+            .init(id: 1_173_479_942, window: 1, title: "GitHub", url: "https://github.com/", video: nil, isChecked: false),
+            .init(id: 12, window: 2, title: "", url: "https://example.com/shop", video: nil, isChecked: true),
         ])
     }
 
@@ -39,7 +39,7 @@ final class ChromeVideoTests: XCTestCase {
     }
 
     func testScriptsCompile() throws {
-        var sources = [ChromeScript.listSource]
+        var sources = [ChromeScript.listSource, ChromeScript.probeSource(tab: 1_173_479_941)]
         for command: ChromeVideo.Command in [.toggle, .skip(seconds: -5), .skip(seconds: 5)] {
             sources.append(ChromeScript.source(for: command, pinned: nil, preferring: nil))
             sources.append(ChromeScript.source(for: command, pinned: nil, preferring: 1_173_479_941))
