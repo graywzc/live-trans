@@ -21,6 +21,8 @@ final class ChromeVideo {
     enum Command: Equatable {
         case toggle
         case skip(seconds: Double)
+        /// Plays from a sentence, in the tab it was heard in.
+        case seek(VideoMoment)
     }
 
     private(set) var state = State.unknown
@@ -52,14 +54,41 @@ final class ChromeVideo {
         // A click while Chrome is still answering would race the first one.
         guard !inFlight, chromeIsRunning() else { return }
         inFlight = true
-        let source = ChromeScript.source(for: command, pinned: pinned?.id, preferring: linked?.id)
+        let target = if case .seek(let moment) = command { moment.tabID } else { pinned?.id }
+        let source = ChromeScript.source(for: command, pinned: target, preferring: linked?.id)
         queue.async {
             let outcome = ChromeScript.run(source)
             Task { @MainActor in
                 self.inFlight = false
-                self.apply(outcome)
+                if case .seek = command {
+                    self.applySeek(outcome)
+                } else {
+                    self.apply(outcome)
+                }
             }
         }
+    }
+
+    /// Where the video is at `wall`, for noting when a sentence was heard.
+    /// Nil unless LiveTrans may already control Chrome: captioning something
+    /// other than a Chrome video must not bring up the Automation prompt, nor
+    /// report anything.
+    func moment(at wall: Date) async -> VideoMoment? {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: ChromeScript.bundleID).isEmpty
+        else { return nil }
+        let source = ChromeScript.source(running: ChromeScript.momentJavaScript, pinned: pinned?.id, preferring: linked?.id)
+        let known = hasReachedChrome
+        let result = await withCheckedContinuation { continuation in
+            queue.async {
+                guard known || ChromeScript.mayAutomateWithoutAsking() else {
+                    return continuation.resume(returning: nil as String?)
+                }
+                continuation.resume(returning: try? ChromeScript.runForText(source).get())
+            }
+        }
+        guard let result, let moment = ChromeScript.moment(fromResult: result, at: wall) else { return nil }
+        hasReachedChrome = true
+        return moment
     }
 
     /// Nil goes back to automatic.
@@ -155,7 +184,7 @@ final class ChromeVideo {
             linked = tab
             // Keep what the listing knew; the title may have changed with
             // the next episode.
-            pinned?.title = tab.title
+            if pinned?.id == tab.id { pinned?.title = tab.title }
             state = playing ? .playing : .paused
         case .noVideo:
             state = .unknown
@@ -165,10 +194,45 @@ final class ChromeVideo {
         case .gone:
             pin(nil)
             problem = "The chosen tab was closed. Back to finding the video automatically."
+        case .moved:
+            problem = "That tab has moved on to another page."
         case .failed(let message):
             state = .unknown
             problem = message
         }
+    }
+
+    /// A seek goes to the sentence's own tab, whatever is chosen, so its tab
+    /// being gone says nothing about the chosen one.
+    private func applySeek(_ outcome: ChromeScript.Outcome) {
+        switch outcome {
+        case .gone:
+            problem = "The tab this sentence was heard in has been closed."
+        case .noVideo:
+            problem = "The tab this sentence was heard in has no video now."
+        case .controlled(let tab, _):
+            let shown = state
+            apply(outcome)
+            // The buttons stay on the chosen tab, so keep showing its state.
+            if let pinned, pinned.id != tab.id { state = shown }
+        default:
+            apply(outcome)
+        }
+    }
+}
+
+/// A point in a Chrome video: where a sentence started.
+struct VideoMoment: Equatable {
+    let tabID: Int
+    /// The page, so a tab that has moved on to the next video isn't sought.
+    let url: String
+    let seconds: Double
+    /// Video seconds per second heard.
+    var rate: Double = 1
+
+    /// This moment `heard` seconds of listening later.
+    func advanced(by heard: TimeInterval) -> VideoMoment {
+        VideoMoment(tabID: tabID, url: url, seconds: seconds + heard * rate, rate: rate)
     }
 }
 
@@ -200,8 +264,14 @@ enum ChromeScript {
         case noVideo
         /// The pinned tab no longer exists.
         case gone
+        /// The tab sought is on another page now.
+        case moved
         case failed(String)
     }
+
+    /// Seeking lands this far before the sentence, so its first word isn't
+    /// clipped: the VAD only notices speech once it is under way.
+    static let seekLead = 0.5
 
     struct Failure: Error {
         let message: String
@@ -225,7 +295,32 @@ enum ChromeScript {
             "if (v.paused) { v.play(); } else { v.pause(); }"
         case .skip(let seconds):
             "v.currentTime = Math.min(Math.max(v.currentTime + (\(seconds)), 0), v.duration || Infinity);"
+        case .seek(let moment):
+            "if (location.href !== \(javaScriptString(moment.url))) return 'moved'; "
+                + "v.currentTime = Math.max(\(moment.seconds - seekLead), 0); v.play();"
         }
+    }
+
+    /// Where the video is and when that was, so the caller can work back to
+    /// when a sentence started: "<state> <time> <epoch seconds> <rate> <url>",
+    /// the url encoded so it holds no space or "|".
+    static let momentJavaScript = javaScript(
+        "return [v.paused ? 'paused' : 'playing', v.currentTime, Date.now() / 1000, v.playbackRate, "
+            + "encodeURIComponent(location.href)].join(' ');"
+    )
+
+    /// The video's time at `wall`, from a `momentJavaScript` result.
+    static func moment(fromResult result: String, at wall: Date) -> VideoMoment? {
+        let parts = result.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count >= 2, let id = tabID(parts[1]) else { return nil }
+        let fields = parts[0].split(separator: " ")
+        guard fields.count == 5, fields[0] == "playing" || fields[0] == "paused",
+              let time = Double(fields[1]), let now = Double(fields[2]), let rate = Double(fields[3]),
+              let url = String(fields[4]).removingPercentEncoding
+        else { return nil }
+        // Asked when the sentence started, answered a moment later.
+        let elapsed = fields[0] == "playing" ? max(now - wall.timeIntervalSince1970, 0) * rate : 0
+        return VideoMoment(tabID: id, url: url, seconds: max(time - elapsed, 0), rate: rate)
     }
 
     /// Runs the command in the pinned tab, or with none pinned in the front
@@ -234,8 +329,13 @@ enum ChromeScript {
     /// first. Background tabs are only reached by pinning, as a sleeping tab
     /// never answers. Returns "gone", "none" or "<state>|<tab id>|<title>".
     static func source(for command: ChromeVideo.Command, pinned: Int?, preferring remembered: Int?) -> String {
+        source(running: javaScript(action(for: command)), pinned: pinned, preferring: remembered)
+    }
+
+    /// `source(for:)` with any script from `javaScript`.
+    static func source(running script: String, pinned: Int?, preferring remembered: Int?) -> String {
         let probe = appleScriptString(javaScript(""))
-        let act = appleScriptString(javaScript(action(for: command)))
+        let act = appleScriptString(script)
         return """
         tell application id "\(bundleID)"
             set pinned to \(pinned.map { "\"\($0)\"" } ?? "missing value")
@@ -358,6 +458,19 @@ enum ChromeScript {
         }
     }
 
+    /// A JavaScript string literal.
+    static func javaScriptString(_ text: String) -> String {
+        let data = (try? JSONEncoder().encode(text)) ?? Data("\"\"".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Whether LiveTrans may send Chrome Apple Events without the user being
+    /// asked. Blocks briefly, so keep it off the main thread.
+    nonisolated static func mayAutomateWithoutAsking() -> Bool {
+        let chrome = NSAppleEventDescriptor(bundleIdentifier: bundleID)
+        return AEDeterminePermissionToAutomateTarget(chrome.aeDesc, typeWildCard, typeWildCard, false) == noErr
+    }
+
     static func appleScriptString(_ text: String) -> String {
         "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
@@ -368,6 +481,7 @@ enum ChromeScript {
 
     static func outcome(fromResult result: String) -> Outcome {
         if result == "gone" { return .gone }
+        if result.hasPrefix("moved|") { return .moved }
         let parts = result.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count == 3, let id = tabID(parts[1]), parts[0] == "playing" || parts[0] == "paused"
         else { return .noVideo }

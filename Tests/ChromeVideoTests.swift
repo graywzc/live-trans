@@ -1,3 +1,4 @@
+import JavaScriptCore
 import WebKit
 import XCTest
 @testable import LiveTrans
@@ -51,9 +52,44 @@ final class ChromeVideoTests: XCTestCase {
         XCTAssertTrue(ChromeScript.failure(number: -1743, message: "").message.contains("Automation"))
     }
 
+    func testMomentWorksBackToWhenTheSentenceStarted() throws {
+        let url = "https://example.tv/watch?v=a|b&t=1"
+        let encoded = try XCTUnwrap(url.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        let wall = Date(timeIntervalSince1970: 1_000)
+        // Answered 0.4 s after the sentence started, at double speed.
+        let moment = try XCTUnwrap(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 \(encoded)|567|Episode | 12", at: wall))
+        XCTAssertEqual(moment.seconds, 100, accuracy: 0.001)
+        XCTAssertEqual(moment, VideoMoment(tabID: 567, url: url, seconds: moment.seconds, rate: 2))
+        // A paused video hasn't moved meanwhile.
+        XCTAssertEqual(
+            ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 \(encoded)|567|Episode", at: wall)?.seconds,
+            100.8
+        )
+        XCTAssertNil(ChromeScript.moment(fromResult: "none", at: wall))
+        XCTAssertNil(ChromeScript.moment(fromResult: "gone", at: wall))
+        XCTAssertEqual(ChromeScript.outcome(fromResult: "moved|567|Episode"), .moved)
+    }
+
+    func testJavaScriptParses() throws {
+        let context = try XCTUnwrap(JSContext())
+        let moment = VideoMoment(tabID: 1, url: #"https://example.tv/"quoted"\path"#, seconds: 12.5)
+        for script in [ChromeScript.momentJavaScript, ChromeScript.javaScript(ChromeScript.action(for: .seek(moment)))] {
+            // Parsed but not run: there is no document here.
+            context.exception = nil
+            context.evaluateScript("(function () { return \(script); })")
+            XCTAssertNil(context.exception, "\(context.exception!)\n\(script)")
+        }
+        XCTAssertTrue(ChromeScript.action(for: .seek(moment)).contains(#"!== "https:\/\/example.tv\/\"quoted\"\\path")"#))
+        XCTAssertTrue(ChromeScript.action(for: .seek(moment)).contains("Math.max(12.0, 0)"))
+    }
+
     func testScriptsCompile() throws {
-        var sources = [ChromeScript.listSource, ChromeScript.probeSource(tab: 1_173_479_941)]
-        for command: ChromeVideo.Command in [.toggle, .skip(seconds: -5), .skip(seconds: 5)] {
+        var sources = [
+            ChromeScript.listSource, ChromeScript.probeSource(tab: 1_173_479_941),
+            ChromeScript.source(running: ChromeScript.momentJavaScript, pinned: nil, preferring: 1_173_479_941),
+        ]
+        let moment = VideoMoment(tabID: 1_173_479_941, url: "https://example.tv/?a=\"b\"", seconds: 3)
+        for command: ChromeVideo.Command in [.toggle, .skip(seconds: -5), .skip(seconds: 5), .seek(moment)] {
             sources.append(ChromeScript.source(for: command, pinned: nil, preferring: nil))
             sources.append(ChromeScript.source(for: command, pinned: nil, preferring: 1_173_479_941))
             sources.append(ChromeScript.source(for: command, pinned: 1_173_479_941, preferring: 1_173_479_941))
@@ -86,5 +122,20 @@ final class SpaceKeyTests: XCTestCase {
         XCTAssertTrue(SpaceKey.typesSpace(inside))
         XCTAssertFalse(SpaceKey.typesSpace(NSWindow()))
         XCTAssertFalse(SpaceKey.typesSpace(nil))
+    }
+}
+
+final class SentenceMomentTests: XCTestCase {
+    func testLaterSentencesArePlacedByTheirShareOfTheText() {
+        let start = VideoMoment(tabID: 1, url: "u", seconds: 60, rate: 1.5)
+        let moments = CaptionEngine.moments(of: ["ああ", "いいいいいい"], from: start, spoken: 4)
+        XCTAssertEqual(moments.map { $0?.seconds }, [60, 61.5])
+        XCTAssertEqual(CaptionEngine.moments(of: ["ああ", "いい"], from: nil, spoken: 4), [nil, nil])
+    }
+
+    func testTimestampsReadLikeAPlayer() {
+        XCTAssertEqual(CaptionRow.timestamp(0), "0:00")
+        XCTAssertEqual(CaptionRow.timestamp(245.9), "4:05")
+        XCTAssertEqual(CaptionRow.timestamp(3723), "1:02:03")
     }
 }

@@ -41,6 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let panel = SidePanel()
     let video = ChromeVideo()
 
+    override init() {
+        super.init()
+        engine.videoClock = { [video] in await video.moment(at: $0) }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }

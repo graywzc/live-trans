@@ -10,6 +10,7 @@ final class CaptionRowTests: XCTestCase {
     final class Model {
         var selection: Range<Int>?
         var analyzed = 0
+        var sought = 0
     }
 
     struct Host: View {
@@ -18,9 +19,13 @@ final class CaptionRowTests: XCTestCase {
         var body: some View {
             let japanese = "昨日は忙しくて、昼ご飯を食べられなかった。"
             CaptionRow(
-                caption: Caption(id: 0, japanese: japanese, ruby: Furigana.annotate(japanese), english: "I was too busy for lunch."),
+                caption: Caption(
+                    id: 0, japanese: japanese, ruby: Furigana.annotate(japanese), english: "I was too busy for lunch.",
+                    moment: VideoMoment(tabID: 1, url: "https://example.tv/", seconds: 754.6)
+                ),
                 showFurigana: true, fontSize: 20, isAnalyzed: false,
-                selection: $model.selection, onAnalyze: { model.analyzed += 1 }
+                selection: $model.selection, onAnalyze: { model.analyzed += 1 },
+                onSeek: { model.sought += 1 }
             )
             .padding(16)
             .frame(width: 400, height: 140, alignment: .topLeading)
@@ -71,6 +76,15 @@ final class CaptionRowTests: XCTestCase {
         pump()
         click(button)
         XCTAssertEqual(model.analyzed, 1)
+    }
+
+    func testTimeIsShownAndPlaysFromTheSentence() {
+        snapshot("row-time")
+        // Beside the analysis button, level with the Japanese, shown without
+        // hovering.
+        click(CGPoint(x: 342, y: 42))
+        XCTAssertEqual(model.sought, 1)
+        XCTAssertEqual(model.analyzed, 0)
     }
 
     private func hoverTracker(in view: NSView) -> HoverTracker.TrackerView? {
