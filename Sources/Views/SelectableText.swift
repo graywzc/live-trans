@@ -9,6 +9,9 @@ import SwiftUI
 /// there is one selection in the window, and one place for the actions to be.
 struct SelectableText: View {
     let text: NSAttributedString
+    /// A plain click on the text: not a drag, not a double-click, and not the
+    /// click that dismisses a selection.
+    var onClick: (() -> Void)?
 
     @State private var selected: Selected?
 
@@ -18,10 +21,14 @@ struct SelectableText: View {
         let rect: CGRect
     }
 
-    init(_ string: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = .white) {
+    init(
+        _ string: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = .white,
+        onClick: (() -> Void)? = nil
+    ) {
         text = NSAttributedString(string: string, attributes: [
             .font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color,
         ])
+        self.onClick = onClick
     }
 
     /// Markdown's bold, italics and code, which an AppKit text view would
@@ -47,7 +54,7 @@ struct SelectableText: View {
     }
 
     var body: some View {
-        TextBox(text: text) { selected = $0 }
+        TextBox(text: text, onClick: onClick) { selected = $0 }
             .anchorPreference(key: SelectedText.Key.self, value: .rect(selected?.rect ?? .zero)) { bounds in
                 selected.map { SelectedText(text: $0.text, bounds: bounds) }
             }
@@ -56,6 +63,7 @@ struct SelectableText: View {
 
 private struct TextBox: NSViewRepresentable {
     let text: NSAttributedString
+    let onClick: (() -> Void)?
     let onSelect: (SelectableText.Selected?) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -87,6 +95,7 @@ private struct TextBox: NSViewRepresentable {
 
     func updateNSView(_ view: BoxView, context: Context) {
         context.coordinator.onSelect = onSelect
+        view.click.onClick = onClick ?? {}
         // Not compared with what the view holds: that has fonts of its own
         // choosing over the kanji and would never be equal.
         guard context.coordinator.text != text else { return }
@@ -134,6 +143,20 @@ private struct TextBox: NSViewRepresentable {
         // Captions float over another app, which is usually the active one:
         // the click that selects must not be spent on activating the window.
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        let click = SingleClick()
+
+        // The text view tracks the mouse itself until it is released, so the
+        // click is known only afterwards: one that left no selection and
+        // dismissed none.
+        override func mouseDown(with event: NSEvent) {
+            let hadSelection = selectedRange().length > 0
+            click.mouseDown(with: event)
+            super.mouseDown(with: event)
+            if !hadSelection, selectedRange().length == 0 {
+                click.mouseUp(with: event)
+            }
+        }
 
         override func resignFirstResponder() -> Bool {
             guard super.resignFirstResponder() else { return false }

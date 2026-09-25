@@ -14,9 +14,14 @@ struct FuriganaText: View {
     var showReadings = true
     /// Character positions in the joined token bases.
     @Binding var selection: Range<Int>?
+    /// A plain click on the text: not a drag, not a double-click, and not the
+    /// click that dismisses a selection.
+    var onClick: (() -> Void)? = nil
 
     /// Where the drag in progress started.
     @State private var anchor: Int?
+    /// The click in progress only dismissed a selection.
+    @State private var dismissedSelection = false
 
     var body: some View {
         FlowLayout(lineSpacing: fontSize * 0.15) {
@@ -57,6 +62,7 @@ struct FuriganaText: View {
                 PointerTracker(
                     onDown: { point, clicks in pointerDown(at: point, clicks: clicks, map: map) },
                     onDrag: { point in pointerDragged(to: point, map: map) },
+                    onClick: onClick.map { onClick in { if !dismissedSelection { onClick() } } },
                     onResign: {
                         anchor = nil
                         if selection != nil { selection = nil }
@@ -89,6 +95,7 @@ struct FuriganaText: View {
         case 1:
             // Also what dismisses a selection, in this caption or another.
             anchor = map.position(at: point)
+            dismissedSelection = selection != nil
             selection = nil
         case 2:
             anchor = nil
@@ -221,6 +228,8 @@ private struct SelectionActions: View {
 private struct PointerTracker: NSViewRepresentable {
     let onDown: (CGPoint, Int) -> Void
     let onDrag: (CGPoint) -> Void
+    /// A plain click, told after the double-click interval.
+    let onClick: (() -> Void)?
     /// Something else in the window was clicked: other text, a text field.
     let onResign: () -> Void
 
@@ -231,6 +240,7 @@ private struct PointerTracker: NSViewRepresentable {
     func updateNSView(_ view: TrackerView, context: Context) {
         view.onDown = onDown
         view.onDrag = onDrag
+        view.click.onClick = onClick ?? {}
         view.onResign = onResign
     }
 
@@ -238,6 +248,7 @@ private struct PointerTracker: NSViewRepresentable {
         var onDown: (CGPoint, Int) -> Void = { _, _ in }
         var onDrag: (CGPoint) -> Void = { _ in }
         var onResign: () -> Void = {}
+        let click = SingleClick()
 
         // Top-left origin, as in SwiftUI.
         override var isFlipped: Bool { true }
@@ -259,11 +270,17 @@ private struct PointerTracker: NSViewRepresentable {
 
         override func mouseDown(with event: NSEvent) {
             window?.makeFirstResponder(self)
+            click.mouseDown(with: event)
             onDown(convert(event.locationInWindow, from: nil), event.clickCount)
         }
 
         override func mouseDragged(with event: NSEvent) {
+            click.mouseDragged(with: event)
             onDrag(convert(event.locationInWindow, from: nil))
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            click.mouseUp(with: event)
         }
 
         override func resetCursorRects() {

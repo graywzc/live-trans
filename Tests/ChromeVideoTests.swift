@@ -157,11 +157,7 @@ final class SpaceKeyTests: XCTestCase {
 
     @MainActor
     private func window(editing responder: NSView?) -> NSWindow {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
+        let window = TestScreen.window(width: 200, height: 100)
         if let responder {
             responder.frame = window.contentView!.bounds
             window.contentView!.addSubview(responder)

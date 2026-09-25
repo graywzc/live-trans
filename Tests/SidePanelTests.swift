@@ -63,11 +63,7 @@ final class SidePanelLaunchSnapshotTests: XCTestCase {
             .environment(SentenceAnalyzer(makeClient: { nil }))
             .environment(panel)
             .environment(ChromeVideo())
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 520),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
+        let window = TestScreen.window(width: 960, height: 520)
         window.contentView = NSHostingView(rootView: root)
         window.orderFrontRegardless()
         defer { window.close() }
@@ -111,11 +107,7 @@ final class QuestionFieldControlCTests: XCTestCase {
             .environment(analyzer)
             .environment(panel)
             .environment(ChromeVideo())
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 520),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
+        let window = TestScreen.window(width: 960, height: 520)
         window.contentView = NSHostingView(rootView: root)
         window.orderFrontRegardless()
         defer { window.close() }

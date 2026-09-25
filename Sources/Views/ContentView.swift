@@ -474,7 +474,8 @@ struct CaptionRow: View {
     let isAnalyzed: Bool
     @Binding var selection: Range<Int>?
     let onAnalyze: () -> Void
-    /// Plays the video from this sentence. Nil when it wasn't heard from one.
+    /// Plays the video from this sentence, on a click anywhere in the row.
+    /// Nil when it wasn't heard from one.
     var onSeek: (() -> Void)?
 
     @State private var isHovered = false
@@ -484,26 +485,22 @@ struct CaptionRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 FuriganaText(
                     tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
-                    selection: $selection
+                    selection: $selection, onClick: onSeek
                 )
                 if !caption.english.isEmpty {
-                    Text(caption.english)
-                        .font(.system(size: fontSize * 0.82))
-                        .foregroundStyle(.green)
-                        .textSelection(.enabled)
+                    // Not SwiftUI's selectable text, which keeps its clicks.
+                    SelectableText(caption.english, size: fontSize * 0.82, color: .systemGreen, onClick: onSeek)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if let onSeek, let moment = caption.moment {
-                Button(action: onSeek) {
-                    Text(Self.timestamp(moment.seconds))
-                        .font(.system(size: fontSize * 0.55).monospacedDigit())
-                        .foregroundStyle(.gray)
-                }
-                .buttonStyle(.plain)
-                .help("Play the video from this sentence")
-                // On the Japanese's baseline, below the row of readings.
-                .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
+            if onSeek != nil, let moment = caption.moment {
+                Text(Self.timestamp(moment.seconds))
+                    .font(.system(size: fontSize * 0.55).monospacedDigit())
+                    .foregroundStyle(.gray)
+                    // On the Japanese's baseline, below the row of readings.
+                    .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
+                    // Clicks go through it to the row.
+                    .allowsHitTesting(false)
             }
             Button(action: onAnalyze) {
                 Image(systemName: AnalysisView.symbol)
@@ -517,8 +514,17 @@ struct CaptionRow: View {
             .opacity(isHovered || isAnalyzed ? 1 : 0)
         }
         .foregroundStyle(.white)
-        .background(HoverTracker(isHovered: $isHovered))
+        // The highlight reaches a little past the text, without moving it.
+        .padding(Self.highlightInset)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.white.opacity(isHovered && onSeek != nil ? 0.1 : 0))
+        )
+        .background(HoverTracker(isHovered: $isHovered, onClick: onSeek))
+        .padding(-Self.highlightInset)
     }
+
+    static let highlightInset: CGFloat = 6
 
     /// "4:05", or "1:02:03" past the hour, as a player shows it.
     static func timestamp(_ seconds: Double) -> String {
@@ -530,10 +536,14 @@ struct CaptionRow: View {
     }
 }
 
-/// Whether the pointer is over a view. SwiftUI's onHover only reports in the
-/// active app, and the captions usually float over a video player that is.
+/// Whether the pointer is over a view, and clicks on the parts of it that
+/// nothing else takes. SwiftUI's onHover only reports in the active app, and
+/// the captions usually float over a video player that is.
 struct HoverTracker: NSViewRepresentable {
     @Binding var isHovered: Bool
+    /// A plain click, told after the double-click interval. Without one, a
+    /// drag still moves the window.
+    var onClick: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> TrackerView {
         TrackerView()
@@ -541,10 +551,20 @@ struct HoverTracker: NSViewRepresentable {
 
     func updateNSView(_ view: TrackerView, context: Context) {
         view.onChange = { isHovered = $0 }
+        view.isClickable = onClick != nil
+        view.click.onClick = onClick ?? {}
     }
 
     final class TrackerView: NSView {
         var onChange: (Bool) -> Void = { _ in }
+        var isClickable = false
+        let click = SingleClick()
+
+        override var mouseDownCanMoveWindow: Bool { !isClickable }
+
+        // Captions float over another app, which is usually the active one:
+        // the click must not be spent on activating the window.
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isClickable }
 
         override func updateTrackingAreas() {
             super.updateTrackingAreas()
@@ -560,6 +580,21 @@ struct HoverTracker: NSViewRepresentable {
 
         override func mouseExited(with event: NSEvent) {
             onChange(false)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            guard isClickable else { return super.mouseDown(with: event) }
+            click.mouseDown(with: event)
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard isClickable else { return super.mouseDragged(with: event) }
+            click.mouseDragged(with: event)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            guard isClickable else { return super.mouseUp(with: event) }
+            click.mouseUp(with: event)
         }
     }
 }
@@ -665,7 +700,7 @@ private struct WindowLevel: NSViewRepresentable {
 
             if !context.coordinator.placed {
                 context.coordinator.placed = true
-                Self.moveToPointerScreen(window)
+                Self.moveToOpeningScreen(window)
             }
         }
     }
@@ -674,9 +709,10 @@ private struct WindowLevel: NSViewRepresentable {
     /// with none saved picks a display by rules of its own, and on a
     /// multi-display desk either can be a screen that is rarely looked at. A
     /// window already on the pointer's screen keeps its remembered position.
-    private static func moveToPointerScreen(_ window: NSWindow) {
+    /// Under development, GUI_SCREEN names the display to open on instead.
+    private static func moveToOpeningScreen(_ window: NSWindow) {
         let pointer = NSEvent.mouseLocation
-        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(pointer, $0.frame, false) }),
+        guard let screen = GUIScreen.named ?? NSScreen.screens.first(where: { NSMouseInRect(pointer, $0.frame, false) }),
               window.screen != screen
         else { return }
         let visible = screen.visibleFrame

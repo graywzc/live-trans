@@ -2,8 +2,8 @@ import SwiftUI
 import XCTest
 @testable import LiveTrans
 
-/// The analysis button of a caption: hidden until the pointer is over the row,
-/// then a real button.
+/// A caption's row: the analysis button hidden until the pointer is over the
+/// row, and a click anywhere else in the row playing the video from it.
 @MainActor
 final class CaptionRowTests: XCTestCase {
     @Observable
@@ -38,11 +38,7 @@ final class CaptionRowTests: XCTestCase {
     private var window: NSWindow!
 
     override func setUp() async throws {
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 140),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
+        window = TestScreen.window(width: 400, height: 140)
         window.contentView = NSHostingView(rootView: Host(model: model))
         window.orderFrontRegardless()
         pump()
@@ -57,8 +53,8 @@ final class CaptionRowTests: XCTestCase {
         // Works with another app in front, where the captions usually are.
         XCTAssertEqual(tracker.trackingAreas.count, 1)
         XCTAssertTrue(tracker.trackingAreas[0].options.contains(.activeAlways))
-        // The whole row, not only the text in it.
-        XCTAssertEqual(tracker.frame.width, 368, accuracy: 1)
+        // The whole row, not only the text in it, and the highlight's margin.
+        XCTAssertEqual(tracker.frame.width, 380, accuracy: 1)
 
         // At the row's trailing end, level with the Japanese.
         let button = CGPoint(x: 374, y: 38)
@@ -78,13 +74,73 @@ final class CaptionRowTests: XCTestCase {
         XCTAssertEqual(model.analyzed, 1)
     }
 
-    func testTimeIsShownAndPlaysFromTheSentence() {
+    // The Japanese wraps after 食べ at 20 points in the 300 left beside the
+    // time and the button; its first line's base text is at y 28...48, the
+    // English under the second at y 100...115, and the time at x 328...358.
+
+    func testClickingTheJapanesePlaysFromTheSentence() {
         snapshot("row-time")
-        // Beside the analysis button, level with the Japanese, shown without
-        // hovering.
-        click(CGPoint(x: 342, y: 42))
+        click(CGPoint(x: 60, y: 40))
+        XCTAssertEqual(model.sought, 0, "not before a double-click is ruled out")
+        settle()
         XCTAssertEqual(model.sought, 1)
         XCTAssertEqual(model.analyzed, 0)
+        XCTAssertNil(model.selection)
+    }
+
+    func testClickingTheEnglishTheTimeOrTheSpacePlaysFromTheSentence() {
+        snapshot("row-english")
+        click(CGPoint(x: 60, y: 107))
+        settle()
+        XCTAssertEqual(model.sought, 1, "the English")
+        click(CGPoint(x: 342, y: 42))
+        settle()
+        XCTAssertEqual(model.sought, 2, "the time")
+        click(CGPoint(x: 250, y: 107))
+        settle()
+        XCTAssertEqual(model.sought, 3, "the space after the English")
+        XCTAssertEqual(model.analyzed, 0)
+    }
+
+    func testSelectingDoesNotPlay() {
+        click(CGPoint(x: 60, y: 40), clicks: 2)
+        settle()
+        XCTAssertNotNil(model.selection, "double-click selects the word")
+        XCTAssertEqual(model.sought, 0)
+
+        // Clicking away dismisses the selection and does no more.
+        click(CGPoint(x: 150, y: 40))
+        settle()
+        XCTAssertNil(model.selection)
+        XCTAssertEqual(model.sought, 0)
+
+        drag(from: CGPoint(x: 30, y: 40), to: CGPoint(x: 90, y: 40))
+        settle()
+        XCTAssertNotNil(model.selection, "a drag selects")
+        XCTAssertEqual(model.sought, 0)
+    }
+
+    func testRowIsHighlightedUnderThePointer() throws {
+        let tracker = try XCTUnwrap(hoverTracker(in: window.contentView!))
+        let inside = CGPoint(x: 200, y: 70)
+        XCTAssertEqual(brightness(at: inside), 0, accuracy: 0.02, "black until hovered")
+        tracker.mouseEntered(with: event(.mouseMoved, at: inside))
+        pump()
+        XCTAssertGreaterThan(brightness(at: inside), 0.05, "lit under the pointer")
+        tracker.mouseExited(with: event(.mouseMoved, at: inside))
+        pump()
+        XCTAssertEqual(brightness(at: inside), 0, accuracy: 0.02)
+    }
+
+    /// How light the window is at a point: 0 for black, 1 for white.
+    private func brightness(at point: CGPoint) -> CGFloat {
+        let view = window.contentView!
+        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: rep)
+        // The bitmap may be drawn at the screen's scale.
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        let color = rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))!
+        return color.usingColorSpace(.deviceRGB)!.brightnessComponent
     }
 
     private func hoverTracker(in view: NSView) -> HoverTracker.TrackerView? {
@@ -100,12 +156,27 @@ final class CaptionRowTests: XCTestCase {
         )!
     }
 
-    private func click(_ point: CGPoint) {
+    private func click(_ point: CGPoint, clicks: Int = 1) {
         // Both before pumping: a button that tracks the mouse in a loop of its
         // own has to find the mouse-up waiting in the queue.
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            NSApp.postEvent(event(type, at: point, clicks: 1), atStart: false)
+        for count in 1...clicks {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                NSApp.postEvent(event(type, at: point, clicks: count), atStart: false)
+            }
         }
+        pump()
+    }
+
+    private func drag(from start: CGPoint, to end: CGPoint) {
+        NSApp.postEvent(event(.leftMouseDown, at: start, clicks: 1), atStart: false)
+        NSApp.postEvent(event(.leftMouseDragged, at: end, clicks: 1), atStart: false)
+        NSApp.postEvent(event(.leftMouseUp, at: end, clicks: 1), atStart: false)
+        pump()
+    }
+
+    /// Lets a click's double-click interval pass, after which it counts.
+    private func settle() {
+        RunLoop.main.run(until: Date().addingTimeInterval(NSEvent.doubleClickInterval + 0.1))
         pump()
     }
 
