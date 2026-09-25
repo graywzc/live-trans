@@ -154,6 +154,69 @@ final class SpaceKeyTests: XCTestCase {
         XCTAssertFalse(SpaceKey.typesSpace(NSWindow()))
         XCTAssertFalse(SpaceKey.typesSpace(nil))
     }
+
+    @MainActor
+    private func window(editing responder: NSView?) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        if let responder {
+            responder.frame = window.contentView!.bounds
+            window.contentView!.addSubview(responder)
+            XCTAssertTrue(window.makeFirstResponder(responder))
+        }
+        addTeardownBlock { window.close() }
+        return window
+    }
+
+    private func key(_ character: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
+        NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: 0,
+            context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false,
+            keyCode: keyCode
+        )!
+    }
+
+    private var space: NSEvent { key(" ", keyCode: 49) }
+    private var controlC: NSEvent { key("c", keyCode: 8, modifiers: .control) }
+
+    @MainActor
+    func testSpaceTogglesTheVideoUnlessItWouldType() {
+        var toggles = 0
+        let idle = window(editing: nil)
+        XCTAssertNil(SpaceKey.handle(space, in: idle, toggle: { toggles += 1 }))
+        XCTAssertEqual(toggles, 1)
+
+        let typing = window(editing: NSTextView())
+        XCTAssertNotNil(SpaceKey.handle(space, in: typing, toggle: { toggles += 1 }))
+        XCTAssertEqual(toggles, 1)
+    }
+
+    @MainActor
+    func testControlCLeavesTheTextSoThatSpaceReachesTheVideo() {
+        var toggles = 0
+        let text = NSTextView()
+        let window = window(editing: text)
+        XCTAssertNil(SpaceKey.handle(controlC, in: window, toggle: { toggles += 1 }))
+        XCTAssertFalse(window.firstResponder === text)
+        XCTAssertNil(SpaceKey.handle(space, in: window, toggle: { toggles += 1 }))
+        XCTAssertEqual(toggles, 1)
+        // Plain C, and Control-C with nothing to leave, are someone else's.
+        XCTAssertNotNil(SpaceKey.handle(key("c", keyCode: 8), in: window, toggle: { toggles += 1 }))
+        XCTAssertNotNil(SpaceKey.handle(controlC, in: window, toggle: { toggles += 1 }))
+        XCTAssertEqual(toggles, 1)
+    }
+
+    @MainActor
+    func testControlCLeavesTheJishoPage() {
+        let web = WKWebView()
+        let window = window(editing: web)
+        XCTAssertTrue(SpaceKey.typesSpace(window.firstResponder))
+        XCTAssertNil(SpaceKey.handle(controlC, in: window, toggle: {}))
+        XCTAssertFalse(SpaceKey.typesSpace(window.firstResponder))
+    }
 }
 
 final class SentenceMomentTests: XCTestCase {

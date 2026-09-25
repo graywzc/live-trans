@@ -249,7 +249,9 @@ private struct VideoControls: View {
 
 /// Space plays and pauses, as in a video player, except where Space types:
 /// an editable text view (the follow-up box, any field being edited) or the
-/// Jisho page, whose search box can't be told apart from the outside.
+/// Jisho page, whose search box can't be told apart from the outside. There,
+/// Control-C takes the cursor out of the text, so that the next Space
+/// reaches the video without a click somewhere else first.
 struct SpaceKey: NSViewRepresentable {
     let action: () -> Void
 
@@ -263,12 +265,41 @@ struct SpaceKey: NSViewRepresentable {
 
     static func typesSpace(_ responder: NSResponder?) -> Bool {
         if let text = responder as? NSTextView, text.isEditable { return true }
+        return webView(around: responder) != nil
+    }
+
+    private static func webView(around responder: NSResponder?) -> WKWebView? {
         var view = responder as? NSView
         while let current = view {
-            if current is WKWebView { return true }
+            if let web = current as? WKWebView { return web }
             view = current.superview
         }
-        return false
+        return nil
+    }
+
+    /// What a key press in the window does; nil when it has been used up.
+    static func handle(_ event: NSEvent, in window: NSWindow, toggle: () -> Void) -> NSEvent? {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
+        let typing = typesSpace(window.firstResponder)
+        if event.keyCode == 49, modifiers.isEmpty, !typing {
+            if !event.isARepeat { toggle() }
+            return nil
+        }
+        if event.charactersIgnoringModifiers?.lowercased() == "c", modifiers == .control, typing {
+            stopTyping(in: window)
+            return nil
+        }
+        return event
+    }
+
+    /// Takes the cursor out of whatever is being typed in. A web page keeps
+    /// its own idea of which box is focused, which would show a cursor still
+    /// and take the focus straight back on the next click into the page.
+    static func stopTyping(in window: NSWindow) {
+        if let web = webView(around: window.firstResponder) {
+            web.evaluateJavaScript("document.activeElement && document.activeElement.blur()")
+        }
+        window.makeFirstResponder(nil)
     }
 
     final class MonitorView: NSView {
@@ -281,13 +312,8 @@ struct SpaceKey: NSViewRepresentable {
             monitor = nil
             guard window != nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, let window = self.window, event.window === window,
-                      event.keyCode == 49,
-                      event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock).isEmpty,
-                      !SpaceKey.typesSpace(window.firstResponder)
-                else { return event }
-                if !event.isARepeat { self.action() }
-                return nil
+                guard let self, let window = self.window, event.window === window else { return event }
+                return SpaceKey.handle(event, in: window, toggle: self.action)
             }
         }
     }

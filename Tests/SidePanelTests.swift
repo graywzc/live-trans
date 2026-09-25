@@ -87,3 +87,56 @@ final class SidePanelLaunchSnapshotTests: XCTestCase {
         }
     }
 }
+
+/// The question field in the real window: Control-C takes the cursor out of
+/// it, so that Space is the video's again.
+@MainActor
+final class QuestionFieldControlCTests: XCTestCase {
+    func testControlCLeavesTheQuestionField() throws {
+        let panel = SidePanel()
+        panel.show(.analysis)
+        let analyzer = SentenceAnalyzer(makeClient: { nil })
+        analyzer.analyze(Caption(id: 1, japanese: "最初", ruby: [], english: ""))
+
+        let root = ContentView()
+            .environment(CaptionEngine())
+            .environment(JishoBrowser())
+            .environment(analyzer)
+            .environment(panel)
+            .environment(ChromeVideo())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 960, height: 520),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: root)
+        window.orderFrontRegardless()
+        defer { window.close() }
+        func pump() {
+            for _ in 0..<3 {
+                while let event = NSApp.nextEvent(
+                    matching: .any, until: Date().addingTimeInterval(0.2), inMode: .default, dequeue: true
+                ) {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        pump()
+
+        func fields(_ v: NSView) -> [NSTextField] {
+            ((v as? NSTextField).map { $0.isEditable ? [$0] : [] } ?? []) + v.subviews.flatMap(fields)
+        }
+        let field = try XCTUnwrap(fields(try XCTUnwrap(window.contentView)).first, "no question field in the window")
+        XCTAssertTrue(window.makeFirstResponder(field))
+        XCTAssertTrue(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
+
+        let controlC = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .control, timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "\u{03}",
+            charactersIgnoringModifiers: "c", isARepeat: false, keyCode: 8
+        ))
+        NSApp.postEvent(controlC, atStart: false)
+        pump()
+        XCTAssertFalse(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
+    }
+}
