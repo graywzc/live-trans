@@ -404,11 +404,7 @@ extension FollowUpTests {
     func testTheNewestSentenceIsInViewAfterComingBackFromJisho() async throws {
         let panel = SidePanel()
         panel.show(.analysis)
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
+        let window = TestScreen.window(width: 480, height: 360)
         window.contentView = NSHostingView(rootView: SidePanelView()
             .environment(analyzer).environment(panel).environment(JishoBrowser())
             .frame(width: 480, height: 360)
@@ -549,11 +545,7 @@ final class AnalysisPanelTests: XCTestCase {
         let analyzer = SentenceAnalyzer { AnalysisClient(baseURL: url, model: model) }
         let panel = SidePanel()
         panel.show(.analysis)
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 720),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
+        let window = TestScreen.window(width: 640, height: 720)
         window.contentView = NSHostingView(rootView: SidePanelView()
             .environment(analyzer).environment(panel).environment(JishoBrowser())
             .frame(width: 640, height: 720)

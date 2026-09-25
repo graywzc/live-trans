@@ -700,7 +700,7 @@ private struct WindowLevel: NSViewRepresentable {
 
             if !context.coordinator.placed {
                 context.coordinator.placed = true
-                Self.moveToPointerScreen(window)
+                Self.moveToOpeningScreen(window)
             }
         }
     }
@@ -709,9 +709,10 @@ private struct WindowLevel: NSViewRepresentable {
     /// with none saved picks a display by rules of its own, and on a
     /// multi-display desk either can be a screen that is rarely looked at. A
     /// window already on the pointer's screen keeps its remembered position.
-    private static func moveToPointerScreen(_ window: NSWindow) {
+    /// Under development, GUI_SCREEN names the display to open on instead.
+    private static func moveToOpeningScreen(_ window: NSWindow) {
         let pointer = NSEvent.mouseLocation
-        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(pointer, $0.frame, false) }),
+        guard let screen = GUIScreen.named ?? NSScreen.screens.first(where: { NSMouseInRect(pointer, $0.frame, false) }),
               window.screen != screen
         else { return }
         let visible = screen.visibleFrame

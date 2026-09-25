@@ -45,11 +45,7 @@ final class SelectionInteractionTests: XCTestCase {
     private var window: NSWindow!
 
     override func setUp() async throws {
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 140),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
+        window = TestScreen.window(width: 400, height: 140)
         window.contentView = NSHostingView(rootView: Host(model: model))
         window.orderFrontRegardless()
         pump()

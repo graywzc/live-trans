@@ -30,11 +30,7 @@ final class LookupViewTests: XCTestCase {
             .background(Color.black)
             .preferredColorScheme(.dark)
         let hosting = NSHostingView(rootView: view)
-        let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: hosting.fittingSize),
-            styleMask: [.titled], backing: .buffered, defer: false
-        )
-        window.isReleasedWhenClosed = false
+        let window = TestScreen.window(size: hosting.fittingSize)
         window.contentView = hosting
         window.orderFrontRegardless()
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
