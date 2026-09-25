@@ -321,16 +321,19 @@ final class CaptionEngine {
         }
     }
 
-    /// Where each sentence of an utterance starts. Only the utterance's start
-    /// was noted, so the later sentences are placed by their share of the
-    /// text, which is close enough to land on the right sentence.
+    /// Where each sentence of an utterance starts and ends. Only the
+    /// utterance's start and length were noted, so the sentences are placed
+    /// by their share of the text, which is close enough to land on the right
+    /// sentence.
     nonisolated static func moments(of lines: [String], from start: VideoMoment?, spoken: TimeInterval) -> [VideoMoment?] {
         guard let start else { return lines.map { _ in nil } }
         let total = Double(max(lines.reduce(0) { $0 + $1.count }, 1))
         var before = 0
         return lines.map { line in
-            defer { before += line.count }
-            return start.advanced(by: max(spoken, 0) * Double(before) / total)
+            var moment = start.advanced(by: max(spoken, 0) * Double(before) / total)
+            before += line.count
+            moment.end = start.advanced(by: max(spoken, 0) * Double(before) / total).seconds
+            return moment
         }
     }
 

@@ -221,12 +221,14 @@ final class ChromeVideo {
     }
 }
 
-/// A point in a Chrome video: where a sentence started.
+/// A stretch of a Chrome video: where a sentence was said.
 struct VideoMoment: Equatable {
     let tabID: Int
     /// The page, so a tab that has moved on to the next video isn't sought.
     let url: String
     let seconds: Double
+    /// Where the sentence ends, so playing it can stop there.
+    var end: Double?
     /// Video seconds per second heard.
     var rate: Double = 1
 
@@ -272,6 +274,9 @@ enum ChromeScript {
     /// Seeking lands this far before the sentence, so its first word isn't
     /// clipped: the VAD only notices speech once it is under way.
     static let seekLead = 0.5
+    /// Playing a sentence runs this far past its end, which is an estimate
+    /// and shouldn't cut the last word.
+    static let seekTail = 0.3
 
     struct Failure: Error {
         let message: String
@@ -297,8 +302,22 @@ enum ChromeScript {
             "v.currentTime = Math.min(Math.max(v.currentTime + (\(seconds)), 0), v.duration || Infinity);"
         case .seek(let moment):
             "if (location.href !== \(javaScriptString(moment.url))) return 'moved'; "
-                + "v.currentTime = Math.max(\(moment.seconds - seekLead), 0); v.play();"
+                + "const from = Math.max(\(moment.seconds - seekLead), 0); "
+                + (moment.end.map { "\(stopScript(at: $0 + seekTail)) " } ?? "")
+                + "v.currentTime = from; v.play();"
         }
+    }
+
+    /// Pauses `v` once it reaches `end`, so one sentence can be played by
+    /// itself. Only one such stop is kept: a fresh seek replaces the last
+    /// one's, and it drops itself when the user goes back before the sentence
+    /// (another seek or a skip), so it doesn't pause them later out of nowhere.
+    static func stopScript(at end: Double) -> String {
+        "if (v.liveTransStop) v.removeEventListener('timeupdate', v.liveTransStop); "
+            + "v.liveTransStop = () => { if (v.currentTime >= \(end)) { v.pause(); } "
+            + "if (v.currentTime >= \(end) || v.currentTime < from - 1) "
+            + "{ v.removeEventListener('timeupdate', v.liveTransStop); v.liveTransStop = null; } }; "
+            + "v.addEventListener('timeupdate', v.liveTransStop);"
     }
 
     /// Where the video is and when that was, so the caller can work back to
