@@ -78,7 +78,8 @@ final class CaptionRowTests: XCTestCase {
     // time and the button; its first line's base text is at y 28...48, the
     // English under the second at y 100...115, and the time at x 328...358.
 
-    func testClickingTheJapanesePlaysFromTheSentence() {
+    func testClickingTheJapanesePlaysFromTheSentence() throws {
+        try hover()
         snapshot("row-time")
         click(CGPoint(x: 60, y: 40))
         XCTAssertEqual(model.sought, 0, "not before a double-click is ruled out")
@@ -88,8 +89,8 @@ final class CaptionRowTests: XCTestCase {
         XCTAssertNil(model.selection)
     }
 
-    func testClickingTheEnglishTheTimeOrTheSpacePlaysFromTheSentence() {
-        snapshot("row-english")
+    func testClickingTheEnglishTheTimeOrTheSpacePlaysFromTheSentence() throws {
+        try hover()
         click(CGPoint(x: 60, y: 107))
         settle()
         XCTAssertEqual(model.sought, 1, "the English")
@@ -102,7 +103,8 @@ final class CaptionRowTests: XCTestCase {
         XCTAssertEqual(model.analyzed, 0)
     }
 
-    func testSelectingDoesNotPlay() {
+    func testSelectingDoesNotPlay() throws {
+        try hover()
         click(CGPoint(x: 60, y: 40), clicks: 2)
         settle()
         XCTAssertNotNil(model.selection, "double-click selects the word")
@@ -130,6 +132,14 @@ final class CaptionRowTests: XCTestCase {
         tracker.mouseExited(with: event(.mouseMoved, at: inside))
         pump()
         XCTAssertEqual(brightness(at: inside), 0, accuracy: 0.02)
+    }
+
+    /// Puts the pointer over the row, as it is when the row is clicked: the
+    /// highlight is showing, and must not take the click.
+    private func hover() throws {
+        let tracker = try XCTUnwrap(hoverTracker(in: window.contentView!))
+        tracker.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: 200, y: 70)))
+        pump()
     }
 
     /// How light the window is at a point: 0 for black, 1 for white.

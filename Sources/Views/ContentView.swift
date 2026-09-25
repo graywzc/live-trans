@@ -519,6 +519,9 @@ struct CaptionRow: View {
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.white.opacity(isHovered && onSeek != nil ? 0.1 : 0))
+                // Showing, a shape takes clicks; the row's must reach the
+                // tracker behind it.
+                .allowsHitTesting(false)
         )
         .background(HoverTracker(isHovered: $isHovered, onClick: onSeek))
         .padding(-Self.highlightInset)
