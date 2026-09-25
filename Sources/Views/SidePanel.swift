@@ -18,6 +18,19 @@ final class SidePanel {
         self.tab = tab
         isPresented = true
     }
+
+    /// The panel can be open from the first frame when the app is launched
+    /// with `-sidePanel jisho` or `-sidePanel analysis` (UserDefaults reads
+    /// such arguments), so a run of the app can show both halves of the
+    /// window without a caption to look up first. Nothing is persisted: the
+    /// next ordinary launch starts with the captions alone again.
+    func openIfRequestedAtLaunch(defaults: UserDefaults = .standard) {
+        switch defaults.string(forKey: "sidePanel") {
+        case "jisho": show(.jisho)
+        case "analysis": show(.analysis)
+        default: break
+        }
+    }
 }
 
 /// Beside the captions rather than over them or in a window that has to be
