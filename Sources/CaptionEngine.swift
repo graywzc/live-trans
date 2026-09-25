@@ -54,6 +54,16 @@ final class CaptionEngine {
 
     private static let remoteRetries = 4
     private static let remoteRetryDelay: UInt64 = 2_000_000_000
+    /// Whisper's own default: the gains past it are small, and the caption
+    /// would otherwise lag the video. Partials stay at 1, being a preview.
+    static let liveBeamSize = 5
+    /// A sentence heard again has no one waiting on it.
+    static let replayBeamSize = 10
+    /// How many earlier captions a replay's transcription is told about, so
+    /// a name or a term heard before is heard the same way again.
+    static let replayContextCaptions = 2
+    /// Between the click and Chrome starting the sentence.
+    static let replayLatency: TimeInterval = 2
 
     private var session: ServerSession?
     private var source: AudioSource?
@@ -73,6 +83,16 @@ final class CaptionEngine {
     private var partialUtterance = -1
     private var settledUtterance = -1
     private var utteranceMoments: [Int: Task<VideoMoment?, Never>] = [:]
+    /// A caption whose sentence is being played again from the video. Until
+    /// the deadline, an utterance that starts is that sentence heard again,
+    /// and what the server makes of it this time replaces the caption.
+    private var replay: (captionID: Int, deadline: Date)?
+    /// Utterances that are a replay, by the caption each corrects.
+    private var replayUtterances: [Int: Int] = [:]
+    /// The last line written for each corrected caption, so a sentence that
+    /// comes back as two utterances lands in order rather than the second
+    /// one appending at the end.
+    private var replayTails: [Int: Int] = [:]
     /// Held while captioning so the display doesn't sleep under the captions.
     private var activity: NSObjectProtocol?
 
@@ -94,6 +114,9 @@ final class CaptionEngine {
         finals?.finish()
         finals = nil
         utteranceMoments = [:]
+        replay = nil
+        replayUtterances = [:]
+        replayTails = [:]
         source?.stop()
         source = nil
         outputRouter.restore()
@@ -114,6 +137,33 @@ final class CaptionEngine {
 
     func clear() {
         captions = []
+        replayTails = [:]
+    }
+
+    /// The caption's sentence is about to be played again from the video:
+    /// what is heard next is that sentence, and replaces the caption. A
+    /// caption cleared or replaced meanwhile is left alone.
+    func expectReplay(of caption: Caption) {
+        guard isRunning, let moment = caption.moment else { return }
+        replay = (caption.id, Self.replayDeadline(for: moment, from: Date()))
+        replayTails[caption.id] = nil
+    }
+
+    /// The playback did not happen after all.
+    func cancelReplay(of caption: Caption) {
+        if replay?.captionID == caption.id {
+            replay = nil
+        }
+    }
+
+    /// Speech of a replayed sentence starts before this: the sentence is
+    /// played with a lead and a tail, and a caption's start is an estimate,
+    /// so the whole playback counts rather than just its first seconds.
+    nonisolated static func replayDeadline(for moment: VideoMoment, from now: Date) -> Date {
+        let end = moment.end ?? moment.seconds + UtteranceSegmenter.Config().maxUtterance
+        let played = (max(end - moment.seconds, 0) + ChromeScript.seekLead + ChromeScript.seekTail)
+            / max(moment.rate, 0.1)
+        return now.addingTimeInterval(played + replayLatency)
     }
 
     private func run() async {
@@ -223,6 +273,13 @@ final class CaptionEngine {
             switch event {
             case .started(let utterance):
                 isSpeaking = true
+                if let replay {
+                    if Date() <= replay.deadline {
+                        replayUtterances[utterance] = replay.captionID
+                    } else {
+                        self.replay = nil
+                    }
+                }
                 if let videoClock {
                     let now = Date()
                     utteranceMoments[utterance] = Task { await videoClock(now) }
@@ -241,6 +298,7 @@ final class CaptionEngine {
                 isSpeaking = false
                 print("utterance \(utterance) discarded: too brief to be speech")
                 utteranceMoments[utterance] = nil
+                replayUtterances[utterance] = nil
                 settle(utterance)
             }
         }
@@ -250,7 +308,9 @@ final class CaptionEngine {
     /// server is slower than the partial interval the stale one is skipped
     /// rather than queued behind.
     private func requestPartial(_ audio: Data, utterance: Int, client: ASRClient) {
-        guard partialTask == nil else { return }
+        // A replay's preview would only show under the captions what is
+        // about to replace one of them.
+        guard partialTask == nil, replayUtterances[utterance] == nil else { return }
         partialTask = Task {
             defer { partialTask = nil }
             guard
@@ -277,18 +337,28 @@ final class CaptionEngine {
 
     private func transcribeFinal(_ audio: Data, utterance: Int, client: ASRClient) async {
         let moment = utteranceMoments.removeValue(forKey: utterance)
+        let correcting = replayUtterances.removeValue(forKey: utterance)
+        let beamSize = correcting == nil ? Self.liveBeamSize : Self.replayBeamSize
+        let prompt = correcting.map(replayPrompt(for:))
         // The moment is when the first speech was noticed, after the pre-roll.
         let spoken = Double(audio.count / AudioFormat.frameBytes) * AudioFormat.frameDuration
             - segmenter.config.preRoll - segmenter.config.postRoll
         for attempt in 1...Self.remoteRetries {
             do {
-                let result = try await client.transcribe(pcm: audio, beamSize: 3, translate: true)
+                let result = try await client.transcribe(
+                    pcm: audio, beamSize: beamSize, translate: true, prompt: prompt
+                )
                 guard !Task.isCancelled else { return }
                 status = .listening(serverLabel)
                 if result.lines.allSatisfy(\.ja.isEmpty) {
                     print("utterance \(utterance): the server heard no words")
                 }
-                append(result, from: await moment?.value, spoken: spoken)
+                let lines = captionLines(result, from: await moment?.value, spoken: spoken)
+                if let correcting {
+                    correct(correcting, with: lines)
+                } else {
+                    captions.append(contentsOf: lines)
+                }
                 return
             } catch {
                 guard !Task.isCancelled else { return }
@@ -305,20 +375,72 @@ final class CaptionEngine {
         }
     }
 
-    private func append(_ result: Transcription, from moment: VideoMoment?, spoken: TimeInterval) {
+    private func captionLines(_ result: Transcription, from moment: VideoMoment?, spoken: TimeInterval) -> [Caption] {
         let lines = result.lines.filter { !$0.ja.isEmpty }
         let moments = Self.moments(of: lines.map(\.ja), from: moment, spoken: spoken)
-        for (line, moment) in zip(lines, moments) {
+        return zip(lines, moments).map { line, moment in
             print("\(line.ja)\n-> \(line.en)")
-            captions.append(Caption(
+            defer { nextCaptionID += 1 }
+            return Caption(
                 id: nextCaptionID,
                 japanese: line.ja,
                 ruby: Furigana.annotate(line.ja),
                 english: line.en,
                 moment: moment
-            ))
-            nextCaptionID += 1
+            )
         }
+    }
+
+    /// What the sentence was heard as this time takes the caption's place.
+    /// Nothing heard leaves the caption as it was. The new lines get ids of
+    /// their own: an analysis of the old text must not pass for one of the
+    /// new.
+    private func correct(_ captionID: Int, with lines: [Caption]) {
+        guard !lines.isEmpty else {
+            print("caption \(captionID): nothing heard on replay, kept")
+            return
+        }
+        var lines = lines
+        // A sentence heard again from the video is where the video was when
+        // it was heard, but a moment lost to a Chrome hiccup is not worth
+        // losing the ability to play the corrected sentence.
+        if lines[0].moment == nil, let old = captions.first(where: { $0.id == captionID }) {
+            lines[0].moment = old.moment
+        }
+        let (spliced, tail) = Self.splice(lines, into: captions, replacing: captionID, after: replayTails[captionID])
+        captions = spliced
+        replayTails[captionID] = tail
+    }
+
+    /// `lines` in place of the caption `replacing`, or after `tail`, the last
+    /// line written for it, when the caption has already been replaced by an
+    /// earlier utterance of the same playback. A caption that is gone
+    /// (cleared) is heard as new captions at the end. Returns the captions
+    /// and the id of the last line placed.
+    nonisolated static func splice(
+        _ lines: [Caption], into captions: [Caption], replacing captionID: Int, after tail: Int?
+    ) -> ([Caption], tail: Int) {
+        var captions = captions
+        if let tail, let index = captions.firstIndex(where: { $0.id == tail }) {
+            captions.insert(contentsOf: lines, at: index + 1)
+        } else if let index = captions.firstIndex(where: { $0.id == captionID }) {
+            captions.replaceSubrange(index...index, with: lines)
+        } else {
+            captions.append(contentsOf: lines)
+        }
+        return (captions, lines.last!.id)
+    }
+
+    /// The captions before the one being corrected, for the transcription to
+    /// hear the sentence in context. Once part of the sentence has been
+    /// placed, the rest follows on from that part.
+    private func replayPrompt(for captionID: Int) -> String {
+        let index = if let tail = replayTails[captionID], let placed = captions.firstIndex(where: { $0.id == tail }) {
+            placed + 1
+        } else {
+            captions.firstIndex { $0.id == captionID } ?? captions.count
+        }
+        return captions[max(index - Self.replayContextCaptions, 0)..<index].map(\.japanese).joined()
     }
 
     /// Where each sentence of an utterance starts and ends. Only the

@@ -55,20 +55,12 @@ struct ASRClient {
     }
 
     /// Send PCM s16le mono 16 kHz upstream. Throws on transport failure so the
-    /// caller can retry.
-    func transcribe(pcm: Data, beamSize: Int, translate: Bool) async throws -> Transcription {
-        var components = URLComponents(
-            url: baseURL.appending(path: "transcribe"), resolvingAgainstBaseURL: false
-        )!
-        components.queryItems = [
-            URLQueryItem(name: "beam_size", value: String(beamSize)),
-            URLQueryItem(name: "translate", value: translate ? "1" : "0"),
-        ]
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 20
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-
+    /// caller can retry. `prompt` is text said just before, which Whisper
+    /// reads before listening.
+    func transcribe(pcm: Data, beamSize: Int, translate: Bool, prompt: String? = nil) async throws -> Transcription {
+        let request = Self.transcribeRequest(
+            baseURL: baseURL, beamSize: beamSize, translate: translate, prompt: prompt
+        )
         let (data, response) = try await session.upload(for: request, from: pcm)
         return try Self.decodeTranscription(
             data, statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -82,6 +74,28 @@ struct ASRClient {
         request.httpMethod = "POST"
         request.timeoutInterval = 5
         _ = try? await session.data(for: request)
+    }
+
+    static func transcribeRequest(baseURL: URL, beamSize: Int, translate: Bool, prompt: String?) -> URLRequest {
+        var components = URLComponents(
+            url: baseURL.appending(path: "transcribe"), resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "beam_size", value: String(beamSize)),
+            URLQueryItem(name: "translate", value: translate ? "1" : "0"),
+        ]
+        if let prompt, !prompt.isEmpty {
+            components.queryItems?.append(URLQueryItem(name: "prompt", value: prompt))
+            // Foundation leaves "+" as is, which a query parser reads as a
+            // space.
+            components.percentEncodedQuery = components.percentEncodedQuery?
+                .replacingOccurrences(of: "+", with: "%2B")
+        }
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        return request
     }
 
     static func decodeTranscription(_ data: Data, statusCode: Int) throws -> Transcription {

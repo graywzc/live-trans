@@ -14,7 +14,7 @@ the text->text NLLB model instead.
 
 POST /shutdown     exit now and release the GPU (unloads the ollama model too)
 POST /transcribe   body: raw PCM s16le mono 16kHz
-                   query: beam_size=3, translate=1
+                   query: beam_size=3, translate=1, prompt=<text said before>
                    -> {"ja": "...", "en": "...", "rtf": 0.05,
                        "lines": [{"ja": "...", "en": "..."}, ...]}
                    "lines" is the same text, one sentence per entry.
@@ -135,8 +135,11 @@ def decode_pcm(pcm_bytes):
     return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def run_whisper(audio, beam_size=3, task="transcribe"):
+def run_whisper(audio, beam_size=3, task="transcribe", prompt=None):
     """task="transcribe" -> Japanese, task="translate" -> English.
+
+    `prompt` is what was said just before the audio, given to Whisper as
+    context: a name or a term it has seen is one it is likelier to hear.
 
     Returns Whisper's segments as a list. It ends a segment at a pause in the
     speech, so the boundaries are worth keeping: they are the only sign of a
@@ -146,7 +149,8 @@ def run_whisper(audio, beam_size=3, task="transcribe"):
         return []
     with _asr_lock:
         segments, _ = _asr.transcribe(
-            audio, language="ja", task=task, beam_size=beam_size, vad_filter=False
+            audio, language="ja", task=task, beam_size=beam_size, vad_filter=False,
+            initial_prompt=prompt or None,
         )
         return [s.text.strip() for s in segments if s.text.strip()]
 
@@ -338,6 +342,7 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         beam_size = int(query.get("beam_size", ["3"])[0])
         want_translation = query.get("translate", ["1"])[0] not in ("0", "false")
+        prompt = query.get("prompt", [""])[0].strip()
 
         length = int(self.headers.get("Content-Length", 0))
         pcm = self.rfile.read(length) if length else b""
@@ -346,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
             t0 = time.time()
             audio = decode_pcm(pcm)
             duration = audio.size / SAMPLE_RATE
-            segments = run_whisper(audio, beam_size=beam_size)
+            segments = run_whisper(audio, beam_size=beam_size, prompt=prompt)
             ja = "".join(segments)
             pairs = [(ja, "")] if ja else []
             if want_translation and ja and not _is_untranslatable(ja):
