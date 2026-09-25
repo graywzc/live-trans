@@ -50,9 +50,13 @@ final class ChromeVideo {
     private var hasReachedChrome = false
     private let queue = DispatchQueue(label: "ChromeVideo")
 
-    func send(_ command: Command) {
+    /// `completion` is told whether the video did what was asked.
+    func send(_ command: Command, completion: (@MainActor (Bool) -> Void)? = nil) {
         // A click while Chrome is still answering would race the first one.
-        guard !inFlight, chromeIsRunning() else { return }
+        guard !inFlight, chromeIsRunning() else {
+            completion?(false)
+            return
+        }
         inFlight = true
         let target = if case .seek(let moment) = command { moment.tabID } else { pinned?.id }
         let source = ChromeScript.source(for: command, pinned: target, preferring: linked?.id)
@@ -60,6 +64,11 @@ final class ChromeVideo {
             let outcome = ChromeScript.run(source)
             Task { @MainActor in
                 self.inFlight = false
+                if case .controlled = outcome {
+                    completion?(true)
+                } else {
+                    completion?(false)
+                }
                 if case .seek = command {
                     self.applySeek(outcome)
                 } else {

@@ -197,6 +197,16 @@ agent or a memory layer in front of it would see the traffic. Whether the
 server logs its requests (vLLM's `--enable-log-requests`) is up to its own
 configuration.
 
+When the sound is a video playing in Chrome, each caption notes where in the
+video its sentence was said, and shows the time. Click a caption to play its
+sentence again from there; the video pauses when the sentence ends. What is
+heard on that replay is transcribed again, taking its time over it (a wider
+search, with the captions before it as context), and replaces the caption. So
+when a line looks wrong, click it: it is heard once more, and corrected if the
+model does better the second time. This needs a server fetched on or after the
+release that added it; an older `asr_server.py` still works, without the
+context.
+
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. The share button exports the session as
 text; nothing is saved otherwise.

@@ -240,3 +240,80 @@ final class AudioInputDeviceTests: XCTestCase {
         XCTAssertNil(AudioInputDevice.match("", in: devices))
     }
 }
+
+final class TranscribeRequestTests: XCTestCase {
+    private let base = URL(string: "http://gpu:8765")!
+
+    func testLiveRequestHasNoPrompt() {
+        let request = ASRClient.transcribeRequest(baseURL: base, beamSize: 5, translate: true, prompt: nil)
+        XCTAssertEqual(request.url?.absoluteString, "http://gpu:8765/transcribe?beam_size=5&translate=1")
+        XCTAssertEqual(request.httpMethod, "POST")
+    }
+
+    func testPromptTravelsInTheQuery() {
+        let request = ASRClient.transcribeRequest(
+            baseURL: base, beamSize: 10, translate: true, prompt: "昨日は雨&風+雪"
+        )
+        let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(items.first { $0.name == "prompt" }?.value, "昨日は雨&風+雪")
+        XCTAssertEqual(items.first { $0.name == "beam_size" }?.value, "10")
+        // A query parser reads a bare "+" as a space.
+        XCTAssertFalse(request.url!.absoluteString.contains("+"))
+    }
+
+    func testEmptyPromptIsLeftOut() {
+        let request = ASRClient.transcribeRequest(baseURL: base, beamSize: 5, translate: false, prompt: "")
+        XCTAssertEqual(request.url?.absoluteString, "http://gpu:8765/transcribe?beam_size=5&translate=0")
+    }
+}
+
+final class ReplayCorrectionTests: XCTestCase {
+    private func caption(_ id: Int, _ text: String) -> Caption {
+        Caption(id: id, japanese: text, ruby: [], english: "", moment: nil)
+    }
+
+    func testReplacesTheCaptionInPlace() {
+        let captions = [caption(0, "一"), caption(1, "二"), caption(2, "三")]
+        let (result, tail) = CaptionEngine.splice(
+            [caption(3, "弐"), caption(4, "ニ")], into: captions, replacing: 1, after: nil
+        )
+        XCTAssertEqual(result.map(\.japanese), ["一", "弐", "ニ", "三"])
+        XCTAssertEqual(tail, 4)
+    }
+
+    /// A sentence played back with a pause in it comes back as two
+    /// utterances; the second belongs after the first, not at the end.
+    func testASecondUtteranceOfTheSameReplayFollowsTheFirst() {
+        let captions = [caption(0, "一"), caption(3, "弐"), caption(2, "三")]
+        let (result, tail) = CaptionEngine.splice([caption(4, "ニ")], into: captions, replacing: 1, after: 3)
+        XCTAssertEqual(result.map(\.japanese), ["一", "弐", "ニ", "三"])
+        XCTAssertEqual(tail, 4)
+    }
+
+    func testAClearedCaptionIsHeardAsANewOne() {
+        let (result, _) = CaptionEngine.splice([caption(4, "ニ")], into: [caption(3, "四")], replacing: 1, after: nil)
+        XCTAssertEqual(result.map(\.japanese), ["四", "ニ"])
+    }
+
+    func testDeadlineCoversTheWholePlayback() {
+        let now = Date(timeIntervalSince1970: 1000)
+        var moment = VideoMoment(tabID: 1, url: "u", seconds: 60)
+        moment.end = 64
+        let deadline = CaptionEngine.replayDeadline(for: moment, from: now)
+        // 4 s of sentence, the lead and tail it is played with, and the
+        // time Chrome takes to get going.
+        XCTAssertEqual(
+            deadline.timeIntervalSince(now),
+            4 + ChromeScript.seekLead + ChromeScript.seekTail + CaptionEngine.replayLatency, accuracy: 0.001
+        )
+        // Played at double speed, it is over sooner.
+        moment.rate = 2
+        XCTAssertLessThan(CaptionEngine.replayDeadline(for: moment, from: now), deadline)
+    }
+
+    func testASentenceWithoutAnEndIsGivenTheLongestUtterance() {
+        let now = Date()
+        let moment = VideoMoment(tabID: 1, url: "u", seconds: 60)
+        XCTAssertGreaterThan(CaptionEngine.replayDeadline(for: moment, from: now).timeIntervalSince(now), 12)
+    }
+}
