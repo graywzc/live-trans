@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     override init() {
         super.init()
         engine.videoClock = { [video] in await video.moment(at: $0) }
-        panel.openIfRequestedAtLaunch()
+        panel.applyLaunchArgument()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

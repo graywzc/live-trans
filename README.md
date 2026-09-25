@@ -229,8 +229,9 @@ afconvert -f WAVE -d LEI16@16000 -c 1 clip.aiff clip.wav
 LiveTrans.app/Contents/MacOS/LiveTrans -demoAudioPath "$PWD/clip.wav" -autoStart YES
 ```
 
-`-sidePanel jisho` or `-sidePanel analysis` opens the side panel from the
-first frame, so the whole window can be seen without a caption to look up.
+The window opens with the captions and the side panel side by side;
+`-sidePanel jisho`, `-sidePanel analysis` or `-sidePanel closed` picks what
+the panel shows at launch, or starts with the captions alone.
 
 Captions are echoed to stdout. Unit tests:
 

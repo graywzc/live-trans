@@ -12,43 +12,50 @@ final class SidePanelTests: XCTestCase {
         return defaults
     }
 
-    func testStartsClosedWithoutTheArgument() {
+    func testStartsOpenOnJishoWithoutTheArgument() {
         let panel = SidePanel()
-        panel.openIfRequestedAtLaunch(defaults: defaults(sidePanel: nil))
+        panel.applyLaunchArgument(defaults: defaults(sidePanel: nil))
+        XCTAssertTrue(panel.isPresented)
+        XCTAssertEqual(panel.tab, .jisho)
+    }
+
+    func testClosedStartsWithTheCaptionsAlone() {
+        let panel = SidePanel()
+        panel.applyLaunchArgument(defaults: defaults(sidePanel: "closed"))
         XCTAssertFalse(panel.isPresented)
     }
 
     func testTheArgumentOpensTheNamedTab() {
         let jisho = SidePanel()
-        jisho.openIfRequestedAtLaunch(defaults: defaults(sidePanel: "jisho"))
+        jisho.applyLaunchArgument(defaults: defaults(sidePanel: "jisho"))
         XCTAssertTrue(jisho.isPresented)
         XCTAssertEqual(jisho.tab, .jisho)
 
         let analysis = SidePanel()
-        analysis.openIfRequestedAtLaunch(defaults: defaults(sidePanel: "analysis"))
+        analysis.applyLaunchArgument(defaults: defaults(sidePanel: "analysis"))
         XCTAssertTrue(analysis.isPresented)
         XCTAssertEqual(analysis.tab, .analysis)
     }
 
     func testAnUnknownValueIsIgnored() {
         let panel = SidePanel()
-        panel.openIfRequestedAtLaunch(defaults: defaults(sidePanel: "both"))
-        XCTAssertFalse(panel.isPresented)
+        panel.applyLaunchArgument(defaults: defaults(sidePanel: "both"))
+        XCTAssertTrue(panel.isPresented)
+        XCTAssertEqual(panel.tab, .jisho)
     }
 }
 
-/// The whole window as the launch argument leaves it: captions on the left,
-/// the panel on the right, from the first frame.
+/// The whole window as an ordinary launch leaves it: captions on the left,
+/// the panel on the right, from the first frame, with no argument given.
 @MainActor
 final class SidePanelLaunchSnapshotTests: XCTestCase {
     func testTheWindowOpensWithBothHalves() throws {
         let suite = "SidePanelLaunchSnapshotTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
-        defaults.set("jisho", forKey: "sidePanel")
 
         let panel = SidePanel()
-        panel.openIfRequestedAtLaunch(defaults: defaults)
+        panel.applyLaunchArgument(defaults: defaults)
 
         let root = ContentView()
             .environment(CaptionEngine())
