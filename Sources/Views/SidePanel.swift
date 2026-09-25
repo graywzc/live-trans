@@ -11,7 +11,9 @@ final class SidePanel {
         case analysis
     }
 
-    var isPresented = false
+    /// Open from the first frame: the window is captions and a panel, not
+    /// captions that a panel joins once something has been looked up.
+    var isPresented = true
     var tab = Tab.jisho
 
     func show(_ tab: Tab) {
@@ -19,15 +21,15 @@ final class SidePanel {
         isPresented = true
     }
 
-    /// The panel can be open from the first frame when the app is launched
-    /// with `-sidePanel jisho` or `-sidePanel analysis` (UserDefaults reads
-    /// such arguments), so a run of the app can show both halves of the
-    /// window without a caption to look up first. Nothing is persisted: the
-    /// next ordinary launch starts with the captions alone again.
-    func openIfRequestedAtLaunch(defaults: UserDefaults = .standard) {
+    /// `-sidePanel jisho`, `-sidePanel analysis` or `-sidePanel closed`
+    /// (UserDefaults reads such arguments) picks what the panel shows at
+    /// launch, or leaves the captions alone. Nothing is persisted: the next
+    /// ordinary launch opens the panel on Jisho again.
+    func applyLaunchArgument(defaults: UserDefaults = .standard) {
         switch defaults.string(forKey: "sidePanel") {
         case "jisho": show(.jisho)
         case "analysis": show(.analysis)
+        case "closed": isPresented = false
         default: break
         }
     }
