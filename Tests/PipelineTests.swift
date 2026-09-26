@@ -267,73 +267,6 @@ final class TranscribeRequestTests: XCTestCase {
     }
 }
 
-final class ReplayCorrectionTests: XCTestCase {
-    private func caption(_ id: Int, _ text: String) -> Caption {
-        Caption(id: id, japanese: text, ruby: [], english: "", moment: nil)
-    }
-
-    func testReplacesTheCaptionInPlace() {
-        let captions = [caption(0, "一"), caption(1, "二"), caption(2, "三")]
-        let (result, tail) = CaptionEngine.splice(
-            [caption(3, "弐"), caption(4, "ニ")], into: captions, replacing: 1, after: nil
-        )
-        XCTAssertEqual(result.map(\.japanese), ["一", "弐", "ニ", "三"])
-        XCTAssertEqual(tail, 4)
-    }
-
-    /// A sentence played back with a pause in it comes back as two
-    /// utterances; the second belongs after the first, not at the end.
-    func testASecondUtteranceOfTheSameReplayFollowsTheFirst() {
-        let captions = [caption(0, "一"), caption(3, "弐"), caption(2, "三")]
-        let (result, tail) = CaptionEngine.splice([caption(4, "ニ")], into: captions, replacing: 1, after: 3)
-        XCTAssertEqual(result.map(\.japanese), ["一", "弐", "ニ", "三"])
-        XCTAssertEqual(tail, 4)
-    }
-
-    func testAClearedCaptionIsHeardAsANewOne() {
-        let (result, _) = CaptionEngine.splice([caption(4, "ニ")], into: [caption(3, "四")], replacing: 1, after: nil)
-        XCTAssertEqual(result.map(\.japanese), ["四", "ニ"])
-    }
-
-    func testDeadlineCoversTheWholePlayback() {
-        let now = Date(timeIntervalSince1970: 1000)
-        var moment = VideoMoment(tabID: 1, url: "u", seconds: 60)
-        moment.end = 64
-        let deadline = CaptionEngine.replayDeadline(for: moment, from: now)
-        // 4 s of sentence, the lead and tail it is played with, and the
-        // time Chrome takes to get going.
-        XCTAssertEqual(
-            deadline.timeIntervalSince(now),
-            4 + ChromeScript.seekLead + ChromeScript.seekTail + CaptionEngine.replayLatency, accuracy: 0.001
-        )
-        // Played at double speed, it is over sooner.
-        moment.rate = 2
-        XCTAssertLessThan(CaptionEngine.replayDeadline(for: moment, from: now), deadline)
-    }
-
-    func testASentenceWithoutAnEndIsGivenTheLongestUtterance() {
-        let now = Date()
-        let moment = VideoMoment(tabID: 1, url: "u", seconds: 60)
-        XCTAssertGreaterThan(CaptionEngine.replayDeadline(for: moment, from: now).timeIntervalSince(now), 12)
-    }
-}
-
-final class ReplayFragmentTests: XCTestCase {
-    func testAFragmentAroundTheJumpIsNotTheSentence() {
-        XCTAssertFalse(CaptionEngine.replayCovers(spoken: 0.4, expected: 3))
-        XCTAssertTrue(CaptionEngine.replayCovers(spoken: 1.6, expected: 3))
-        // Cut a little short by the stop, or by a pause in it, still counts.
-        XCTAssertTrue(CaptionEngine.replayCovers(spoken: 2.2, expected: 3))
-    }
-
-    func testSentenceLengthComesFromItsMoment() {
-        var moment = VideoMoment(tabID: 1, url: "u", seconds: 60)
-        XCTAssertEqual(CaptionEngine.sentenceLength(of: moment), 12)
-        moment.end = 63.5
-        XCTAssertEqual(CaptionEngine.sentenceLength(of: moment), 3.5)
-    }
-}
-
 final class ReplayGateTests: XCTestCase {
     func testDecodesWhereASentenceSits() throws {
         let json = #"{"ja":"ab","lines":[{"ja":"a","en":"A","start":0.3,"end":1.2},{"ja":"b","en":"B"}]}"#
@@ -361,5 +294,73 @@ final class ReplayGateTests: XCTestCase {
             CaptionEngine.replayMinimumResemblance
         )
         XCTAssertEqual(CaptionEngine.resemblance(of: "次回予告", to: "早く力がないんだ"), 0)
+    }
+}
+
+final class RehearingMergeTests: XCTestCase {
+    private func caption(_ id: Int, _ text: String, _ from: Double, _ to: Double, url: String = "u") -> Caption {
+        var moment = VideoMoment(tabID: 1, url: url, seconds: from)
+        moment.end = to
+        return Caption(id: id, japanese: text, ruby: [], english: "", moment: moment)
+    }
+    private let existing: [Caption] = [
+        Caption(id: 0, japanese: "首がもげてるのに", ruby: [], english: "", moment: {
+            var m = VideoMoment(tabID: 1, url: "u", seconds: 437); m.end = 440; return m }()),
+        Caption(id: 1, japanese: "てめえら", ruby: [], english: "", moment: {
+            var m = VideoMoment(tabID: 1, url: "u", seconds: 441); m.end = 442; return m }()),
+        Caption(id: 2, japanese: "やっぱり片方鬼なのかよ", ruby: [], english: "", moment: {
+            var m = VideoMoment(tabID: 1, url: "u", seconds: 444); m.end = 446; return m }()),
+    ]
+
+    func testALiveLineGoesLast() {
+        let merged = CaptionEngine.merge([caption(9, "妙な気配", 446.5, 448)], into: existing, prompt: "")
+        XCTAssertEqual(merged.map(\.id), [0, 1, 2, 9])
+    }
+
+    /// Space after a replay: the video plays on over captioned ground, and
+    /// what is heard corrects the captions rather than repeating them.
+    func testHeardAgainTakesTheCaptionsPlace() {
+        let merged = CaptionEngine.merge([caption(9, "てめえら!", 441.1, 441.9)], into: existing, prompt: "")
+        XCTAssertEqual(merged.map(\.japanese), ["首がもげてるのに", "てめえら!", "やっぱり片方鬼なのかよ"])
+        XCTAssertEqual(merged[1].id, 9)
+    }
+
+    func testOneLineCanTakeTwoCaptionsAndTwoLinesOne() {
+        let one = CaptionEngine.merge(
+            [caption(9, "首がもげてるのにてめえら", 437, 442)], into: existing, prompt: "")
+        XCTAssertEqual(one.map(\.japanese), ["首がもげてるのにてめえら", "やっぱり片方鬼なのかよ"])
+        let two = CaptionEngine.merge(
+            [caption(8, "やっぱり", 444, 445), caption(9, "片方鬼なのかよ", 445, 446)], into: existing, prompt: "")
+        XCTAssertEqual(two.map(\.japanese), ["首がもげてるのに", "てめえら", "やっぱり", "片方鬼なのかよ"])
+    }
+
+    func testAFragmentInsideACaptionIsDropped() {
+        let merged = CaptionEngine.merge([caption(9, "なのかよ", 445.4, 446)], into: existing, prompt: "")
+        XCTAssertEqual(merged.map(\.id), [0, 1, 2])
+    }
+
+    func testTheContextGivenBackOrSomethingElseKeepsTheCaption() {
+        let echo = CaptionEngine.merge([caption(9, "首がもげてるのに", 441, 442)], into: existing, prompt: "首がもげてるのに")
+        XCTAssertEqual(echo.map(\.id), [0, 1, 2])
+        let other = CaptionEngine.merge([caption(9, "ご視聴ありがとうございました", 441, 442)], into: existing, prompt: "")
+        XCTAssertEqual(other.map(\.id), [0, 1, 2])
+    }
+
+    func testASentenceMissedLiveLandsWhereItWasSaid() {
+        let merged = CaptionEngine.merge([caption(9, "今", 440.2, 440.8)], into: existing, prompt: "")
+        XCTAssertEqual(merged.map(\.id), [0, 9, 1, 2])
+    }
+
+    func testAnotherPageAndNoMomentGoLast() {
+        let elsewhere = CaptionEngine.merge([caption(9, "てめえら", 441, 442, url: "v")], into: existing, prompt: "")
+        XCTAssertEqual(elsewhere.map(\.id), [0, 1, 2, 9])
+        let unplaced = Caption(id: 9, japanese: "てめえら", ruby: [], english: "", moment: nil)
+        XCTAssertEqual(CaptionEngine.merge([unplaced], into: existing, prompt: "").map(\.id), [0, 1, 2, 9])
+    }
+
+    func testIsCaptionedLooksAtTheStretchHeard() {
+        XCTAssertTrue(CaptionEngine.isCaptioned(existing, from: VideoMoment(tabID: 1, url: "u", seconds: 441.5), spoken: 1))
+        XCTAssertFalse(CaptionEngine.isCaptioned(existing, from: VideoMoment(tabID: 1, url: "u", seconds: 447), spoken: 2))
+        XCTAssertFalse(CaptionEngine.isCaptioned(existing, from: VideoMoment(tabID: 2, url: "u", seconds: 441.5), spoken: 1))
     }
 }

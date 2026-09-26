@@ -87,7 +87,7 @@ struct ContentView: View {
                                 && analyzer.hasAnalyzed(caption),
                             selection: selectionBinding(for: caption),
                             onAnalyze: { analyze(caption) },
-                            onSeek: caption.moment.map { moment in { replay(caption, at: moment) } }
+                            onSeek: caption.moment.map { moment in { video.send(.seek(moment)) } }
                         )
                     }
                     if !engine.partialText.isEmpty {
@@ -115,14 +115,6 @@ struct ContentView: View {
             .onChange(of: engine.partialText) {
                 proxy.scrollTo(Self.bottom, anchor: .bottom)
             }
-        }
-    }
-
-    /// Plays the sentence again, and has what is heard replace the caption.
-    private func replay(_ caption: Caption, at moment: VideoMoment) {
-        engine.expectReplay(of: caption)
-        video.send(.seek(moment)) { played in
-            if !played { engine.cancelReplay(of: caption) }
         }
     }
 

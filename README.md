@@ -207,11 +207,13 @@ configuration.
 When the sound is a video playing in Chrome, each caption notes where in the
 video its sentence was said, and shows the time. Click a caption to play its
 sentence again from there; the video pauses when the sentence ends. What is
-heard on that replay is transcribed again, taking its time over it (a wider
-search, with the captions before it as context), and replaces the caption. So
-when a line looks wrong, click it: it is heard once more, and corrected if the
-model does better the second time. A replay that comes back as something
-other than the sentence (only the context, or a line with nothing of the
+Anything heard from a stretch of the video that already has captions, whether
+a replayed sentence, the video played on from there with Space, or a skip
+back, is transcribed again taking its time over it (a wider search, with the
+captions before it as context) and corrects those captions rather than
+repeating them. So when a line looks wrong, click it: it is heard once more,
+and corrected if the model does better the second time. Something heard that
+is not the sentence again (only the context, or a line with nothing of the
 original in it, as the model produces over music or silence) leaves the
 caption as it was. Sentence times come from where Whisper heard the words,
 so this needs a current `asr_server.py` on the GPU host; an older one still
