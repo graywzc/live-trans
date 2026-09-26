@@ -62,6 +62,10 @@ final class CaptionEngine {
     /// How many earlier captions a replay's transcription is told about, so
     /// a name or a term heard before is heard the same way again.
     static let replayContextCaptions = 2
+    /// A correction keeps at least this share of the original's characters,
+    /// in order. Hearing the sentence again changes a word or two; a line
+    /// with nothing of the original in it was heard from somewhere else.
+    static let replayMinimumResemblance = 0.4
     /// Between the click and Chrome starting the sentence, with room for
     /// the video to load the part it jumped to.
     static let replayLatency: TimeInterval = 4
@@ -384,7 +388,7 @@ final class CaptionEngine {
                         format: "caption %d: %.1f s heard on replay of a %.1f s sentence",
                         correcting.captionID, spoken, correcting.expected
                     ))
-                    correct(correcting.captionID, with: lines)
+                    correct(correcting.captionID, with: lines, prompt: prompt ?? "")
                 } else {
                     captions.append(contentsOf: lines)
                 }
@@ -406,7 +410,7 @@ final class CaptionEngine {
 
     private func captionLines(_ result: Transcription, from moment: VideoMoment?, spoken: TimeInterval) -> [Caption] {
         let lines = result.lines.filter { !$0.ja.isEmpty }
-        let moments = Self.moments(of: lines.map(\.ja), from: moment, spoken: spoken)
+        let moments = Self.moments(of: lines, from: moment, spoken: spoken, preRoll: segmenter.config.preRoll)
         return zip(lines, moments).map { line, moment in
             print("\(line.ja)\n-> \(line.en)")
             defer { nextCaptionID += 1 }
@@ -421,12 +425,24 @@ final class CaptionEngine {
     }
 
     /// What the sentence was heard as this time takes the caption's place.
-    /// Nothing heard leaves the caption as it was. The new lines get ids of
-    /// their own: an analysis of the old text must not pass for one of the
-    /// new.
-    private func correct(_ captionID: Int, with lines: [Caption]) {
+    /// Nothing heard leaves the caption as it was, and so does a line that
+    /// is not the sentence heard again: over sound that isn't speech, the
+    /// model gives back the context it was handed, or a line of its own
+    /// with nothing of the original in it. The new lines get ids of their
+    /// own: an analysis of the old text must not pass for one of the new.
+    private func correct(_ captionID: Int, with lines: [Caption], prompt: String) {
         guard !lines.isEmpty else {
             print("caption \(captionID): nothing heard on replay, kept")
+            return
+        }
+        let heard = lines.map(\.japanese).joined()
+        if Self.isEcho(heard, of: prompt) {
+            print("caption \(captionID): replay gave back its context, kept: \(heard)")
+            return
+        }
+        if replayTails[captionID] == nil, let original = captions.first(where: { $0.id == captionID }),
+           Self.resemblance(of: heard, to: original.japanese) < Self.replayMinimumResemblance {
+            print("caption \(captionID): replay heard something else, kept: \(heard)")
             return
         }
         var lines = lines
@@ -460,6 +476,35 @@ final class CaptionEngine {
         return (captions, lines.last!.id)
     }
 
+    /// Whether `heard` is only the context the model was given, which it
+    /// gives back over sound that isn't speech.
+    nonisolated static func isEcho(_ heard: String, of prompt: String) -> Bool {
+        let heard = content(of: heard)
+        return !heard.isEmpty && content(of: prompt).contains(heard)
+    }
+
+    /// The share of `original`'s characters that `heard` keeps, in order.
+    nonisolated static func resemblance(of heard: String, to original: String) -> Double {
+        let a = Array(content(of: original)), b = Array(content(of: heard))
+        guard !a.isEmpty else { return 1 }
+        // Longest common subsequence, one row at a time.
+        var previous = [Int](repeating: 0, count: b.count + 1)
+        for x in a {
+            var current = [Int](repeating: 0, count: b.count + 1)
+            for (j, y) in b.enumerated() {
+                current[j + 1] = x == y ? previous[j] + 1 : max(previous[j + 1], current[j])
+            }
+            previous = current
+        }
+        return Double(previous[b.count]) / Double(a.count)
+    }
+
+    /// The text without the punctuation and spaces that vary between two
+    /// hearings of the same words.
+    private nonisolated static func content(of text: String) -> String {
+        text.filter { !$0.isWhitespace && !$0.isPunctuation && !$0.isSymbol }
+    }
+
     /// The captions before the one being corrected, for the transcription to
     /// hear the sentence in context. Once part of the sentence has been
     /// placed, the rest follows on from that part.
@@ -472,18 +517,27 @@ final class CaptionEngine {
         return captions[max(index - Self.replayContextCaptions, 0)..<index].map(\.japanese).joined()
     }
 
-    /// Where each sentence of an utterance starts and ends. Only the
-    /// utterance's start and length were noted, so the sentences are placed
-    /// by their share of the text, which is close enough to land on the right
-    /// sentence.
-    nonisolated static func moments(of lines: [String], from start: VideoMoment?, spoken: TimeInterval) -> [VideoMoment?] {
+    /// Where each sentence of an utterance starts and ends. `start` is when
+    /// the first speech was heard, and the audio sent began `preRoll`
+    /// earlier, so a sentence the server placed in that audio is placed
+    /// from there. One it could not place is put by its share of the text,
+    /// which is close enough to land on the right sentence.
+    nonisolated static func moments(
+        of lines: [CaptionPair], from start: VideoMoment?, spoken: TimeInterval, preRoll: TimeInterval = 0
+    ) -> [VideoMoment?] {
         guard let start else { return lines.map { _ in nil } }
-        let total = Double(max(lines.reduce(0) { $0 + $1.count }, 1))
+        let total = Double(max(lines.reduce(0) { $0 + $1.ja.count }, 1))
         var before = 0
         return lines.map { line in
-            var moment = start.advanced(by: max(spoken, 0) * Double(before) / total)
-            before += line.count
-            moment.end = start.advanced(by: max(spoken, 0) * Double(before) / total).seconds
+            var moment: VideoMoment
+            if let from = line.start, let to = line.end, to > from {
+                moment = start.advanced(by: max(from - preRoll, 0))
+                moment.end = start.advanced(by: max(to - preRoll, 0)).seconds
+            } else {
+                moment = start.advanced(by: max(spoken, 0) * Double(before) / total)
+                moment.end = start.advanced(by: max(spoken, 0) * Double(before + line.ja.count) / total).seconds
+            }
+            before += line.ja.count
             return moment
         }
     }

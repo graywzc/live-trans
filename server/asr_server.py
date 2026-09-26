@@ -16,8 +16,11 @@ POST /shutdown     exit now and release the GPU (unloads the ollama model too)
 POST /transcribe   body: raw PCM s16le mono 16kHz
                    query: beam_size=3, translate=1, prompt=<text said before>
                    -> {"ja": "...", "en": "...", "rtf": 0.05,
-                       "lines": [{"ja": "...", "en": "..."}, ...]}
-                   "lines" is the same text, one sentence per entry.
+                       "lines": [{"ja": "...", "en": "...",
+                                  "start": 0.3, "end": 2.1}, ...]}
+                   "lines" is the same text, one sentence per entry, each
+                   with where it starts and ends in the audio (seconds)
+                   when its words could be placed.
 GET /health       -> {"status": "ok", "asr": "...", "device": "cuda"}
 """
 
@@ -135,11 +138,14 @@ def decode_pcm(pcm_bytes):
     return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def run_whisper(audio, beam_size=3, task="transcribe", prompt=None):
+def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None):
     """task="transcribe" -> Japanese, task="translate" -> English.
 
     `prompt` is what was said just before the audio, given to Whisper as
     context: a name or a term it has seen is one it is likelier to hear.
+
+    `words`, a list, is filled with (text, start, end) for every word heard,
+    the times in seconds into the audio.
 
     Returns Whisper's segments as a list. It ends a segment at a pause in the
     speech, so the boundaries are worth keeping: they are the only sign of a
@@ -150,9 +156,41 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None):
     with _asr_lock:
         segments, _ = _asr.transcribe(
             audio, language="ja", task=task, beam_size=beam_size, vad_filter=False,
-            initial_prompt=prompt or None,
+            initial_prompt=prompt or None, word_timestamps=words is not None,
         )
-        return [s.text.strip() for s in segments if s.text.strip()]
+        texts = []
+        for s in segments:
+            text = s.text.strip()
+            if not text:
+                continue
+            texts.append(text)
+            if words is not None:
+                words.extend((w.word, w.start, w.end) for w in (s.words or []))
+        return texts
+
+
+def sentence_times(sentences, words):
+    """Where each sentence starts and ends in the audio, as (start, end), from
+    the words Whisper heard; None for a sentence whose text isn't found in
+    them. The sentences are the words' text cut up, so each is looked for in
+    turn, past the one before it."""
+    chars = []
+    for index, (text, _, _) in enumerate(words):
+        chars.extend((ch, index) for ch in text if ch not in _BOUNDARY_NOISE)
+    stream = "".join(ch for ch, _ in chars)
+    times = []
+    cursor = 0
+    for sentence in sentences:
+        wanted = _content(sentence)
+        position = stream.find(wanted, cursor) if wanted else -1
+        if position < 0:
+            times.append(None)
+            continue
+        first = chars[position][1]
+        last = chars[position + len(wanted) - 1][1]
+        times.append((words[first][1], words[last][2]))
+        cursor = position + len(wanted)
+    return times
 
 
 def _ollama_generate(text, timeout, prompt=_OLLAMA_PROMPT):
@@ -351,7 +389,8 @@ class Handler(BaseHTTPRequestHandler):
             t0 = time.time()
             audio = decode_pcm(pcm)
             duration = audio.size / SAMPLE_RATE
-            segments = run_whisper(audio, beam_size=beam_size, prompt=prompt)
+            words = []
+            segments = run_whisper(audio, beam_size=beam_size, prompt=prompt, words=words)
             ja = "".join(segments)
             pairs = [(ja, "")] if ja else []
             if want_translation and ja and not _is_untranslatable(ja):
@@ -364,10 +403,16 @@ class Handler(BaseHTTPRequestHandler):
                             audio, beam_size=beam_size, task="translate"
                         )))]
             elapsed = time.time() - t0
+            lines = []
+            for (j, e), span in zip(pairs, sentence_times([j for j, _ in pairs], words)):
+                line = {"ja": j, "en": e}
+                if span:
+                    line["start"], line["end"] = round(span[0], 2), round(span[1], 2)
+                lines.append(line)
             self._send(200, {
                 "ja": ja,
                 "en": " ".join(en for _, en in pairs if en),
-                "lines": [{"ja": j, "en": e} for j, e in pairs],
+                "lines": lines,
                 "audio_seconds": round(duration, 2),
                 "elapsed": round(elapsed, 3),
                 "rtf": round(elapsed / duration, 4) if duration else None,

@@ -333,3 +333,33 @@ final class ReplayFragmentTests: XCTestCase {
         XCTAssertEqual(CaptionEngine.sentenceLength(of: moment), 3.5)
     }
 }
+
+final class ReplayGateTests: XCTestCase {
+    func testDecodesWhereASentenceSits() throws {
+        let json = #"{"ja":"ab","lines":[{"ja":"a","en":"A","start":0.3,"end":1.2},{"ja":"b","en":"B"}]}"#
+        let result = try ASRClient.decodeTranscription(Data(json.utf8), statusCode: 200)
+        XCTAssertEqual(result.lines[0].start, 0.3)
+        XCTAssertEqual(result.lines[0].end, 1.2)
+        XCTAssertNil(result.lines[1].start)
+    }
+
+    func testGivingBackTheContextIsNotHearing() {
+        XCTAssertTrue(CaptionEngine.isEcho("次回予告", of: "早く、力がないんだ次回予告"))
+        XCTAssertTrue(CaptionEngine.isEcho("次回予告。", of: "次回予告"))
+        XCTAssertFalse(CaptionEngine.isEcho("次回の予告です", of: "次回予告"))
+        XCTAssertFalse(CaptionEngine.isEcho("次回予告", of: ""))
+    }
+
+    func testACorrectionKeepsMostOfTheOriginal() {
+        // A kanji heard differently.
+        XCTAssertGreaterThan(CaptionEngine.resemblance(of: "橋を渡った", to: "端を渡った"), 0.7)
+        // Punctuation is neither here nor there.
+        XCTAssertEqual(CaptionEngine.resemblance(of: "はい、そうです。", to: "はいそうです"), 1)
+        // A different sentence altogether.
+        XCTAssertLessThan(
+            CaptionEngine.resemblance(of: "ご視聴ありがとうございました", to: "早く力がないんだ"),
+            CaptionEngine.replayMinimumResemblance
+        )
+        XCTAssertEqual(CaptionEngine.resemblance(of: "次回予告", to: "早く力がないんだ"), 0)
+    }
+}
