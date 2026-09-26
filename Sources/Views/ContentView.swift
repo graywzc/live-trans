@@ -257,9 +257,11 @@ private struct VideoControls: View {
 
 /// Space plays and pauses, as in a video player, except where Space types:
 /// an editable text view (the follow-up box, any field being edited) or the
-/// Jisho page, whose search box can't be told apart from the outside. There,
-/// Control-C takes the cursor out of the text, so that the next Space
-/// reaches the video without a click somewhere else first.
+/// Jisho page, whose search box can't be told apart from the outside. Each
+/// of those has the cursor only after being clicked (`ClickFocusedWebView`
+/// keeps the page from taking it as it loads), and Control-C takes the
+/// cursor back out of the text, so that the next Space reaches the video
+/// without a click somewhere else first.
 struct SpaceKey: NSViewRepresentable {
     let action: () -> Void
 
