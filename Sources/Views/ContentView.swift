@@ -335,7 +335,7 @@ private struct OutputPicker: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "speaker.wave.2")
-                Text(output.snapshot.label)
+                Text(output.label)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: 160, alignment: .leading)
@@ -350,6 +350,14 @@ private struct OutputPicker: View {
         .popover(isPresented: $isOpen, arrowEdge: .bottom) {
             OutputList(output: output) { isOpen = false }
         }
+        .alert(
+            "Can't switch the sound output",
+            isPresented: Binding { output.problem != nil } set: { if !$0 { output.problem = nil } }
+        ) {
+            Button("OK") {}
+        } message: {
+            Text(output.problem ?? "")
+        }
     }
 }
 
@@ -363,11 +371,14 @@ struct OutputList: View {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(snapshot.choices) { device in
                     let feed = snapshot.feed(for: device)
+                    let unconnected = snapshot.needsConnecting(device)
                     row(
                         title: device.name,
-                        detail: Self.detail(feed: feed, captureName: snapshot.captureName),
-                        symbol: feed == nil ? "speaker.slash" : "speaker.wave.2",
-                        isChosen: snapshot.listening?.id == device.id
+                        detail: Self.detail(
+                            feed: feed, captureName: snapshot.captureName, unconnected: unconnected
+                        ),
+                        symbol: unconnected ? "headphones" : feed == nil ? "speaker.slash" : "speaker.wave.2",
+                        isChosen: snapshot.listening?.id == device.id || output.connecting?.id == device.id
                     ) {
                         output.choose(device)
                     }
@@ -384,13 +395,17 @@ struct OutputList: View {
         .frame(width: 340)
         .frame(maxHeight: 480)
         .fixedSize(horizontal: false, vertical: true)
-        .onAppear(perform: output.refresh)
+        .onAppear {
+            output.refresh()
+            output.refreshHeadphones()
+        }
     }
 
     /// Whether captioning on the device would be heard by the captions.
-    static func detail(feed: AudioHardware.Aggregate?, captureName: String) -> String {
-        if let feed { return "captions via \(feed.name)" }
-        return "no Multi-Output Device pairs it with \(captureName)"
+    static func detail(feed: AudioHardware.Aggregate?, captureName: String, unconnected: Bool = false) -> String {
+        let carried = feed.map { "captions via \($0.name)" }
+            ?? "no Multi-Output Device pairs it with \(captureName)"
+        return unconnected ? "connect · \(carried)" : carried
     }
 
     private func row(
