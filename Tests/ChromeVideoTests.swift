@@ -90,7 +90,7 @@ final class ChromeVideoTests: XCTestCase {
         context.evaluateScript("""
             const listeners = []; const log = [];
             const v = {
-                currentTime: 0, paused: true, playbackRate: 1,
+                currentTime: 0, paused: true, playbackRate: 1, seeking: false,
                 play() { this.paused = false; log.push('play'); }, pause() { this.paused = true; log.push('pause'); },
                 addEventListener(_, f) { listeners.push(f); }, removeEventListener(_, f) { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); },
             };
@@ -103,7 +103,7 @@ final class ChromeVideoTests: XCTestCase {
         XCTAssertNil(context.exception)
         XCTAssertEqual(context.evaluateScript("v.currentTime").toDouble(), 9.5)
         context.evaluateScript("tick(11); tick(13.5); tick(14.31);")
-        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "play,pause")
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "pause,play,pause")
         XCTAssertEqual(context.evaluateScript("listeners.length").toInt32(), 0, "the stop is spent")
         // Seeking again while a stop is pending replaces it rather than stacking.
         context.evaluateScript(seek + seek)
@@ -111,7 +111,31 @@ final class ChromeVideoTests: XCTestCase {
         // Going back before the sentence (a skip, an earlier sentence) drops it.
         context.evaluateScript("tick(3)")
         XCTAssertEqual(context.evaluateScript("listeners.length").toInt32(), 0)
-        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "play,pause,play,play")
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "pause,play,pause,pause,play,pause,play")
+    }
+
+    /// A seek the video has to load for is played once it has landed, not
+    /// from where it was in the meantime.
+    func testASlowSeekPlaysOnceLanded() throws {
+        let context = try XCTUnwrap(JSContext())
+        context.evaluateScript("""
+            const log = []; let onSeeked = null;
+            const v = {
+                currentTime: 0, paused: false, playbackRate: 1, seeking: false,
+                play() { this.paused = false; log.push('play'); }, pause() { this.paused = true; log.push('pause'); },
+                addEventListener(name, f) { if (name === 'seeked') onSeeked = f; },
+                removeEventListener() {},
+            };
+            Object.defineProperty(v, 'currentTime', { get() { return this._t; }, set(t) { this._t = t; this.seeking = true; } });
+            const location = { href: 'u' };
+            """)
+        let moment = VideoMoment(tabID: 1, url: "u", seconds: 10, end: 14)
+        let result = context.evaluateScript("(() => { \(ChromeScript.action(for: .seek(moment))) })();")
+        XCTAssertNil(context.exception)
+        XCTAssertEqual(result?.toString(), "playing")
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "pause")
+        context.evaluateScript("v.seeking = false; onSeeked();")
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "pause,play")
     }
 
     func testScriptsCompile() throws {
