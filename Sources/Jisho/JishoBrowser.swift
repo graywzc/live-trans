@@ -1,3 +1,4 @@
+import AppKit
 import Observation
 import WebKit
 
@@ -43,7 +44,7 @@ final class JishoBrowser {
     }
 
     private func makeWebView() -> WKWebView {
-        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let webView = ClickFocusedWebView(frame: .zero, configuration: WKWebViewConfiguration())
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
         observations = [
@@ -61,5 +62,31 @@ final class JishoBrowser {
             },
         ]
         return webView
+    }
+}
+
+/// A web view that has the cursor only once it is clicked. Left to itself,
+/// AppKit gives a new window's cursor to the first view that will take it,
+/// and jisho.org's home page asks for it as it loads. Either way the panel,
+/// in front from the first frame, would have Space typing into the search
+/// box until something else was clicked, when it should play the video.
+final class ClickFocusedWebView: WKWebView {
+    /// The event being handled is a click into this view.
+    private var isBeingClicked: Bool {
+        guard let event = NSApp.currentEvent, event.window === window else { return false }
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            return bounds.contains(convert(event.locationInWindow, from: nil))
+        default:
+            return false
+        }
+    }
+
+    override var acceptsFirstResponder: Bool { isBeingClicked }
+
+    /// WebKit hands the cursor to the page's focused box without asking
+    /// `acceptsFirstResponder` first, so the answer is given here too.
+    override func becomeFirstResponder() -> Bool {
+        isBeingClicked && super.becomeFirstResponder()
     }
 }

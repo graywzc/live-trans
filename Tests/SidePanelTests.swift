@@ -139,3 +139,62 @@ final class QuestionFieldControlCTests: XCTestCase {
         XCTAssertFalse(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
     }
 }
+
+/// At launch the Jisho page is in front, and its search box asks for the
+/// cursor as it loads. Space is still the video's until the page is clicked.
+@MainActor
+final class LaunchFocusTests: XCTestCase {
+    func testThePageHasTheCursorOnlyOnceClicked() throws {
+        let panel = SidePanel()
+        let browser = JishoBrowser()
+        // Stands in for jisho.org, whose home page focuses its search box.
+        browser.webView.loadHTMLString("<input id=q autofocus>", baseURL: nil)
+
+        let root = ContentView()
+            .environment(CaptionEngine())
+            .environment(browser)
+            .environment(SentenceAnalyzer(makeClient: { nil }))
+            .environment(panel)
+            .environment(ChromeVideo())
+        let window = TestScreen.window(width: 960, height: 520)
+        window.contentView = NSHostingView(rootView: root)
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        func pump(seconds: Double) {
+            let end = Date().addingTimeInterval(seconds)
+            while Date() < end {
+                while let event = NSApp.nextEvent(
+                    matching: .any, until: Date().addingTimeInterval(0.1), inMode: .default, dequeue: true
+                ) {
+                    NSApp.sendEvent(event)
+                }
+            }
+        }
+        pump(seconds: 0.5)
+        XCTAssertFalse(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
+        let end = Date().addingTimeInterval(5)
+        while browser.isLoading, Date() < end { pump(seconds: 0.2) }
+        pump(seconds: 1)
+        XCTAssertFalse(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
+
+        // As WebKit does when the page's script focuses a box: refused.
+        window.makeFirstResponder(browser.webView)
+        XCTAssertFalse(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
+
+        // A click into the page is the one way in. The test host is not the
+        // active app, so the window is never made key, and a click into a
+        // window that is not key is spent on bringing it to the front.
+        window.becomeKey()
+        let web = browser.webView
+        let inWindow = web.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let click = try XCTUnwrap(NSEvent.mouseEvent(
+                with: type, location: inWindow, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+            ))
+            NSApp.postEvent(click, atStart: false)
+        }
+        pump(seconds: 0.5)
+        XCTAssertTrue(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
+    }
+}
