@@ -59,21 +59,17 @@ final class CaptionEngine {
     static let liveBeamSize = 5
     /// A sentence heard again has no one waiting on it.
     static let replayBeamSize = 10
-    /// How many earlier captions a replay's transcription is told about, so
-    /// a name or a term heard before is heard the same way again.
+    /// How many earlier captions a re-hearing's transcription is told
+    /// about, so a name or a term heard before is heard the same way again.
     static let replayContextCaptions = 2
     /// A correction keeps at least this share of the original's characters,
     /// in order. Hearing the sentence again changes a word or two; a line
     /// with nothing of the original in it was heard from somewhere else.
     static let replayMinimumResemblance = 0.4
-    /// Between the click and Chrome starting the sentence, with room for
-    /// the video to load the part it jumped to.
-    static let replayLatency: TimeInterval = 4
-    /// An utterance heard on replay must be at least this share of the
-    /// sentence's length to be taken as the sentence. Whatever else the
-    /// player lets out around a jump, a fragment, is dropped: transcribed,
-    /// it comes back as a made-up line.
-    static let replayMinimumShare = 0.5
+    /// Lines heard over at least this share of a caption's stretch of the
+    /// video are that caption heard again. Heard over less, but mostly
+    /// inside it, they are a fragment of it.
+    static let rehearingMinimumCover = 0.5
 
     private var session: ServerSession?
     private var source: AudioSource?
@@ -93,17 +89,8 @@ final class CaptionEngine {
     private var partialUtterance = -1
     private var settledUtterance = -1
     private var utteranceMoments: [Int: Task<VideoMoment?, Never>] = [:]
-    /// A caption whose sentence is being played again from the video. Until
-    /// the deadline, an utterance that starts is that sentence heard again,
-    /// and what the server makes of it this time replaces the caption.
-    private var replay: (captionID: Int, deadline: Date, expected: TimeInterval)?
-    /// Utterances that are a replay: the caption each corrects and how long
-    /// its sentence is.
-    private var replayUtterances: [Int: (captionID: Int, expected: TimeInterval)] = [:]
-    /// The last line written for each corrected caption, so a sentence that
-    /// comes back as two utterances lands in order rather than the second
-    /// one appending at the end.
-    private var replayTails: [Int: Int] = [:]
+    /// The same, once Chrome has answered, for the partials to check.
+    private var resolvedMoments: [Int: VideoMoment] = [:]
     /// Held while captioning so the display doesn't sleep under the captions.
     private var activity: NSObjectProtocol?
 
@@ -125,9 +112,7 @@ final class CaptionEngine {
         finals?.finish()
         finals = nil
         utteranceMoments = [:]
-        replay = nil
-        replayUtterances = [:]
-        replayTails = [:]
+        resolvedMoments = [:]
         source?.stop()
         source = nil
         outputRouter.restore()
@@ -148,44 +133,6 @@ final class CaptionEngine {
 
     func clear() {
         captions = []
-        replayTails = [:]
-    }
-
-    /// The caption's sentence is about to be played again from the video:
-    /// what is heard next is that sentence, and replaces the caption. A
-    /// caption cleared or replaced meanwhile is left alone.
-    func expectReplay(of caption: Caption) {
-        guard isRunning, let moment = caption.moment else { return }
-        replay = (caption.id, Self.replayDeadline(for: moment, from: Date()), Self.sentenceLength(of: moment))
-        replayTails[caption.id] = nil
-    }
-
-    /// The playback did not happen after all.
-    func cancelReplay(of caption: Caption) {
-        if replay?.captionID == caption.id {
-            replay = nil
-        }
-    }
-
-    /// Speech of a replayed sentence starts before this: the sentence is
-    /// played with a lead and a tail, and a caption's start is an estimate,
-    /// so the whole playback counts rather than just its first seconds.
-    nonisolated static func replayDeadline(for moment: VideoMoment, from now: Date) -> Date {
-        let played = (sentenceLength(of: moment) + ChromeScript.seekLead + ChromeScript.seekTail)
-            / max(moment.rate, 0.1)
-        return now.addingTimeInterval(played + replayLatency)
-    }
-
-    /// How long the sentence takes to play, in video seconds.
-    nonisolated static func sentenceLength(of moment: VideoMoment) -> TimeInterval {
-        let end = moment.end ?? moment.seconds + UtteranceSegmenter.Config().maxUtterance
-        return max(end - moment.seconds, 0)
-    }
-
-    /// Whether `spoken` seconds heard on replay can be the sentence that
-    /// takes `expected` seconds, rather than a fragment around the jump.
-    nonisolated static func replayCovers(spoken: TimeInterval, expected: TimeInterval) -> Bool {
-        spoken >= expected * replayMinimumShare
     }
 
     private func run() async {
@@ -295,16 +242,13 @@ final class CaptionEngine {
             switch event {
             case .started(let utterance):
                 isSpeaking = true
-                if let replay {
-                    if Date() <= replay.deadline {
-                        replayUtterances[utterance] = (replay.captionID, replay.expected)
-                    } else {
-                        self.replay = nil
-                    }
-                }
                 if let videoClock {
                     let now = Date()
-                    utteranceMoments[utterance] = Task { await videoClock(now) }
+                    utteranceMoments[utterance] = Task {
+                        let moment = await videoClock(now)
+                        if let moment { self.resolvedMoments[utterance] = moment }
+                        return moment
+                    }
                 }
             case .partial(let audio, let utterance):
                 requestPartial(audio, utterance: utterance, client: client)
@@ -320,7 +264,7 @@ final class CaptionEngine {
                 isSpeaking = false
                 print("utterance \(utterance) discarded: too brief to be speech")
                 utteranceMoments[utterance] = nil
-                replayUtterances[utterance] = nil
+                resolvedMoments[utterance] = nil
                 settle(utterance)
             }
         }
@@ -330,9 +274,13 @@ final class CaptionEngine {
     /// server is slower than the partial interval the stale one is skipped
     /// rather than queued behind.
     private func requestPartial(_ audio: Data, utterance: Int, client: ASRClient) {
-        // A replay's preview would only show under the captions what is
-        // about to replace one of them.
-        guard partialTask == nil, replayUtterances[utterance] == nil else { return }
+        guard partialTask == nil else { return }
+        // A preview of something already captioned would only show under
+        // the captions what is about to replace one of them.
+        if let moment = resolvedMoments[utterance],
+           Self.isCaptioned(captions, from: moment, spoken: Self.seconds(of: audio)) {
+            return
+        }
         partialTask = Task {
             defer { partialTask = nil }
             guard
@@ -358,20 +306,17 @@ final class CaptionEngine {
     }
 
     private func transcribeFinal(_ audio: Data, utterance: Int, client: ASRClient) async {
-        let moment = utteranceMoments.removeValue(forKey: utterance)
         // The moment is when the first speech was noticed, after the pre-roll.
-        let spoken = Double(audio.count / AudioFormat.frameBytes) * AudioFormat.frameDuration
-            - segmenter.config.preRoll - segmenter.config.postRoll
-        let correcting = replayUtterances.removeValue(forKey: utterance)
-        if let correcting, !Self.replayCovers(spoken: spoken, expected: correcting.expected) {
-            print(String(
-                format: "caption %d: %.1f s heard on replay of a %.1f s sentence, dropped as a fragment",
-                correcting.captionID, spoken, correcting.expected
-            ))
-            return
-        }
-        let beamSize = correcting == nil ? Self.liveBeamSize : Self.replayBeamSize
-        let prompt = correcting.map { replayPrompt(for: $0.captionID) }
+        let moment = await utteranceMoments.removeValue(forKey: utterance)?.value
+        resolvedMoments[utterance] = nil
+        let spoken = Self.seconds(of: audio) - segmenter.config.preRoll - segmenter.config.postRoll
+        // Heard from a stretch of the video that has captions already: the
+        // sentence played again from a caption, or the video played on from
+        // there, or taken back. Nobody is waiting on it, so it can be heard
+        // with care, and what it gives corrects those captions.
+        let heardAgain = moment.map { Self.isCaptioned(captions, from: $0, spoken: spoken) } ?? false
+        let beamSize = heardAgain ? Self.replayBeamSize : Self.liveBeamSize
+        let prompt = heardAgain ? contextPrompt(before: moment!, spoken: spoken) : nil
         for attempt in 1...Self.remoteRetries {
             do {
                 let result = try await client.transcribe(
@@ -382,16 +327,11 @@ final class CaptionEngine {
                 if result.lines.allSatisfy(\.ja.isEmpty) {
                     print("utterance \(utterance): the server heard no words")
                 }
-                let lines = captionLines(result, from: await moment?.value, spoken: spoken)
-                if let correcting {
-                    print(String(
-                        format: "caption %d: %.1f s heard on replay of a %.1f s sentence",
-                        correcting.captionID, spoken, correcting.expected
-                    ))
-                    correct(correcting.captionID, with: lines, prompt: prompt ?? "")
-                } else {
-                    captions.append(contentsOf: lines)
+                let lines = captionLines(result, from: moment, spoken: spoken)
+                if heardAgain {
+                    print(String(format: "utterance %d: %.1f s heard again", utterance, spoken))
                 }
+                captions = Self.merge(lines, into: captions, prompt: prompt ?? "")
                 return
             } catch {
                 guard !Task.isCancelled else { return }
@@ -424,56 +364,112 @@ final class CaptionEngine {
         }
     }
 
-    /// What the sentence was heard as this time takes the caption's place.
-    /// Nothing heard leaves the caption as it was, and so does a line that
-    /// is not the sentence heard again: over sound that isn't speech, the
-    /// model gives back the context it was handed, or a line of its own
-    /// with nothing of the original in it. The new lines get ids of their
-    /// own: an analysis of the old text must not pass for one of the new.
-    private func correct(_ captionID: Int, with lines: [Caption], prompt: String) {
-        guard !lines.isEmpty else {
-            print("caption \(captionID): nothing heard on replay, kept")
-            return
-        }
-        let heard = lines.map(\.japanese).joined()
-        if Self.isEcho(heard, of: prompt) {
-            print("caption \(captionID): replay gave back its context, kept: \(heard)")
-            return
-        }
-        if replayTails[captionID] == nil, let original = captions.first(where: { $0.id == captionID }),
-           Self.resemblance(of: heard, to: original.japanese) < Self.replayMinimumResemblance {
-            print("caption \(captionID): replay heard something else, kept: \(heard)")
-            return
-        }
-        var lines = lines
-        // A sentence heard again from the video is where the video was when
-        // it was heard, but a moment lost to a Chrome hiccup is not worth
-        // losing the ability to play the corrected sentence.
-        if lines[0].moment == nil, let old = captions.first(where: { $0.id == captionID }) {
-            lines[0].moment = old.moment
-        }
-        let (spliced, tail) = Self.splice(lines, into: captions, replacing: captionID, after: replayTails[captionID])
-        captions = spliced
-        replayTails[captionID] = tail
+    nonisolated static func seconds(of audio: Data) -> TimeInterval {
+        Double(audio.count / AudioFormat.frameBytes) * AudioFormat.frameDuration
     }
 
-    /// `lines` in place of the caption `replacing`, or after `tail`, the last
-    /// line written for it, when the caption has already been replaced by an
-    /// earlier utterance of the same playback. A caption that is gone
-    /// (cleared) is heard as new captions at the end. Returns the captions
-    /// and the id of the last line placed.
-    nonisolated static func splice(
-        _ lines: [Caption], into captions: [Caption], replacing captionID: Int, after tail: Int?
-    ) -> ([Caption], tail: Int) {
-        var captions = captions
-        if let tail, let index = captions.firstIndex(where: { $0.id == tail }) {
-            captions.insert(contentsOf: lines, at: index + 1)
-        } else if let index = captions.firstIndex(where: { $0.id == captionID }) {
-            captions.replaceSubrange(index...index, with: lines)
-        } else {
-            captions.append(contentsOf: lines)
+    /// How much of the video, in seconds, `a` and `b` both cover: zero when
+    /// they don't, or are not on the same page.
+    nonisolated static func overlap(_ a: VideoMoment, _ b: VideoMoment) -> TimeInterval {
+        guard a.tabID == b.tabID, a.url == b.url, let aEnd = a.end, let bEnd = b.end else { return 0 }
+        return max(min(aEnd, bEnd) - max(a.seconds, b.seconds), 0)
+    }
+
+    /// Whether `spoken` seconds heard from `moment` are of a stretch of the
+    /// video that has captions.
+    nonisolated static func isCaptioned(_ captions: [Caption], from moment: VideoMoment, spoken: TimeInterval) -> Bool {
+        let span = moment.advanced(by: max(spoken, 0)).seconds
+        var heard = moment
+        heard.end = span
+        return captions.contains { caption in
+            caption.moment.map { overlap(heard, $0) > 0 } ?? false
         }
-        return (captions, lines.last!.id)
+    }
+
+    /// `lines` heard from the video put among `captions`. A line heard over
+    /// a stretch the captions cover is one of them heard again: it takes
+    /// their place, unless it is only the context the model was handed, or
+    /// keeps too little of them, as the model gives over sound that isn't
+    /// speech; then they are kept as they were. A line mostly inside a
+    /// caption without covering it is a fragment, and dropped. Any other
+    /// line is new, and goes in the order of the video. The lines replacing
+    /// captions have ids of their own: an analysis of the old text must not
+    /// pass for one of the new.
+    nonisolated static func merge(_ lines: [Caption], into captions: [Caption], prompt: String) -> [Caption] {
+        // Lines and captions that overlap in the video, grouped: a sentence
+        // can come back as two lines, and two as one.
+        var parent = Array(0..<(lines.count + captions.count))
+        func root(_ i: Int) -> Int {
+            var i = i
+            while parent[i] != i { i = parent[i] }
+            return i
+        }
+        var overlaps: [Int: TimeInterval] = [:]
+        for (li, line) in lines.enumerated() {
+            guard let heard = line.moment else { continue }
+            for (ci, caption) in captions.enumerated() {
+                guard let old = caption.moment else { continue }
+                let shared = overlap(heard, old)
+                guard shared > 0 else { continue }
+                overlaps[li, default: 0] += shared
+                parent[root(lines.count + ci)] = root(li)
+            }
+        }
+        var groups: [Int: (lines: [Int], captions: [Int])] = [:]
+        for li in lines.indices { groups[root(li), default: ([], [])].lines.append(li) }
+        for ci in captions.indices { groups[root(lines.count + ci), default: ([], [])].captions.append(ci) }
+
+        var replacing: [Int: [Caption]] = [:]  // first caption index -> its group's lines
+        var removed = Set<Int>()
+        var new: [Caption] = []
+        for group in groups.values where !group.lines.isEmpty {
+            let heard = group.lines.map { lines[$0] }
+            let text = heard.map(\.japanese).joined()
+            guard !group.captions.isEmpty else {
+                new.append(contentsOf: heard)
+                continue
+            }
+            let originals = group.captions.map { captions[$0] }
+            let original = originals.map(\.japanese).joined()
+            let shared = group.lines.reduce(0) { $0 + (overlaps[$1] ?? 0) }
+            let length = { (moments: [Caption]) in
+                moments.reduce(0.0) { $0 + (($1.moment?.end ?? 0) - ($1.moment?.seconds ?? 0)) }
+            }
+            if shared >= length(originals) * rehearingMinimumCover {
+                if isEcho(text, of: prompt) {
+                    print("heard again as its context, kept: \(original)")
+                } else if resemblance(of: text, to: original) < replayMinimumResemblance {
+                    print("heard again as something else, kept: \(original) (heard: \(text))")
+                } else {
+                    print("heard again: \(original) -> \(text)")
+                    replacing[group.captions.min()!] = heard
+                    removed.formUnion(group.captions)
+                }
+            } else if shared >= length(heard) * rehearingMinimumCover {
+                print("a fragment of a caption, dropped: \(text)")
+            } else {
+                new.append(contentsOf: heard)
+            }
+        }
+
+        var result: [Caption] = []
+        for (ci, caption) in captions.enumerated() {
+            if let lines = replacing[ci] { result.append(contentsOf: lines) }
+            if !removed.contains(ci) { result.append(caption) }
+        }
+        // New lines go before the first caption of the same page that starts
+        // after they end, else at the end: a sentence missed live and heard
+        // on the way back lands where it was said, and a live one is last.
+        for line in new {
+            let at = line.moment.flatMap { heard in
+                result.firstIndex { caption in
+                    guard let old = caption.moment, old.tabID == heard.tabID, old.url == heard.url else { return false }
+                    return old.seconds > (heard.end ?? heard.seconds)
+                }
+            }
+            result.insert(line, at: at ?? result.count)
+        }
+        return result
     }
 
     /// Whether `heard` is only the context the model was given, which it
@@ -505,15 +501,14 @@ final class CaptionEngine {
         text.filter { !$0.isWhitespace && !$0.isPunctuation && !$0.isSymbol }
     }
 
-    /// The captions before the one being corrected, for the transcription to
-    /// hear the sentence in context. Once part of the sentence has been
-    /// placed, the rest follows on from that part.
-    private func replayPrompt(for captionID: Int) -> String {
-        let index = if let tail = replayTails[captionID], let placed = captions.firstIndex(where: { $0.id == tail }) {
-            placed + 1
-        } else {
-            captions.firstIndex { $0.id == captionID } ?? captions.count
-        }
+    /// The captions before the stretch about to be heard again, for the
+    /// transcription to hear it in context.
+    private func contextPrompt(before moment: VideoMoment, spoken: TimeInterval) -> String {
+        var heard = moment
+        heard.end = moment.advanced(by: max(spoken, 0)).seconds
+        let index = captions.firstIndex { caption in
+            caption.moment.map { Self.overlap(heard, $0) > 0 } ?? false
+        } ?? captions.count
         return captions[max(index - Self.replayContextCaptions, 0)..<index].map(\.japanese).joined()
     }
 
