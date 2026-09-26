@@ -73,6 +73,9 @@ one there is the same as choosing it in System Settings, so when the Mac is
 left on the wrong output (the speakers after a session, say, when you want
 the dock) there is no need to leave the app. Each entry says which
 Multi-Output Device will carry the captions for it, or that none does.
+Paired AirPods and other Bluetooth headphones are listed even when they are
+not connected; choosing them connects them first, which asks for Bluetooth
+access once, and they need to be out of their case for it to work.
 
 ## GPU host setup
 

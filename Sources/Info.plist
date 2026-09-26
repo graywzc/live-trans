@@ -22,13 +22,15 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>LiveTrans plays, pauses and skips the video in Chrome when you use its video buttons.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>LiveTrans plays, pauses and skips the video in Chrome when you use its video buttons.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>LiveTrans lists your paired AirPods and headphones in its sound output menu and connects the one you choose.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>LiveTrans listens to the selected audio input so it can caption and translate Japanese speech.</string>
 </dict>

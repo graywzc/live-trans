@@ -31,10 +31,19 @@ final class SoundOutput {
         /// The capture device (BlackHole), which is nothing to listen on.
         var capture: String?
         var captureName = "BlackHole"
+        /// Paired Bluetooth headphones, whether or not Core Audio has them.
+        /// A connected pair is in `devices` too, under Core Audio's name.
+        var headphones: [Device] = []
 
-        /// What to offer: the devices you can hear.
+        /// What to offer: the devices you can hear, then the headphones
+        /// that would have to be connected first.
         var choices: [Device] {
-            devices.filter { $0.id != capture }
+            devices.filter { $0.id != capture } + headphones.filter(needsConnecting)
+        }
+
+        /// A pair of headphones Core Audio does not have yet.
+        func needsConnecting(_ device: Device) -> Bool {
+            !devices.contains { $0.id == device.id }
         }
 
         /// What is being listened on: the output itself, or through a
@@ -71,7 +80,20 @@ final class SoundOutput {
     }
 
     private(set) var snapshot: Snapshot
+    /// Headphones being connected, to become the output once Core Audio
+    /// has them.
+    private(set) var connecting: Device?
+    /// Looks for them until they appear or the wait is up.
+    private var connectingWatch: Task<Void, Never>?
+    /// Why the last choice did not take, to be shown and cleared.
+    var problem: String?
     private let isLive: Bool
+
+    /// What the picker says, including a pair on its way.
+    var label: String {
+        if let connecting { return "Connecting \(connecting.name)…" }
+        return snapshot.label
+    }
     /// Removed in deinit, which runs off the main actor.
     private nonisolated(unsafe) var listener: AudioObjectPropertyListenerBlock?
 
@@ -109,15 +131,57 @@ final class SoundOutput {
 
     /// Makes `device` the Mac's sound output. While captioning, the router
     /// hears the change and moves on to the Multi-Output Device that pairs
-    /// it with BlackHole.
+    /// it with BlackHole. Headphones Core Audio lacks are connected first
+    /// and become the output when it lists them.
     func choose(_ device: Device) {
+        connectingWatch?.cancel()
+        connecting = nil
         guard isLive else {
-            snapshot.current = device.id
+            if snapshot.needsConnecting(device) {
+                connecting = device
+            } else {
+                snapshot.current = device.id
+            }
+            return
+        }
+        if snapshot.needsConnecting(device) {
+            guard BluetoothHeadphones.connect(outputUID: device.id) else {
+                print("output: could not connect \(device.name)")
+                problem = "Couldn't connect \(device.name). Open their case or put them in, then try again."
+                return
+            }
+            print("output: connecting \(device.name)")
+            connecting = device
+            // Core Audio does not announce a hidden device, so look for it.
+            connectingWatch = Task { [weak self] in
+                for _ in 0..<30 {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    guard !Task.isCancelled, let self, self.connecting?.id == device.id else { return }
+                    self.refresh()
+                }
+                guard !Task.isCancelled, let self, self.connecting?.id == device.id else { return }
+                print("output: \(device.name) did not appear")
+                self.connecting = nil
+                self.problem = "\(device.name) connected but never became a sound output. Try choosing them again."
+
+            }
             return
         }
         guard AudioHardware.setDefaultOutput(uid: device.id) else { return }
         print("output: chosen \(device.name)")
         refresh()
+    }
+
+    /// Adds the paired Bluetooth headphones to the list, when it is opened:
+    /// reading them runs the system profiler, which takes a moment.
+    func refreshHeadphones() {
+        guard isLive else { return }
+        Task { [weak self] in
+            let headphones = await BluetoothHeadphones.paired()
+            guard let self, headphones != self.snapshot.headphones else { return }
+            self.snapshot.headphones = headphones
+            self.refresh()
+        }
     }
 
     func refresh() {
@@ -136,10 +200,21 @@ final class SoundOutput {
                 devices.append(Device(id: uid, name: name))
             }
         }
+        // Connected headphones are hidden from the list while a Multi-Output
+        // Device plays through them, but are there to be asked for.
+        for pair in snapshot.headphones where !devices.contains(where: { $0.id == pair.id }) {
+            guard let id = AudioHardware.deviceID(uid: pair.id) else { continue }
+            devices.append(Device(id: pair.id, name: AudioHardware.name(of: id) ?? pair.name))
+        }
         let fresh = Snapshot(
             devices: devices, aggregates: aggregates, current: AudioHardware.defaultOutputUID(),
-            capture: capture?.id, captureName: capture?.name ?? "BlackHole"
+            capture: capture?.id, captureName: capture?.name ?? "BlackHole", headphones: snapshot.headphones
         )
         if fresh != snapshot { snapshot = fresh }
+        if let connecting, devices.contains(where: { $0.id == connecting.id }) {
+            connectingWatch?.cancel()
+            self.connecting = nil
+            choose(connecting)
+        }
     }
 }
