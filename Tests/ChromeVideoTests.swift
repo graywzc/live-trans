@@ -242,11 +242,32 @@ final class SpaceKeyTests: XCTestCase {
 final class SentenceMomentTests: XCTestCase {
     func testLaterSentencesArePlacedByTheirShareOfTheText() {
         let start = VideoMoment(tabID: 1, url: "u", seconds: 60, rate: 1.5)
-        let moments = CaptionEngine.moments(of: ["ああ", "いいいいいい"], from: start, spoken: 4)
+        let lines = [CaptionPair(ja: "ああ", en: ""), CaptionPair(ja: "いいいいいい", en: "")]
+        let moments = CaptionEngine.moments(of: lines, from: start, spoken: 4)
         XCTAssertEqual(moments.map { $0?.seconds }, [60, 61.5])
         // Each ends where the next begins; the last where the speech did.
         XCTAssertEqual(moments.map { $0?.end }, [61.5, 66])
-        XCTAssertEqual(CaptionEngine.moments(of: ["ああ", "いい"], from: nil, spoken: 4), [nil, nil])
+        XCTAssertEqual(CaptionEngine.moments(of: lines, from: nil, spoken: 4), [nil, nil])
+    }
+
+    /// The server heard where the words are, so the sentences are placed
+    /// there: the audio began 0.3 s before the first speech, which is what
+    /// the start moment marks.
+    func testSentencesThatWerePlacedInTheAudioAreUsedAsIs() {
+        let start = VideoMoment(tabID: 1, url: "u", seconds: 60, rate: 2)
+        let lines = [
+            CaptionPair(ja: "ああ", en: "", start: 0.3, end: 1.3),
+            CaptionPair(ja: "いい", en: ""),
+            CaptionPair(ja: "うう", en: "", start: 3.3, end: 4.1),
+        ]
+        let moments = CaptionEngine.moments(of: lines, from: start, spoken: 4, preRoll: 0.3)
+        XCTAssertEqual(moments[0]?.seconds, 60)
+        XCTAssertEqual(moments[0]?.end, 62)
+        XCTAssertEqual(moments[2]?.seconds ?? 0, 66, accuracy: 0.001)
+        XCTAssertEqual(moments[2]?.end ?? 0, 67.6, accuracy: 0.001)
+        // The one the server couldn't place still goes by its share: two of
+        // six characters into 4 s of speech, at double speed.
+        XCTAssertEqual(moments[1]?.seconds ?? 0, 60 + 4.0 * 2 / 6 * 2, accuracy: 0.001)
     }
 
     func testTimestampsReadLikeAPlayer() {
