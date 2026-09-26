@@ -52,6 +52,7 @@ struct ContentView: View {
         HStack(spacing: 16) {
             StatusPill(status: engine.status)
             Spacer()
+            OutputPicker()
             VideoControls()
             if !engine.captions.isEmpty {
                 ShareLink(item: engine.transcript) {
@@ -326,6 +327,112 @@ struct SpaceKey: NSViewRepresentable {
                 return SpaceKey.handle(event, in: window, toggle: self.action)
             }
         }
+    }
+}
+
+/// What the Mac plays sound on, changed here rather than in System Settings
+/// when it is not what you are listening on. The router does the rest:
+/// captioning on the Plugable goes through "BlackHole+Plugable".
+private struct OutputPicker: View {
+    @State private var output = SoundOutput()
+    @State private var isOpen = false
+
+    var body: some View {
+        Button {
+            isOpen.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "speaker.wave.2")
+                Text(output.snapshot.label)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 160, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
+                Image(systemName: "chevron.down")
+                    .font(.caption2)
+            }
+            .font(.caption)
+            .foregroundStyle(.gray)
+        }
+        .help("Choose what the Mac plays sound on")
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+            OutputList(output: output) { isOpen = false }
+        }
+    }
+}
+
+struct OutputList: View {
+    let output: SoundOutput
+    let dismiss: () -> Void
+
+    var body: some View {
+        let snapshot = output.snapshot
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(snapshot.choices) { device in
+                    let feed = snapshot.feed(for: device)
+                    row(
+                        title: device.name,
+                        detail: Self.detail(feed: feed, captureName: snapshot.captureName),
+                        symbol: feed == nil ? "speaker.slash" : "speaker.wave.2",
+                        isChosen: snapshot.listening?.id == device.id
+                    ) {
+                        output.choose(device)
+                    }
+                }
+                if snapshot.choices.isEmpty {
+                    Text("No sound output device.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                }
+            }
+            .padding(6)
+        }
+        .frame(width: 340)
+        .frame(maxHeight: 480)
+        .fixedSize(horizontal: false, vertical: true)
+        .onAppear(perform: output.refresh)
+    }
+
+    /// Whether captioning on the device would be heard by the captions.
+    static func detail(feed: AudioHardware.Aggregate?, captureName: String) -> String {
+        if let feed { return "captions via \(feed.name)" }
+        return "no Multi-Output Device pairs it with \(captureName)"
+    }
+
+    private func row(
+        title: String, detail: String, symbol: String, isChosen: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            action()
+            dismiss()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .frame(width: 16)
+                    .foregroundStyle(isChosen ? .orange : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).lineLimit(1)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if isChosen {
+                    Image(systemName: "checkmark")
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isChosen ? Color.orange.opacity(0.15) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
