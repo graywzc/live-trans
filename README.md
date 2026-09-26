@@ -67,6 +67,13 @@ Device per pair of headphones, the right one is picked by which is connected.
 The Mac's sound *input* setting does not matter. Turn this off in Settings if
 you would rather switch by hand.
 
+The speaker menu at the top of the window shows what you are listening on,
+read through any Multi-Output Device, and lists the other outputs. Choosing
+one there is the same as choosing it in System Settings, so when the Mac is
+left on the wrong output (the speakers after a session, say, when you want
+the dock) there is no need to leave the app. Each entry says which
+Multi-Output Device will carry the captions for it, or that none does.
+
 ## GPU host setup
 
 On the GPU machine, once:
