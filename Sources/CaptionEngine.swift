@@ -62,8 +62,14 @@ final class CaptionEngine {
     /// How many earlier captions a replay's transcription is told about, so
     /// a name or a term heard before is heard the same way again.
     static let replayContextCaptions = 2
-    /// Between the click and Chrome starting the sentence.
-    static let replayLatency: TimeInterval = 2
+    /// Between the click and Chrome starting the sentence, with room for
+    /// the video to load the part it jumped to.
+    static let replayLatency: TimeInterval = 4
+    /// An utterance heard on replay must be at least this share of the
+    /// sentence's length to be taken as the sentence. Whatever else the
+    /// player lets out around a jump, a fragment, is dropped: transcribed,
+    /// it comes back as a made-up line.
+    static let replayMinimumShare = 0.5
 
     private var session: ServerSession?
     private var source: AudioSource?
@@ -86,9 +92,10 @@ final class CaptionEngine {
     /// A caption whose sentence is being played again from the video. Until
     /// the deadline, an utterance that starts is that sentence heard again,
     /// and what the server makes of it this time replaces the caption.
-    private var replay: (captionID: Int, deadline: Date)?
-    /// Utterances that are a replay, by the caption each corrects.
-    private var replayUtterances: [Int: Int] = [:]
+    private var replay: (captionID: Int, deadline: Date, expected: TimeInterval)?
+    /// Utterances that are a replay: the caption each corrects and how long
+    /// its sentence is.
+    private var replayUtterances: [Int: (captionID: Int, expected: TimeInterval)] = [:]
     /// The last line written for each corrected caption, so a sentence that
     /// comes back as two utterances lands in order rather than the second
     /// one appending at the end.
@@ -145,7 +152,7 @@ final class CaptionEngine {
     /// caption cleared or replaced meanwhile is left alone.
     func expectReplay(of caption: Caption) {
         guard isRunning, let moment = caption.moment else { return }
-        replay = (caption.id, Self.replayDeadline(for: moment, from: Date()))
+        replay = (caption.id, Self.replayDeadline(for: moment, from: Date()), Self.sentenceLength(of: moment))
         replayTails[caption.id] = nil
     }
 
@@ -160,10 +167,21 @@ final class CaptionEngine {
     /// played with a lead and a tail, and a caption's start is an estimate,
     /// so the whole playback counts rather than just its first seconds.
     nonisolated static func replayDeadline(for moment: VideoMoment, from now: Date) -> Date {
-        let end = moment.end ?? moment.seconds + UtteranceSegmenter.Config().maxUtterance
-        let played = (max(end - moment.seconds, 0) + ChromeScript.seekLead + ChromeScript.seekTail)
+        let played = (sentenceLength(of: moment) + ChromeScript.seekLead + ChromeScript.seekTail)
             / max(moment.rate, 0.1)
         return now.addingTimeInterval(played + replayLatency)
+    }
+
+    /// How long the sentence takes to play, in video seconds.
+    nonisolated static func sentenceLength(of moment: VideoMoment) -> TimeInterval {
+        let end = moment.end ?? moment.seconds + UtteranceSegmenter.Config().maxUtterance
+        return max(end - moment.seconds, 0)
+    }
+
+    /// Whether `spoken` seconds heard on replay can be the sentence that
+    /// takes `expected` seconds, rather than a fragment around the jump.
+    nonisolated static func replayCovers(spoken: TimeInterval, expected: TimeInterval) -> Bool {
+        spoken >= expected * replayMinimumShare
     }
 
     private func run() async {
@@ -275,7 +293,7 @@ final class CaptionEngine {
                 isSpeaking = true
                 if let replay {
                     if Date() <= replay.deadline {
-                        replayUtterances[utterance] = replay.captionID
+                        replayUtterances[utterance] = (replay.captionID, replay.expected)
                     } else {
                         self.replay = nil
                     }
@@ -337,12 +355,19 @@ final class CaptionEngine {
 
     private func transcribeFinal(_ audio: Data, utterance: Int, client: ASRClient) async {
         let moment = utteranceMoments.removeValue(forKey: utterance)
-        let correcting = replayUtterances.removeValue(forKey: utterance)
-        let beamSize = correcting == nil ? Self.liveBeamSize : Self.replayBeamSize
-        let prompt = correcting.map(replayPrompt(for:))
         // The moment is when the first speech was noticed, after the pre-roll.
         let spoken = Double(audio.count / AudioFormat.frameBytes) * AudioFormat.frameDuration
             - segmenter.config.preRoll - segmenter.config.postRoll
+        let correcting = replayUtterances.removeValue(forKey: utterance)
+        if let correcting, !Self.replayCovers(spoken: spoken, expected: correcting.expected) {
+            print(String(
+                format: "caption %d: %.1f s heard on replay of a %.1f s sentence, dropped as a fragment",
+                correcting.captionID, spoken, correcting.expected
+            ))
+            return
+        }
+        let beamSize = correcting == nil ? Self.liveBeamSize : Self.replayBeamSize
+        let prompt = correcting.map { replayPrompt(for: $0.captionID) }
         for attempt in 1...Self.remoteRetries {
             do {
                 let result = try await client.transcribe(
@@ -355,7 +380,11 @@ final class CaptionEngine {
                 }
                 let lines = captionLines(result, from: await moment?.value, spoken: spoken)
                 if let correcting {
-                    correct(correcting, with: lines)
+                    print(String(
+                        format: "caption %d: %.1f s heard on replay of a %.1f s sentence",
+                        correcting.captionID, spoken, correcting.expected
+                    ))
+                    correct(correcting.captionID, with: lines)
                 } else {
                     captions.append(contentsOf: lines)
                 }

@@ -310,10 +310,17 @@ enum ChromeScript {
         case .skip(let seconds):
             "v.currentTime = Math.min(Math.max(v.currentTime + (\(seconds)), 0), v.duration || Infinity);"
         case .seek(let moment):
+            // Paused before the jump and played once it has landed: a video
+            // that keeps playing through a seek lets out a moment of sound
+            // from where it was, which the captions would hear as a
+            // sentence of its own.
             "if (location.href !== \(javaScriptString(moment.url))) return 'moved'; "
                 + "const from = Math.max(\(moment.seconds - seekLead), 0); "
                 + (moment.end.map { "\(stopScript(at: $0 + seekTail)) " } ?? "")
-                + "v.currentTime = from; v.play();"
+                + "v.pause(); v.currentTime = from; "
+                + "const resume = () => { if (v.paused) v.play(); }; "
+                + "if (v.seeking) { v.addEventListener('seeked', resume, { once: true }); } else { resume(); } "
+                + "return 'playing';"
         }
     }
 

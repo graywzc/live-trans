@@ -317,3 +317,19 @@ final class ReplayCorrectionTests: XCTestCase {
         XCTAssertGreaterThan(CaptionEngine.replayDeadline(for: moment, from: now).timeIntervalSince(now), 12)
     }
 }
+
+final class ReplayFragmentTests: XCTestCase {
+    func testAFragmentAroundTheJumpIsNotTheSentence() {
+        XCTAssertFalse(CaptionEngine.replayCovers(spoken: 0.4, expected: 3))
+        XCTAssertTrue(CaptionEngine.replayCovers(spoken: 1.6, expected: 3))
+        // Cut a little short by the stop, or by a pause in it, still counts.
+        XCTAssertTrue(CaptionEngine.replayCovers(spoken: 2.2, expected: 3))
+    }
+
+    func testSentenceLengthComesFromItsMoment() {
+        var moment = VideoMoment(tabID: 1, url: "u", seconds: 60)
+        XCTAssertEqual(CaptionEngine.sentenceLength(of: moment), 12)
+        moment.end = 63.5
+        XCTAssertEqual(CaptionEngine.sentenceLength(of: moment), 3.5)
+    }
+}
