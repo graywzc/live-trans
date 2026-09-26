@@ -28,6 +28,7 @@ targets:
         LSApplicationCategoryType: public.app-category.utilities
         NSMicrophoneUsageDescription: LiveTrans listens to the selected audio input so it can caption and translate Japanese speech.
         NSAppleEventsUsageDescription: LiveTrans plays, pauses and skips the video in Chrome when you use its video buttons.
+        NSBluetoothAlwaysUsageDescription: LiveTrans lists your paired AirPods and headphones in its sound output menu and connects the one you choose.
         # The GPU server speaks plain HTTP over Tailscale; without this App
         # Transport Security would only permit HTTPS.
         NSAppTransportSecurity:

@@ -78,13 +78,33 @@ enum AudioHardware {
 
     @discardableResult
     static func setDefaultOutput(uid: String) -> Bool {
-        guard var id = deviceIDs().first(where: { self.uid(of: $0) == uid }) else { return false }
+        guard var id = deviceID(uid: uid) else { return false }
         let size = UInt32(MemoryLayout<AudioDeviceID>.size)
         return AudioObjectSetPropertyData(system, &defaultOutputAddress, 0, nil, size, &id) == noErr
     }
 
     static func name(uid: String) -> String? {
-        deviceIDs().first { self.uid(of: $0) == uid }.flatMap(name(of:))
+        deviceID(uid: uid).flatMap(name(of:))
+    }
+
+    /// The device with this UID, whether or not it is in the device list:
+    /// Bluetooth headphones are hidden from it while a Multi-Output Device
+    /// plays through them. Nil for a device that is not there at all, such
+    /// as headphones not connected.
+    static func deviceID(uid: String) -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uid = uid as CFString
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = withUnsafePointer(to: &uid) { pointer in
+            AudioObjectGetPropertyData(system, &address, UInt32(MemoryLayout<CFString>.size), pointer, &size, &id)
+        }
+        guard status == noErr, id != kAudioObjectUnknown else { return nil }
+        return id
     }
 
     static func uid(of id: AudioObjectID) -> String? {
