@@ -49,7 +49,7 @@ final class CaptionRowTests: XCTestCase {
     }
 
     func testButtonAppearsUnderThePointerAndAnalyzes() throws {
-        let tracker = try XCTUnwrap(hoverTracker(in: window.contentView!))
+        let tracker = try hoverTracker()
         // Works with another app in front, where the captions usually are.
         XCTAssertEqual(tracker.trackingAreas.count, 1)
         XCTAssertTrue(tracker.trackingAreas[0].options.contains(.activeAlways))
@@ -123,7 +123,7 @@ final class CaptionRowTests: XCTestCase {
     }
 
     func testRowIsHighlightedUnderThePointer() throws {
-        let tracker = try XCTUnwrap(hoverTracker(in: window.contentView!))
+        let tracker = try hoverTracker()
         let inside = CGPoint(x: 200, y: 70)
         XCTAssertEqual(brightness(at: inside), 0, accuracy: 0.02, "black until hovered")
         tracker.mouseEntered(with: event(.mouseMoved, at: inside))
@@ -137,7 +137,7 @@ final class CaptionRowTests: XCTestCase {
     /// Puts the pointer over the row, as it is when the row is clicked: the
     /// highlight is showing, and must not take the click.
     private func hover() throws {
-        let tracker = try XCTUnwrap(hoverTracker(in: window.contentView!))
+        let tracker = try hoverTracker()
         tracker.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: 200, y: 70)))
         pump()
     }
@@ -153,9 +153,13 @@ final class CaptionRowTests: XCTestCase {
         return color.usingColorSpace(.deviceRGB)!.brightnessComponent
     }
 
-    private func hoverTracker(in view: NSView) -> HoverTracker.TrackerView? {
-        if let tracker = view as? HoverTracker.TrackerView { return tracker }
-        return view.subviews.lazy.compactMap(hoverTracker).first
+    /// The row's hover tracker, waited for: the hosting view may not have
+    /// built the row by the end of setUp on a slow machine.
+    private func hoverTracker() throws -> HoverTracker.TrackerView {
+        func find(in view: NSView) -> HoverTracker.TrackerView? {
+            (view as? HoverTracker.TrackerView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        return try XCTUnwrap(TestScreen.wait { window.contentView.flatMap(find) }, "no hover tracker in the window")
     }
 
     private func event(_ type: NSEvent.EventType, at point: CGPoint, clicks: Int = 0) -> NSEvent {

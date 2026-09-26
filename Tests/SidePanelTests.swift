@@ -81,7 +81,9 @@ final class SidePanelLaunchSnapshotTests: XCTestCase {
         func controls(_ v: NSView) -> [NSControl] {
             (v as? NSControl).map { [$0] } ?? [] + v.subviews.flatMap(controls)
         }
-        XCTAssertTrue(controls(view).contains { $0 is NSSegmentedControl }, "no panel tab picker in the window")
+        XCTAssertNotNil(
+            TestScreen.wait { controls(view).first { $0 is NSSegmentedControl } }, "no panel tab picker in the window"
+        )
 
         if let dir = ProcessInfo.processInfo.environment["SNAPSHOT_DIR"],
            let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
@@ -125,7 +127,8 @@ final class QuestionFieldControlCTests: XCTestCase {
         func fields(_ v: NSView) -> [NSTextField] {
             ((v as? NSTextField).map { $0.isEditable ? [$0] : [] } ?? []) + v.subviews.flatMap(fields)
         }
-        let field = try XCTUnwrap(fields(try XCTUnwrap(window.contentView)).first, "no question field in the window")
+        let view = try XCTUnwrap(window.contentView)
+        let field = try XCTUnwrap(TestScreen.wait { fields(view).first }, "no question field in the window")
         XCTAssertTrue(window.makeFirstResponder(field))
         XCTAssertTrue(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
 

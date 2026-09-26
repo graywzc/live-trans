@@ -430,7 +430,8 @@ extension FollowUpTests {
             func textViews(in view: NSView) -> [NSTextView] {
                 ((view as? NSTextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews)
             }
-            return try XCTUnwrap(textViews(in: XCTUnwrap(window.contentView)).first { $0.string == string })
+            let view = try XCTUnwrap(window.contentView)
+            return try XCTUnwrap(TestScreen.wait { textViews(in: view).first { $0.string == string } }, string)
         }
         // Where in the window, since the scroll view clips without the text
         // views knowing.
@@ -580,7 +581,10 @@ final class AnalysisPanelTests: XCTestCase {
         func textViews(in view: NSView) -> [NSTextView] {
             ((view as? NSTextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews)
         }
-        let cell = try XCTUnwrap(textViews(in: try XCTUnwrap(window.contentView)).first { $0.string == "食べられなかった" })
+        let content = try XCTUnwrap(window.contentView)
+        let cell = try XCTUnwrap(
+            TestScreen.wait { textViews(in: content).first { $0.string == "食べられなかった" } }, "no cell for the word"
+        )
         window.makeFirstResponder(cell)
         cell.setSelectedRange(NSRange(location: 0, length: cell.string.utf16.count))
         try await Task.sleep(nanoseconds: 300_000_000)

@@ -40,7 +40,11 @@ final class LookupViewTests: XCTestCase {
         func textViews(in view: NSView) -> [NSTextView] {
             ((view as? NSTextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews)
         }
-        let texts = textViews(in: hosting)
+        // Waited for: the hosting view may not have built them all yet.
+        let texts = TestScreen.wait { () -> [NSTextView]? in
+            let texts = textViews(in: hosting)
+            return texts.count > 10 ? texts : nil
+        } ?? []
         XCTAssertGreaterThan(texts.count, 10)
         for text in texts {
             let used = try XCTUnwrap(text.layoutManager).usedRect(for: try XCTUnwrap(text.textContainer))
