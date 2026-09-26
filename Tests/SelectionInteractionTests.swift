@@ -49,6 +49,15 @@ final class SelectionInteractionTests: XCTestCase {
         window.contentView = NSHostingView(rootView: Host(model: model))
         window.orderFrontRegardless()
         pump()
+        // The clicks go by position, so the text has to be laid out before
+        // the first: the hosting view may not have built it by now on a
+        // slow machine. The FuriganaText's pointer tracker is the view that
+        // takes them; it is private to the view, so it is found by name.
+        func tracker(in view: NSView) -> NSView? {
+            String(reflecting: type(of: view)).contains("PointerTracker")
+                ? view : view.subviews.lazy.compactMap(tracker).first
+        }
+        _ = try XCTUnwrap(TestScreen.wait { window.contentView.flatMap(tracker) }, "no pointer tracker in the window")
     }
 
     override func tearDown() async throws {

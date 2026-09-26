@@ -124,7 +124,9 @@ final class SelectableTextTests: XCTestCase {
         func find(in view: NSView) -> NSTextView? {
             (view as? NSTextView) ?? view.subviews.lazy.compactMap(find).first
         }
-        return try XCTUnwrap(window.contentView.flatMap(find))
+        // Waited for: the hosting view may not have built the text by the
+        // end of setUp on a slow machine.
+        return try XCTUnwrap(TestScreen.wait { window.contentView.flatMap(find) }, "no text view in the window")
     }
 
     private func click(x: CGFloat, y: CGFloat, count: Int = 1) {
