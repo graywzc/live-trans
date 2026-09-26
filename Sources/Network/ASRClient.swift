@@ -17,6 +17,10 @@ struct ServerHealth: Decodable, Equatable {
 struct CaptionPair: Decodable, Equatable {
     var ja: String
     var en: String
+    /// Where the sentence starts and ends in the audio sent, in seconds,
+    /// when the server could place its words.
+    var start: Double?
+    var end: Double?
 }
 
 struct Transcription: Equatable {

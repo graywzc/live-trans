@@ -210,9 +210,12 @@ sentence again from there; the video pauses when the sentence ends. What is
 heard on that replay is transcribed again, taking its time over it (a wider
 search, with the captions before it as context), and replaces the caption. So
 when a line looks wrong, click it: it is heard once more, and corrected if the
-model does better the second time. This needs a server fetched on or after the
-release that added it; an older `asr_server.py` still works, without the
-context.
+model does better the second time. A replay that comes back as something
+other than the sentence (only the context, or a line with nothing of the
+original in it, as the model produces over music or silence) leaves the
+caption as it was. Sentence times come from where Whisper heard the words,
+so this needs a current `asr_server.py` on the GPU host; an older one still
+works, with the sentences placed by their share of the text instead.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. The share button exports the session as
