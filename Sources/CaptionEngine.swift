@@ -40,6 +40,12 @@ final class CaptionEngine {
     /// Where the video is at a given time, asked as each utterance starts so
     /// its captions can take the video back to it.
     var videoClock: (@MainActor (Date) async -> VideoMoment?)?
+    /// Whether a stretch of the video has its captions fetched ahead, in
+    /// which case what is heard live of it adds nothing.
+    var isPrefetched: (@MainActor (VideoMoment) -> Bool)?
+    /// The server, while captioning, for fetching ahead through it.
+    private(set) var client: ASRClient?
+    private(set) var serverCanPrefetch = false
 
     var isRunning: Bool {
         switch status {
@@ -128,7 +134,31 @@ final class CaptionEngine {
 
         let session = self.session
         self.session = nil
+        client = nil
+        serverCanPrefetch = false
         return Task { await session?.stop() }
+    }
+
+    /// Captions from elsewhere than the live audio (fetched ahead, or a
+    /// stretch heard again from the fetched audio), put among the others by
+    /// where in the video they are.
+    func add(_ lines: [CaptionPair], tabID: Int, url: String, heardAgain: Bool) {
+        let captions = lines.compactMap { line -> Caption? in
+            guard !line.ja.isEmpty, let start = line.start, let end = line.end else { return nil }
+            var moment = VideoMoment(tabID: tabID, url: url, seconds: start)
+            moment.end = end
+            return makeCaption(japanese: line.ja, english: line.en, moment: moment)
+        }
+        guard let first = captions.first?.moment else { return }
+        let prompt = heardAgain ? contextPrompt(before: first, spoken: 0) : ""
+        self.captions = Self.merge(captions, into: self.captions, prompt: prompt)
+    }
+
+    private func makeCaption(japanese: String, english: String, moment: VideoMoment?) -> Caption {
+        defer { nextCaptionID += 1 }
+        return Caption(
+            id: nextCaptionID, japanese: japanese, ruby: Furigana.annotate(japanese), english: english, moment: moment
+        )
     }
 
     func clear() {
@@ -164,6 +194,8 @@ final class CaptionEngine {
                 }
             }
             client = startedClient
+            self.client = startedClient
+            serverCanPrefetch = health.prefetch ?? false
             serverLabel = ["GPU", health.asr, health.ollamaModel].compactMap { $0 }.joined(separator: " · ")
         } catch {
             // Stop pressed mid-connect: the cancelled requests fail like any
@@ -278,7 +310,7 @@ final class CaptionEngine {
         // A preview of something already captioned would only show under
         // the captions what is about to replace one of them.
         if let moment = resolvedMoments[utterance],
-           Self.isCaptioned(captions, from: moment, spoken: Self.seconds(of: audio)) {
+           isPrefetched?(moment) == true || Self.isCaptioned(captions, from: moment, spoken: Self.seconds(of: audio)) {
             return
         }
         partialTask = Task {
@@ -310,6 +342,12 @@ final class CaptionEngine {
         let moment = await utteranceMoments.removeValue(forKey: utterance)?.value
         resolvedMoments[utterance] = nil
         let spoken = Self.seconds(of: audio) - segmenter.config.preRoll - segmenter.config.postRoll
+        if let moment, isPrefetched?(moment) == true {
+            // Its captions were fetched ahead from the video's own audio,
+            // which beats a cut of what the speakers played.
+            print(String(format: "utterance %d: pre-fetched captions cover it, dropped", utterance))
+            return
+        }
         // Heard from a stretch of the video that has captions already: the
         // sentence played again from a caption, or the video played on from
         // there, or taken back. Nobody is waiting on it, so it can be heard
@@ -353,14 +391,7 @@ final class CaptionEngine {
         let moments = Self.moments(of: lines, from: moment, spoken: spoken, preRoll: segmenter.config.preRoll)
         return zip(lines, moments).map { line, moment in
             print("\(line.ja)\n-> \(line.en)")
-            defer { nextCaptionID += 1 }
-            return Caption(
-                id: nextCaptionID,
-                japanese: line.ja,
-                ruby: Furigana.annotate(line.ja),
-                english: line.en,
-                moment: moment
-            )
+            return makeCaption(japanese: line.ja, english: line.en, moment: moment)
         }
     }
 

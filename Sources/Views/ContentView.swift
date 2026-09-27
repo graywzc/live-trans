@@ -7,6 +7,7 @@ struct ContentView: View {
     @Environment(SentenceAnalyzer.self) private var analyzer
     @Environment(SidePanel.self) private var panel
     @Environment(ChromeVideo.self) private var video
+    @Environment(Prefetcher.self) private var prefetch
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
@@ -87,7 +88,8 @@ struct ContentView: View {
                                 && analyzer.hasAnalyzed(caption),
                             selection: selectionBinding(for: caption),
                             onAnalyze: { analyze(caption) },
-                            onSeek: caption.moment.map { moment in { video.send(.seek(moment)) } }
+                            onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
+                            isCurrent: prefetch.currentCaptionID == caption.id
                         )
                     }
                     if !engine.partialText.isEmpty {
@@ -108,6 +110,9 @@ struct ContentView: View {
                 }
             }
             .onChange(of: engine.captions.count) {
+                // Captions fetched ahead arrive below the one being spoken;
+                // the list stays on that one rather than running ahead.
+                guard prefetch.currentCaptionID == nil else { return }
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(Self.bottom, anchor: .bottom)
                 }
@@ -115,7 +120,21 @@ struct ContentView: View {
             .onChange(of: engine.partialText) {
                 proxy.scrollTo(Self.bottom, anchor: .bottom)
             }
+            .onChange(of: prefetch.currentCaptionID) { _, id in
+                guard let id else { return }
+                withAnimation(.easeOut(duration: 0.25)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
         }
+    }
+
+    /// Plays the sentence again. One fetched ahead is also heard again from
+    /// the fetched audio, which corrects it; a live one is heard again
+    /// through the speakers as it plays.
+    private func replay(_ caption: Caption, at moment: VideoMoment) {
+        video.send(.seek(moment))
+        prefetch.rehear(caption)
     }
 
     private func selectionBinding(for caption: Caption) -> Binding<Range<Int>?> {
@@ -164,6 +183,16 @@ struct ContentView: View {
 
     private var footer: some View {
         VStack(spacing: 12) {
+            if let job = prefetch.job {
+                PrefetchBar(
+                    duration: job.duration, fetched: job.fetched, ready: job.ready,
+                    playhead: prefetch.playhead.map { playhead in
+                        playhead.playing
+                            ? playhead.advanced(by: Date().timeIntervalSince(prefetch.playheadAt)).seconds
+                            : playhead.seconds
+                    }
+                )
+            }
             if engine.isRunning {
                 LevelMeter(
                     level: engine.inputLevel,
@@ -601,6 +630,8 @@ struct CaptionRow: View {
     /// Plays the video from this sentence, on a click anywhere in the row.
     /// Nil when it wasn't heard from one.
     var onSeek: (() -> Void)?
+    /// The sentence being spoken, among captions fetched ahead.
+    var isCurrent = false
 
     @State private var isHovered = false
 
@@ -642,7 +673,7 @@ struct CaptionRow: View {
         .padding(Self.highlightInset)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color.white.opacity(isHovered && onSeek != nil ? 0.1 : 0))
+                .fill(isCurrent ? Color.green.opacity(0.16) : Color.white.opacity(isHovered && onSeek != nil ? 0.1 : 0))
                 // Showing, a shape takes clicks; the row's must reach the
                 // tracker behind it.
                 .allowsHitTesting(false)
@@ -848,5 +879,48 @@ private struct WindowLevel: NSViewRepresentable {
         frame.size.height = min(frame.height, visible.height)
         frame.origin = CGPoint(x: visible.midX - frame.width / 2, y: visible.midY - frame.height / 2)
         window.setFrame(frame, display: true)
+    }
+}
+
+/// How far the video's captions have been fetched ahead: the audio fetched,
+/// the stretch captioned, and where the viewer is.
+struct PrefetchBar: View {
+    let duration: Double?
+    let fetched: Double
+    let ready: Double
+    let playhead: Double?
+
+    var body: some View {
+        let total = max(duration ?? 0, fetched, playhead ?? 0, 1)
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.12))
+                Capsule()
+                    .fill(Color.white.opacity(0.3))
+                    .frame(width: geometry.size.width * Self.fraction(fetched, of: total))
+                Capsule()
+                    .fill(Color.green.opacity(0.7))
+                    .frame(width: geometry.size.width * Self.fraction(ready, of: total))
+                if let playhead {
+                    Rectangle()
+                        .fill(Color.orange)
+                        .frame(width: 2)
+                        .offset(x: geometry.size.width * Self.fraction(playhead, of: total) - 1)
+                }
+            }
+        }
+        .frame(height: 6)
+        .help(Self.summary(duration: duration, fetched: fetched, ready: ready))
+        .accessibilityLabel(Self.summary(duration: duration, fetched: fetched, ready: ready))
+    }
+
+    static func fraction(_ seconds: Double, of total: Double) -> CGFloat {
+        guard total > 0 else { return 0 }
+        return CGFloat(min(max(seconds / total, 0), 1))
+    }
+
+    static func summary(duration: Double?, fetched: Double, ready: Double) -> String {
+        let whole = duration.map { " of \(CaptionRow.timestamp($0))" } ?? ""
+        return "Captions ready to \(CaptionRow.timestamp(ready)), audio fetched to \(CaptionRow.timestamp(fetched))\(whole)"
     }
 }

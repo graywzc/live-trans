@@ -91,6 +91,26 @@ final class ChromeVideo {
         return moment
     }
 
+    /// What the controlled tab's video is made of, for fetching its audio
+    /// ahead. Nil under the same conditions as `moment(at:)`.
+    func probeMedia() async -> MediaProbe? {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: ChromeScript.bundleID).isEmpty
+        else { return nil }
+        let source = ChromeScript.source(running: ChromeScript.mediaProbeJavaScript, pinned: pinned?.id, preferring: linked?.id)
+        let known = hasReachedChrome
+        let result = await withCheckedContinuation { continuation in
+            queue.async {
+                guard known || ChromeScript.mayAutomateWithoutAsking() else {
+                    return continuation.resume(returning: nil as String?)
+                }
+                continuation.resume(returning: try? ChromeScript.runForText(source).get())
+            }
+        }
+        guard let result, let probe = ChromeScript.mediaProbe(fromResult: result) else { return nil }
+        hasReachedChrome = true
+        return probe
+    }
+
     /// Nil goes back to automatic.
     func pin(_ tab: ChromeScript.Tab?) {
         pinned = tab
@@ -221,6 +241,28 @@ final class ChromeVideo {
     }
 }
 
+/// What a page's video is made of, as far as fetching its audio goes.
+struct MediaProbe: Equatable {
+    let tabID: Int
+    let page: String
+    let duration: Double?
+    /// A file the video element plays directly.
+    let source: String?
+    /// An HLS or DASH playlist the page loaded.
+    let manifest: String?
+    /// Under DRM: nothing can be fetched.
+    let encrypted: Bool
+    let userAgent: String
+
+    /// The URL ffmpeg can read, if the page gave one away; else the server
+    /// asks yt-dlp about the page.
+    var mediaURL: String? { source ?? manifest }
+
+    var isFetchable: Bool {
+        !encrypted && (mediaURL != nil || page.hasPrefix("http"))
+    }
+}
+
 /// A stretch of a Chrome video: where a sentence was said.
 struct VideoMoment: Equatable {
     let tabID: Int
@@ -231,6 +273,8 @@ struct VideoMoment: Equatable {
     var end: Double?
     /// Video seconds per second heard.
     var rate: Double = 1
+    /// Whether the video was playing when this was read.
+    var playing = false
 
     /// This moment `heard` seconds of listening later.
     func advanced(by heard: TimeInterval) -> VideoMoment {
@@ -346,7 +390,43 @@ enum ChromeScript {
         else { return nil }
         // Asked when the sentence started, answered a moment later.
         let elapsed = fields[0] == "playing" ? max(now - wall.timeIntervalSince1970, 0) * rate : 0
-        return VideoMoment(tabID: id, url: url, seconds: max(time - elapsed, 0), rate: rate)
+        return VideoMoment(
+            tabID: id, url: url, seconds: max(time - elapsed, 0), rate: rate, playing: fields[0] == "playing"
+        )
+    }
+
+    /// What the page's video is made of, so its audio can be fetched ahead
+    /// of the viewer: "<clear|drm> <duration> <source> <manifest> <page>
+    /// <user agent>", the texts percent-encoded. The source is empty for a
+    /// player that assembles the stream itself (a blob:), and the manifest
+    /// is the last HLS or DASH playlist the page loaded, if any.
+    static let mediaProbeJavaScript = javaScript(
+        "const src = v.currentSrc || v.src || ''; "
+            + "const names = performance.getEntriesByType('resource').map(e => e.name); "
+            + "const isManifest = n => { const p = n.split('?')[0].toLowerCase(); "
+            + "return p.endsWith('.m3u8') || p.endsWith('.mpd'); }; "
+            + "const manifest = names.filter(isManifest).pop() || ''; "
+            + "return [v.mediaKeys ? 'drm' : 'clear', isFinite(v.duration) ? v.duration : 0, "
+            + "encodeURIComponent(src.startsWith('blob:') ? '' : src), encodeURIComponent(manifest), "
+            + "encodeURIComponent(location.href), encodeURIComponent(navigator.userAgent)].join(' ');"
+    )
+
+    /// A `mediaProbeJavaScript` result.
+    static func mediaProbe(fromResult result: String) -> MediaProbe? {
+        let parts = result.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count >= 2, let id = tabID(parts[1]) else { return nil }
+        let fields = parts[0].split(separator: " ", omittingEmptySubsequences: false)
+        guard fields.count == 6, fields[0] == "clear" || fields[0] == "drm", let duration = Double(fields[1]),
+              let source = String(fields[2]).removingPercentEncoding,
+              let manifest = String(fields[3]).removingPercentEncoding,
+              let page = String(fields[4]).removingPercentEncoding,
+              let agent = String(fields[5]).removingPercentEncoding
+        else { return nil }
+        return MediaProbe(
+            tabID: id, page: page, duration: duration > 0 ? duration : nil,
+            source: source.isEmpty ? nil : source, manifest: manifest.isEmpty ? nil : manifest,
+            encrypted: fields[0] == "drm", userAgent: agent
+        )
     }
 
     /// Runs the command in the pinned tab, or with none pinned in the front
