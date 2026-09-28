@@ -41,6 +41,7 @@ enum AppSettings {
     static let captionFontSize = "captionFontSize"
     static let sensitivity = "sensitivity"
     static let keepOnTop = "keepOnTop"
+    static let prefetchVideo = "prefetchVideo"
     /// The panel was Jisho's alone when the key was named.
     static let sidePanelWidth = "jishoPanelWidth"
     static let analysisURL = "analysisURL"
@@ -61,6 +62,7 @@ enum AppSettings {
             captionFontSize: 22.0,
             sensitivity: 0.5,
             keepOnTop: false,
+            prefetchVideo: true,
             sidePanelWidth: 440.0,
             analysisURL: "",
             analysisModel: "",

@@ -89,6 +89,14 @@ python3 -m venv ~/venvs/livetrans
 ollama pull qwen3.5:9b
 ```
 
+To caption videos ahead from their own audio, the host also needs `ffmpeg`,
+and `yt-dlp` with a JavaScript runtime for sites like YouTube:
+
+```
+pip install -U yt-dlp
+curl -fsSL https://deno.land/install.sh | sh -s -- --no-modify-path
+```
+
 Then in LiveTrans, open Settings (⌘,) and set **SSH host** to whatever you type
 after `ssh` to reach that machine. An alias from `~/.ssh/config` is fine.
 `ssh <host> true` must succeed without prompting.
@@ -210,6 +218,23 @@ configuration.
 When the sound is a video playing in Chrome, each caption notes where in the
 video its sentence was said, and shows the time. Click a caption to play its
 sentence again from there; the video pauses when the sentence ends. What is
+When the video is one whose audio the GPU host can fetch (a plain file, an
+HLS or DASH stream, or a page yt-dlp knows), LiveTrans captions it **ahead of
+you** from that audio instead of listening: the host fetches the audio, cuts
+it at silences into chunks of about a minute, and transcribes and translates
+each, so the captions are in place before the video gets there, with exact
+times. The whole script is listed as it arrives, the line being spoken is
+lit and kept in view, and a bar above the level meter shows how far the audio
+has been fetched (grey), how far the captions are ready (green), and where you
+are (orange). Pause, seek and replay as you like; the fetch never touches the
+player. Encrypted streams (most subscription services) cannot be fetched and
+stay on live captioning, as does any page the host cannot resolve. The live
+listener stands down over the stretch that has been fetched and picks up
+again past it. The switch is **Caption a Chrome video ahead from its own
+audio** in Settings. For YouTube the host needs a JavaScript runtime for
+yt-dlp (`deno`), and without a YouTube token the fetch runs at playback pace,
+so captions catch up rather than run ahead until you pause or go back.
+
 Anything heard from a stretch of the video that already has captions, whether
 a replayed sentence, the video played on from there with Space, or a skip
 back, is transcribed again taking its time over it (a wider search, with the
