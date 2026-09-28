@@ -6,12 +6,25 @@ struct ServerHealth: Decodable, Equatable {
     var device: String?
     var translationBackend: String?
     var ollamaModel: String?
+    /// The server can fetch a video's audio ahead and caption it.
+    var prefetch: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case status, asr, device
+        case status, asr, device, prefetch
         case translationBackend = "translation_backend"
         case ollamaModel = "ollama_model"
     }
+}
+
+/// How far a pre-fetch has got, and its lines from `since` on.
+struct PrefetchStatus: Decodable, Equatable {
+    var state: String
+    var error: String?
+    var duration: Double?
+    var fetched: Double
+    var ready: Double
+    var count: Int
+    var lines: [CaptionPair]
 }
 
 struct CaptionPair: Decodable, Equatable {
@@ -69,6 +82,69 @@ struct ASRClient {
         return try Self.decodeTranscription(
             data, statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0
         )
+    }
+
+    /// Start fetching a video's audio ahead of the viewer. Returns the job.
+    func startPrefetch(url: String?, page: String, headers: [String: String], duration: Double?) async throws -> String {
+        var request = URLRequest(url: baseURL.appending(path: "prefetch"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["url": url ?? "", "page": page, "headers": headers]
+        if let duration { body["duration"] = duration }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await session.data(for: request)
+        struct Payload: Decodable { var job: String?; var error: String? }
+        let payload = try Self.decode(Payload.self, from: data, statusCode: response)
+        guard let job = payload.job else { throw ClientError.server(payload.error ?? "no job") }
+        return job
+    }
+
+    func prefetchStatus(job: String, since: Int) async throws -> PrefetchStatus {
+        var components = URLComponents(url: baseURL.appending(path: "prefetch/\(job)"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "since", value: String(since))]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 20
+        let (data, response) = try await session.data(for: request)
+        return try Self.decode(PrefetchStatus.self, from: data, statusCode: response)
+    }
+
+    /// The stretch heard again from the fetched audio.
+    func rehear(job: String, from start: Double, to end: Double) async throws -> [CaptionPair] {
+        var components = URLComponents(url: baseURL.appending(path: "prefetch/\(job)/rehear"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "from", value: String(start)), URLQueryItem(name: "to", value: String(end)),
+        ]
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        struct Payload: Decodable { var lines: [CaptionPair] }
+        return try Self.decode(Payload.self, from: data, statusCode: response).lines
+    }
+
+    func stopPrefetch(job: String) async {
+        var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/stop"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        _ = try? await session.data(for: request)
+    }
+
+    private struct ServerFailure: Decodable { var error: String? }
+
+    private static func decode<T: Decodable>(_ type: T.Type, from data: Data, statusCode response: URLResponse) throws -> T {
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if code != 200 {
+            if let message = (try? JSONDecoder().decode(ServerFailure.self, from: data))?.error {
+                throw ClientError.server(message)
+            }
+            throw ClientError.badStatus(code)
+        }
+        do {
+            return try JSONDecoder().decode(type, from: data)
+        } catch {
+            throw ClientError.badStatus(code)
+        }
     }
 
     /// Ask the server to exit and release the GPU now rather than waiting out

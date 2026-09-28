@@ -19,6 +19,7 @@ struct LiveTransApp: App {
                 .environment(delegate.analyzer)
                 .environment(delegate.panel)
                 .environment(delegate.video)
+                .environment(delegate.prefetcher)
                 .task {
                     if UserDefaults.standard.bool(forKey: AppSettings.autoStart) {
                         delegate.engine.start()
@@ -40,10 +41,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let analyzer = SentenceAnalyzer()
     let panel = SidePanel()
     let video = ChromeVideo()
+    let prefetcher: Prefetcher
 
     override init() {
+        prefetcher = Prefetcher(engine: engine, video: video)
         super.init()
         engine.videoClock = { [video] in await video.moment(at: $0) }
+        prefetcher.start()
         panel.applyLaunchArgument()
     }
 

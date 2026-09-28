@@ -59,13 +59,15 @@ final class ChromeVideoTests: XCTestCase {
         // Answered 0.4 s after the sentence started, at double speed.
         let moment = try XCTUnwrap(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 \(encoded)|567|Episode | 12", at: wall))
         XCTAssertEqual(moment.seconds, 100, accuracy: 0.001)
-        XCTAssertEqual(moment, VideoMoment(tabID: 567, url: url, seconds: moment.seconds, rate: 2))
+        XCTAssertEqual(moment, VideoMoment(tabID: 567, url: url, seconds: moment.seconds, rate: 2, playing: true))
         // A paused video hasn't moved meanwhile.
         XCTAssertEqual(
             ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 \(encoded)|567|Episode", at: wall)?.seconds,
             100.8
         )
         XCTAssertNil(ChromeScript.moment(fromResult: "none", at: wall))
+        XCTAssertEqual(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 \(encoded)|567|E", at: wall)?.playing, true)
+        XCTAssertEqual(ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 \(encoded)|567|E", at: wall)?.playing, false)
         XCTAssertNil(ChromeScript.moment(fromResult: "gone", at: wall))
         XCTAssertEqual(ChromeScript.outcome(fromResult: "moved|567|Episode"), .moved)
     }
@@ -73,7 +75,10 @@ final class ChromeVideoTests: XCTestCase {
     func testJavaScriptParses() throws {
         let context = try XCTUnwrap(JSContext())
         let moment = VideoMoment(tabID: 1, url: #"https://example.tv/"quoted"\path"#, seconds: 12.5)
-        for script in [ChromeScript.momentJavaScript, ChromeScript.javaScript(ChromeScript.action(for: .seek(moment)))] {
+        for script in [
+            ChromeScript.momentJavaScript, ChromeScript.mediaProbeJavaScript,
+            ChromeScript.javaScript(ChromeScript.action(for: .seek(moment))),
+        ] {
             // Parsed but not run: there is no document here.
             context.exception = nil
             context.evaluateScript("(function () { return \(script); })")
@@ -142,6 +147,7 @@ final class ChromeVideoTests: XCTestCase {
         var sources = [
             ChromeScript.listSource, ChromeScript.probeSource(tab: 1_173_479_941),
             ChromeScript.source(running: ChromeScript.momentJavaScript, pinned: nil, preferring: 1_173_479_941),
+            ChromeScript.source(running: ChromeScript.mediaProbeJavaScript, pinned: 1_173_479_941, preferring: nil),
         ]
         let moment = VideoMoment(tabID: 1_173_479_941, url: "https://example.tv/?a=\"b\"", seconds: 3)
         for command: ChromeVideo.Command in [.toggle, .skip(seconds: -5), .skip(seconds: 5), .seek(moment)] {
@@ -274,5 +280,42 @@ final class SentenceMomentTests: XCTestCase {
         XCTAssertEqual(CaptionRow.timestamp(0), "0:00")
         XCTAssertEqual(CaptionRow.timestamp(245.9), "4:05")
         XCTAssertEqual(CaptionRow.timestamp(3723), "1:02:03")
+    }
+}
+
+final class MediaProbeTests: XCTestCase {
+    private func encoded(_ text: String) -> String {
+        text.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+    }
+
+    func testProbeReadsWhatTheVideoIsMadeOf() throws {
+        let page = "https://example.tv/watch?v=1&t=2"
+        let manifest = "https://cdn.example.tv/v/1/index.m3u8?token=a|b"
+        let result = "clear 1443.5  \(encoded(manifest)) \(encoded(page)) \(encoded("Mozilla/5.0 (X)"))|567|Episode | 12"
+        let probe = try XCTUnwrap(ChromeScript.mediaProbe(fromResult: result))
+        XCTAssertEqual(probe, MediaProbe(
+            tabID: 567, page: page, duration: 1443.5, source: nil, manifest: manifest, encrypted: false,
+            userAgent: "Mozilla/5.0 (X)"
+        ))
+        XCTAssertEqual(probe.mediaURL, manifest)
+        XCTAssertTrue(probe.isFetchable)
+    }
+
+    func testAFileSourceComesFirstAndDRMCannotBeFetched() throws {
+        let file = "https://example.tv/ep1.mp4"
+        let clear = try XCTUnwrap(ChromeScript.mediaProbe(
+            fromResult: "clear 0 \(encoded(file)) \(encoded("https://x/m.mpd")) \(encoded("https://x/")) ua|1|T"
+        ))
+        XCTAssertEqual(clear.mediaURL, file)
+        XCTAssertNil(clear.duration, "an unknown duration is nil, not zero")
+        let drm = try XCTUnwrap(ChromeScript.mediaProbe(fromResult: "drm 100   \(encoded("https://x/")) ua|1|T"))
+        XCTAssertTrue(drm.encrypted)
+        XCTAssertFalse(drm.isFetchable)
+        // A player that assembles its own stream, on a page the host can ask about.
+        let page = try XCTUnwrap(ChromeScript.mediaProbe(fromResult: "clear 100   \(encoded("https://x/")) ua|1|T"))
+        XCTAssertNil(page.mediaURL)
+        XCTAssertTrue(page.isFetchable)
+        XCTAssertNil(ChromeScript.mediaProbe(fromResult: "none"))
+        XCTAssertNil(ChromeScript.mediaProbe(fromResult: "gone"))
     }
 }
