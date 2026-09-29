@@ -57,9 +57,6 @@ struct ContentView: View {
             OutputPicker()
             VideoControls()
             if !engine.captions.isEmpty {
-                ShareLink(item: engine.transcript) {
-                    Image(systemName: "square.and.arrow.up")
-                }
                 Button(role: .destructive, action: engine.clear) {
                     Image(systemName: "trash")
                 }

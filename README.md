@@ -209,8 +209,7 @@ an earlier sentence or answer. A follow-up question is the one exception to
 "or answer": the server keeps no conversation, so the app sends what the panel
 shows about the current sentence with it. A lookup sends the selected text and
 the sentence. The analysis with its questions and entries exists only in the
-panel until the next sentence replaces it: nothing is cached, written to disk,
-or part of the exported transcript. Give the address of the inference server itself; an
+panel until the next sentence replaces it: nothing is cached or written to disk. Give the address of the inference server itself; an
 agent or a memory layer in front of it would see the traffic. Whether the
 server logs its requests (vLLM's `--enable-log-requests`) is up to its own
 configuration.
@@ -253,8 +252,8 @@ so this needs a current `asr_server.py` on the GPU host; an older one still
 works, with the sentences placed by their share of the text instead.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
-floating the captions over a video. The share button exports the session as
-text; nothing is saved otherwise.
+floating the captions over a video. Nothing is saved: the captions exist only
+in the window.
 
 ## Development
 
