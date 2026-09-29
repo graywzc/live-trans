@@ -5,7 +5,8 @@ import Observation
 /// the GPU host: the tab's video is probed for what it is made of, the host
 /// fetches and transcribes it in chunks, and the lines land among the
 /// captions by where in the video they are, before the video gets there.
-/// The live listener stands down over the stretch this covers.
+/// The live listener stands down over the stretch this covers. Nothing is
+/// fetched until asked for, and it can be paused and taken up again.
 @MainActor
 @Observable
 final class Prefetcher {
@@ -20,6 +21,8 @@ final class Prefetcher {
         var state = "running"
         /// Lines taken so far.
         var seen = 0
+        /// Whether the host was told to hold its transcription.
+        var paused = false
     }
 
     /// How often the tab is probed for a change of video.
@@ -35,12 +38,15 @@ final class Prefetcher {
     private(set) var currentCaptionID: Int?
 
     var isActive: Bool { job != nil }
+    /// Off at launch: the video is only fetched ahead once asked to.
+    private(set) var isPaused = true
 
     private let engine: CaptionEngine
     private let video: ChromeVideo
     private var loop: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
     private var lastProbe = Date.distantPast
+    private var isTicking = false
     /// Pages the host could not fetch; not tried again until the tab moves on.
     private var failedPages: Set<String> = []
 
@@ -67,6 +73,15 @@ final class Prefetcher {
         }
     }
 
+    /// Starts fetching ahead, or pauses it. Paused, the captions already
+    /// fetched stay and the host stops transcribing; taken up again, it goes
+    /// on from where it stopped.
+    func toggle() {
+        isPaused.toggle()
+        lastProbe = .distantPast
+        Task { await tick() }
+    }
+
     /// Whether the video's captions at `moment` were fetched ahead.
     func covers(_ moment: VideoMoment) -> Bool {
         guard let job else { return false }
@@ -90,6 +105,9 @@ final class Prefetcher {
     }
 
     private func tick() async {
+        guard !isTicking else { return }
+        isTicking = true
+        defer { isTicking = false }
         guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client,
               UserDefaults.standard.bool(forKey: AppSettings.prefetchVideo)
         else {
@@ -102,12 +120,24 @@ final class Prefetcher {
                 if let job, job.tabID != probe.tabID || job.page != probe.page {
                     await stopJob()
                 }
-                if job == nil, probe.isFetchable, !failedPages.contains(probe.page) {
+                if job == nil, !isPaused, probe.isFetchable, !failedPages.contains(probe.page) {
                     await startJob(for: probe, client: client)
                 }
             }
         }
         guard let current = job else { return }
+        if current.paused != isPaused {
+            do {
+                try await client.setPrefetch(job: current.id, paused: isPaused)
+                if job?.id == current.id { job?.paused = isPaused }
+            } catch {
+                // A host that cannot pause is stopped instead, and a job it
+                // no longer has is started afresh.
+                print("prefetch \(isPaused ? "pause" : "resume"): \(error.localizedDescription)")
+                if isPaused { await stopJob() } else if job?.id == current.id { job = nil }
+                return
+            }
+        }
         do {
             let status = try await client.prefetchStatus(job: current.id, since: current.seen)
             guard var updated = job, updated.id == current.id else { return }

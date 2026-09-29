@@ -209,8 +209,7 @@ an earlier sentence or answer. A follow-up question is the one exception to
 "or answer": the server keeps no conversation, so the app sends what the panel
 shows about the current sentence with it. A lookup sends the selected text and
 the sentence. The analysis with its questions and entries exists only in the
-panel until the next sentence replaces it: nothing is cached, written to disk,
-or part of the exported transcript. Give the address of the inference server itself; an
+panel until the next sentence replaces it: nothing is cached or written to disk. Give the address of the inference server itself; an
 agent or a memory layer in front of it would see the traffic. Whether the
 server logs its requests (vLLM's `--enable-log-requests`) is up to its own
 configuration.
@@ -219,19 +218,22 @@ When the sound is a video playing in Chrome, each caption notes where in the
 video its sentence was said, and shows the time. Click a caption to play its
 sentence again from there; the video pauses when the sentence ends. What is
 When the video is one whose audio the GPU host can fetch (a plain file, an
-HLS or DASH stream, or a page yt-dlp knows), LiveTrans captions it **ahead of
-you** from that audio instead of listening: the host fetches the audio, cuts
+HLS or DASH stream, or a page yt-dlp knows), LiveTrans can caption it **ahead
+of you** from that audio instead of listening. It starts paused: while
+captioning, press **Caption ahead** under the captions to begin, and **Pause**
+to hold it (the host stops transcribing, the captions already fetched stay,
+and taking it up again goes on from there). Running, the host fetches the audio, cuts
 it at silences into chunks of about a minute, and transcribes and translates
 each, so the captions are in place before the video gets there, with exact
 times. The whole script is listed as it arrives, the line being spoken is
 lit and kept in view, and a bar above the level meter shows how far the audio
-has been fetched (grey), how far the captions are ready (green), and where you
-are (orange). Pause, seek and replay as you like; the fetch never touches the
+has been fetched (grey), how far the captions are ready (green, yellow while
+paused), and where you are (orange). Pause, seek and replay as you like; the fetch never touches the
 player. Encrypted streams (most subscription services) cannot be fetched and
 stay on live captioning, as does any page the host cannot resolve. The live
 listener stands down over the stretch that has been fetched and picks up
-again past it. The switch is **Caption a Chrome video ahead from its own
-audio** in Settings. For YouTube the host needs a JavaScript runtime for
+again past it. **Offer captioning a Chrome video ahead from its own audio**
+in Settings hides the button altogether. For YouTube the host needs a JavaScript runtime for
 yt-dlp (`deno`), and without a YouTube token the fetch runs at playback pace,
 so captions catch up rather than run ahead until you pause or go back.
 
@@ -240,7 +242,9 @@ a replayed sentence, the video played on from there with Space, or a skip
 back, is transcribed again taking its time over it (a wider search, with the
 captions before it as context) and corrects those captions rather than
 repeating them. So when a line looks wrong, click it: it is heard once more,
-and corrected if the model does better the second time. Something heard that
+and corrected if the model does better the second time. A caption that ran two sentences
+together is split where the speaker paused between them when it is heard
+again from the fetched audio, each part with its own time and translation. Something heard that
 is not the sentence again (only the context, or a line with nothing of the
 original in it, as the model produces over music or silence) leaves the
 caption as it was. Sentence times come from where Whisper heard the words,
@@ -248,8 +252,12 @@ so this needs a current `asr_server.py` on the GPU host; an older one still
 works, with the sentences placed by their share of the text instead.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
-floating the captions over a video. The share button exports the session as
-text; nothing is saved otherwise.
+floating the captions over a video. Nothing of a session outlives the app: the
+captions, analyses and lookups exist only in memory, network responses and the
+Jisho panel's pages are never cached on disk, and the app empties its cache
+and cookie folders at launch and at quit. On the GPU host the fetched audio
+lives in the server's memory, the log names no video and quotes nothing heard,
+and it is emptied when the server shuts down (a crash leaves it for a look).
 
 ## Development
 

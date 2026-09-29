@@ -82,8 +82,8 @@ struct SettingsView: View {
                     Text("Text size")
                 }
                 Toggle("Keep window on top", isOn: $keepOnTop)
-                Toggle("Caption a Chrome video ahead from its own audio", isOn: $prefetchVideo)
-                Text("The GPU host fetches the video's audio ahead of you and captions it before you get there. Encrypted streams stay on live captioning.")
+                Toggle("Offer captioning a Chrome video ahead from its own audio", isOn: $prefetchVideo)
+                Text("While captioning, Caption ahead under the captions has the GPU host fetch the video's audio ahead of you and caption it before you get there; Pause holds it. It starts paused. Encrypted streams stay on live captioning.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

@@ -54,10 +54,6 @@ final class CaptionEngine {
         }
     }
 
-    var transcript: String {
-        captions.map { "\($0.japanese)\n-> \($0.english)" }.joined(separator: "\n\n")
-    }
-
     private static let remoteRetries = 4
     private static let remoteRetryDelay: UInt64 = 2_000_000_000
     /// Whisper's own default: the gains past it are small, and the caption
