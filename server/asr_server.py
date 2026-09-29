@@ -2,7 +2,9 @@
 
 The Mac captures audio, segments it with VAD, and POSTs raw PCM here; this
 process runs Whisper on the GPU and returns the Japanese text plus its English
-translation. Audio never leaves your own machines.
+translation. Audio never leaves your own machines, and nothing heard or
+what was watched is written to the log: it counts lines, it does not quote
+them.
 
 Translation defaults to the host's ollama server (qwen-class LLMs are the only
 backend here that translates colloquial speech correctly), falling back to
@@ -323,7 +325,7 @@ def split_at_pauses(lines, words, quiet, translate):
             print(f"split kept whole, translation failed: {exc}", flush=True)
             result.append(line)
             continue
-        print(f"split at pauses: {line['ja']} -> {' | '.join(texts)}", flush=True)
+        print(f"split at pauses: one line into {len(texts)}", flush=True)
         for text, en, a, b in zip(texts, english, bounds, bounds[1:]):
             result.append({"ja": text, "en": en,
                            "start": round(float(words[a][1]), 2), "end": round(float(words[b - 1][2]), 2)})
@@ -448,7 +450,7 @@ def translate_ollama(segments):
         pairs = _parse_pairs(response, text)
         if pairs:
             return pairs
-        print(f"ollama split unusable for {text!r}: {response!r}; "
+        print(f"ollama split unusable ({len(text)} characters in, {len(response)} out); "
               "translating per segment", flush=True)
         return [
             (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
@@ -627,7 +629,7 @@ class PrefetchJob:
             "-headers", header_lines, "-i", media,
             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
         ]
-        print(f"prefetch {self.id}: fetching {media[:80]}", flush=True)
+        print(f"prefetch {self.id}: fetching", flush=True)
         try:
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as exc:
