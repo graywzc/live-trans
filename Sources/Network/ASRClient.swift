@@ -57,7 +57,9 @@ struct ASRClient {
     }
 
     let baseURL: URL
-    var session: URLSession = .shared
+    /// Ephemeral: the shared session writes every response to a cache on
+    /// disk, captions included.
+    var session = URLSession(configuration: .ephemeral)
 
     func health(timeout: TimeInterval = 5) async -> ServerHealth? {
         var request = URLRequest(url: baseURL.appending(path: "health"))
@@ -128,6 +130,17 @@ struct ASRClient {
         request.httpMethod = "POST"
         request.timeoutInterval = 5
         _ = try? await session.data(for: request)
+    }
+
+    /// Holds the job's transcription, or lets it go on; the audio keeps
+    /// being fetched either way.
+    func setPrefetch(job: String, paused: Bool) async throws {
+        var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/\(paused ? "pause" : "resume")"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        let (data, response) = try await session.data(for: request)
+        struct Payload: Decodable { var state: String? }
+        _ = try Self.decode(Payload.self, from: data, statusCode: response)
     }
 
     private struct ServerFailure: Decodable { var error: String? }

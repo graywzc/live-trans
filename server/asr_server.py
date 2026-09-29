@@ -2,7 +2,9 @@
 
 The Mac captures audio, segments it with VAD, and POSTs raw PCM here; this
 process runs Whisper on the GPU and returns the Japanese text plus its English
-translation. Audio never leaves your own machines.
+translation. Audio never leaves your own machines, and nothing heard or
+what was watched is written to the log: it counts lines, it does not quote
+them.
 
 Translation defaults to the host's ollama server (qwen-class LLMs are the only
 backend here that translates colloquial speech correctly), falling back to
@@ -20,15 +22,20 @@ POST /prefetch     body: {"url": media or page URL, "page": page URL,
                    ffmpeg (a page URL is resolved with yt-dlp first), and
                    transcribes it in chunks cut at silences.
 GET  /prefetch/<id>?since=N
-                   -> {"state": "running"|"done"|"failed", "error": ...,
+                   -> {"state": "running"|"paused"|"done"|"failed", "error": ...,
                        "duration": seconds or null, "fetched": seconds,
                        "ready": seconds, "count": lines so far,
                        "lines": the lines from index N on, with absolute
                        "start"/"end"}
 POST /prefetch/<id>/rehear?from=&to=
                    -> {"lines": [...]} that stretch heard again from the
-                   fetched audio, with a wider search and its context.
+                   fetched audio, with a wider search and its context; a
+                   long line is split where the speaker paused after a word
+                   that can end a sentence, or paused long.
 POST /prefetch/<id>/stop
+POST /prefetch/<id>/pause, /prefetch/<id>/resume
+                   holds or lets go the transcription (the GPU work); the
+                   audio keeps being fetched. A paused job reports "paused".
 POST /transcribe   body: raw PCM s16le mono 16kHz
                    query: beam_size=3, translate=1, prompt=<text said before>
                    -> {"ja": "...", "en": "...", "rtf": 0.05,
@@ -45,6 +52,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -193,8 +201,17 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
 def sentence_times(sentences, words):
     """Where each sentence starts and ends in the audio, as (start, end), from
     the words Whisper heard; None for a sentence whose text isn't found in
-    them. The sentences are the words' text cut up, so each is looked for in
-    turn, past the one before it."""
+    them."""
+    return [
+        (words[span[0]][1], words[span[1]][2]) if span else None
+        for span in sentence_word_spans(sentences, words)
+    ]
+
+
+def sentence_word_spans(sentences, words):
+    """The first and last of `words` in each sentence, or None for one whose
+    text isn't found in them. The sentences are the words' text cut up, so
+    each is looked for in turn, past the one before it."""
     chars = []
     for index, (text, _, _) in enumerate(words):
         chars.extend((ch, index) for ch in text if ch not in _BOUNDARY_NOISE)
@@ -207,11 +224,124 @@ def sentence_times(sentences, words):
         if position < 0:
             times.append(None)
             continue
-        first = chars[position][1]
-        last = chars[position + len(wanted) - 1][1]
-        times.append((words[first][1], words[last][2]))
+        times.append((chars[position][1], chars[position + len(wanted) - 1][1]))
         cursor = position + len(wanted)
     return times
+
+
+# A line heard again that runs longer than this is looked at for pauses to
+# split it at: two sentences run together the first time are often heard as
+# one again.
+SPLIT_MIN_SECONDS = 6.0
+SPLIT_MIN_CHARS = 40
+# A pause this long ends a sentence; a shorter one only after a word that
+# can end one, so a speaker hesitating mid-sentence is not cut. Pauses are
+# measured in the audio: Whisper stretches its words over the silence
+# around them, so the gaps between its word times are mostly gone.
+SPLIT_PAUSE = 0.7
+SPLIT_PAUSE_AT_ENDING = 0.2
+# A piece shorter than this stays with its neighbour.
+SPLIT_MIN_PIECE_CHARS = 4
+_SENTENCE_ENDINGS = ("。", "？", "！", "?", "!", "ます", "です", "た", "だ", "ね", "よ", "か", "わ")
+
+
+def _ends_sentence(text):
+    text = text.rstrip(" 　、,")
+    return text.endswith(_SENTENCE_ENDINGS)
+
+
+def silences(audio):
+    """The quiet stretches between speech in `audio`, as (start, end) seconds."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    speech = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=150, speech_pad_ms=0))
+    return [(a["end"] / SAMPLE_RATE, b["start"] / SAMPLE_RATE) for a, b in zip(speech, speech[1:])]
+
+
+def pause_between(words, i, quiet):
+    """How long the speaker paused between word i and the next: the longest
+    quiet stretch centred between the start of the one and the end of the
+    other, which is as close as Whisper's word times place the break."""
+    low, high = words[i][1], words[i + 1][2]
+    return max((end - start for start, end in quiet if low <= (start + end) / 2 <= high), default=0.0)
+
+
+def pause_cuts(words, first, last, quiet):
+    """Where to cut the words first..last into sentences: the indices of the
+    words each new piece starts with."""
+    cuts = []
+    piece_start = first
+    for i in range(first, last):
+        gap = pause_between(words, i, quiet)
+        before = "".join(w[0] for w in words[piece_start:i + 1])
+        after = "".join(w[0] for w in words[i + 1:last + 1])
+        if (gap >= SPLIT_PAUSE or (gap >= SPLIT_PAUSE_AT_ENDING and _ends_sentence(before))) \
+                and len(_content(before)) >= SPLIT_MIN_PIECE_CHARS \
+                and len(_content(after)) >= SPLIT_MIN_PIECE_CHARS:
+            cuts.append(i + 1)
+            piece_start = i + 1
+    return cuts
+
+
+def _cut_text(text, counts):
+    """`text` cut after each of `counts` characters of content (punctuation
+    uncounted); punctuation at a cut stays with the piece before it."""
+    pieces, start, seen, index = [], 0, 0, 0
+    for count in counts:
+        while index < len(text) and seen < count:
+            if text[index] not in _BOUNDARY_NOISE:
+                seen += 1
+            index += 1
+        while index < len(text) and text[index] in _BOUNDARY_NOISE:
+            index += 1
+        pieces.append(text[start:index].strip())
+        start = index
+    pieces.append(text[start:].strip())
+    return pieces
+
+
+def split_at_pauses(lines, words, quiet, translate):
+    """Long lines cut into sentences where the speaker paused, each piece
+    with its own times and its own translation from `translate(ja)`. A line
+    that cannot be placed among the words, or whose pieces cannot be
+    translated, is kept whole."""
+    spans = sentence_word_spans([line["ja"] for line in lines], words)
+    result = []
+    for line, span in zip(lines, spans):
+        long = (line.get("end", 0) - line.get("start", 0) > SPLIT_MIN_SECONDS
+                or len(_content(line["ja"])) > SPLIT_MIN_CHARS)
+        cuts = pause_cuts(words, *span, quiet) if span and long else []
+        if not cuts:
+            result.append(line)
+            continue
+        bounds = [span[0], *cuts, span[1] + 1]
+        counts, total = [], 0
+        for a, b in zip(bounds, bounds[1:-1]):
+            total += len(_content("".join(w[0] for w in words[a:b])))
+            counts.append(total)
+        texts = _cut_text(line["ja"], counts)
+        try:
+            english = [translate(text) for text in texts]
+        except Exception as exc:
+            print(f"split kept whole, translation failed: {exc}", flush=True)
+            result.append(line)
+            continue
+        print(f"split at pauses: one line into {len(texts)}", flush=True)
+        for text, en, a, b in zip(texts, english, bounds, bounds[1:]):
+            result.append({"ja": text, "en": en,
+                           "start": round(float(words[a][1]), 2), "end": round(float(words[b - 1][2]), 2)})
+    return result
+
+
+def translate_text(ja):
+    """One sentence's English, from the text alone."""
+    if _is_untranslatable(ja):
+        return ""
+    if TRANSLATE_BACKEND == "nllb":
+        return translate_nllb(ja)
+    if not _ollama_ok:
+        raise RuntimeError("no text translator")
+    return _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)
 
 
 def _ollama_generate(text, timeout, prompt=_OLLAMA_PROMPT):
@@ -283,6 +413,14 @@ def unload_ollama():
 
 def exit_releasing_gpu():
     unload_ollama()
+    # Nothing of the session is kept: the log, which the app starts afresh
+    # with each launch, is emptied too. A crash leaves it for a look.
+    try:
+        sys.stdout.flush()
+        if os.path.isfile(f"/proc/self/fd/{sys.stdout.fileno()}"):
+            os.ftruncate(sys.stdout.fileno(), 0)
+    except OSError:
+        pass
     os._exit(0)
 
 
@@ -321,7 +459,7 @@ def translate_ollama(segments):
         pairs = _parse_pairs(response, text)
         if pairs:
             return pairs
-        print(f"ollama split unusable for {text!r}: {response!r}; "
+        print(f"ollama split unusable ({len(text)} characters in, {len(response)} out); "
               "translating per segment", flush=True)
         return [
             (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
@@ -349,10 +487,11 @@ def translate_nllb(text):
     return _nllb_tok.decode(_nllb_tok.convert_tokens_to_ids(hyp)).strip()
 
 
-def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True, vad=False):
+def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True, vad=False, words=None):
     """Japanese text, its sentences paired with English, and the lines with
-    where each sits in `audio`: [{"ja", "en", "start", "end"}, ...]."""
-    words = []
+    where each sits in `audio`: [{"ja", "en", "start", "end"}, ...].
+    `words`, a list, is filled with the words heard and their times."""
+    words = [] if words is None else words
     segments = run_whisper(audio, beam_size=beam_size, prompt=prompt, words=words, vad=vad)
     ja = "".join(segments)
     pairs = [(ja, "")] if ja else []
@@ -420,7 +559,7 @@ def resolve_media_url(url, page):
     runtime (deno)."""
     if url:
         return url, None
-    command = [_tool("yt-dlp"), "--no-playlist", "-f", "ba[protocol!*=m3u8]/ba/b", "--get-url", page]
+    command = [_tool("yt-dlp"), "--no-cache-dir", "--no-playlist", "-f", "ba[protocol!*=m3u8]/ba/b", "--get-url", page]
     deno = _tool("deno")
     if os.path.isabs(deno):
         command[1:1] = ["--js-runtimes", f"deno:{deno}"]
@@ -463,6 +602,7 @@ class PrefetchJob:
         self.state = "running"
         self.error = None
         self.stop_event = threading.Event()
+        self.paused = threading.Event()
         self.process = None
         self.started = time.time()
         threading.Thread(target=self._fetch, daemon=True).start()
@@ -498,7 +638,7 @@ class PrefetchJob:
             "-headers", header_lines, "-i", media,
             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
         ]
-        print(f"prefetch {self.id}: fetching {media[:80]}", flush=True)
+        print(f"prefetch {self.id}: fetching", flush=True)
         try:
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as exc:
@@ -530,6 +670,9 @@ class PrefetchJob:
                 self.state = "done"
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
                 return
+            if self.paused.is_set():
+                time.sleep(0.25)
+                continue
             if have - position < PREFETCH_CHUNK + PREFETCH_MIN_LOOKAHEAD and not done:
                 time.sleep(0.25)
                 continue
@@ -567,13 +710,16 @@ class PrefetchJob:
 
     def rehear(self, start, end):
         """The stretch heard again from the fetched audio, with the wider
-        search and the lines before it as context."""
+        search and the lines before it as context, and a long line split
+        where the speaker paused."""
         lead, tail = 0.3, 0.3
         with self.audio_lock:
             from_sample = int(max(start - lead, 0) * SAMPLE_RATE)
             audio = self.audio[from_sample:int((end + tail) * SAMPLE_RATE)].copy()
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
-        _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before))
+        words = []
+        _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before), words=words)
+        lines = split_at_pauses(lines, words, silences(audio), translate_text)
         offset = from_sample / SAMPLE_RATE
         for line in lines:
             if "start" in line:
@@ -584,7 +730,7 @@ class PrefetchJob:
         with self.audio_lock:
             last = self.audio[-SAMPLE_RATE:]
         return {
-            "state": self.state,
+            "state": "paused" if self.state == "running" and self.paused.is_set() else self.state,
             "error": self.error,
             "duration": self.duration,
             "fetched": round(self.fetched, 2),
@@ -685,6 +831,13 @@ class Handler(BaseHTTPRequestHandler):
         if action == "stop":
             job.stop()
             self._send(200, {"state": job.state})
+        elif action in ("pause", "resume"):
+            if action == "pause":
+                job.paused.set()
+            else:
+                job.paused.clear()
+            print(f"prefetch {job.id}: {action}d", flush=True)
+            self._send(200, {"state": job.status(len(job.lines))["state"]})
         elif action == "rehear":
             query = parse_qs(parts.query)
             try:

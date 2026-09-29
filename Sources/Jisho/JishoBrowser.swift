@@ -44,7 +44,10 @@ final class JishoBrowser {
     }
 
     private func makeWebView() -> WKWebView {
-        let webView = ClickFocusedWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let configuration = WKWebViewConfiguration()
+        // Lookups, cookies and cache stay in memory, gone with the app.
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = ClickFocusedWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
         observations = [

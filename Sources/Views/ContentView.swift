@@ -11,6 +11,7 @@ struct ContentView: View {
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
+    @AppStorage(AppSettings.prefetchVideo) private var prefetchVideo = true
     @AppStorage(AppSettings.sidePanelWidth) private var panelWidth = 440.0
 
     /// One selection for the whole window, as in any text view.
@@ -56,9 +57,6 @@ struct ContentView: View {
             OutputPicker()
             VideoControls()
             if !engine.captions.isEmpty {
-                ShareLink(item: engine.transcript) {
-                    Image(systemName: "square.and.arrow.up")
-                }
                 Button(role: .destructive, action: engine.clear) {
                     Image(systemName: "trash")
                 }
@@ -183,15 +181,37 @@ struct ContentView: View {
 
     private var footer: some View {
         VStack(spacing: 12) {
-            if let job = prefetch.job {
-                PrefetchBar(
-                    duration: job.duration, fetched: job.fetched, ready: job.ready,
-                    playhead: prefetch.playhead.map { playhead in
-                        playhead.playing
-                            ? playhead.advanced(by: Date().timeIntervalSince(prefetch.playheadAt)).seconds
-                            : playhead.seconds
+            if engine.isRunning && engine.serverCanPrefetch && prefetchVideo {
+                HStack(spacing: 10) {
+                    Button {
+                        prefetch.toggle()
+                    } label: {
+                        Label(
+                            prefetch.isPaused ? "Caption ahead" : "Pause",
+                            systemImage: prefetch.isPaused ? "forward.fill" : "pause.fill"
+                        )
+                        .frame(minWidth: 104)
                     }
-                )
+                    .controlSize(.small)
+                    .help(
+                        prefetch.isPaused
+                            ? "Fetch the Chrome video's audio ahead and caption it before you get there"
+                            : "Stop captioning ahead; what is fetched stays"
+                    )
+                    if let job = prefetch.job {
+                        PrefetchBar(
+                            duration: job.duration, fetched: job.fetched, ready: job.ready,
+                            playhead: prefetch.playhead.map { playhead in
+                                playhead.playing
+                                    ? playhead.advanced(by: Date().timeIntervalSince(prefetch.playheadAt)).seconds
+                                    : playhead.seconds
+                            },
+                            isPaused: prefetch.isPaused
+                        )
+                    } else {
+                        Spacer()
+                    }
+                }
             }
             if engine.isRunning {
                 LevelMeter(
@@ -889,6 +909,7 @@ struct PrefetchBar: View {
     let fetched: Double
     let ready: Double
     let playhead: Double?
+    var isPaused = false
 
     var body: some View {
         let total = max(duration ?? 0, fetched, playhead ?? 0, 1)
@@ -899,7 +920,7 @@ struct PrefetchBar: View {
                     .fill(Color.white.opacity(0.3))
                     .frame(width: geometry.size.width * Self.fraction(fetched, of: total))
                 Capsule()
-                    .fill(Color.green.opacity(0.7))
+                    .fill((isPaused ? Color.yellow : Color.green).opacity(0.7))
                     .frame(width: geometry.size.width * Self.fraction(ready, of: total))
                 if let playhead {
                     Rectangle()

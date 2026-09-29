@@ -149,7 +149,7 @@ final class ServerConfigTests: XCTestCase {
             config.launchCommand,
             "cd ~/livetrans && setsid nohup ~/venvs/livetrans/bin/python asr_server.py "
                 + "--host 0.0.0.0 --port 8770 --idle-timeout 180 "
-                + "< /dev/null >> ~/livetrans/server.log 2>&1 & disown; echo started"
+                + "< /dev/null > ~/livetrans/server.log 2>&1 & disown; echo started"
         )
     }
 }
