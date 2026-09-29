@@ -57,7 +57,9 @@ struct ASRClient {
     }
 
     let baseURL: URL
-    var session: URLSession = .shared
+    /// Ephemeral: the shared session writes every response to a cache on
+    /// disk, captions included.
+    var session = URLSession(configuration: .ephemeral)
 
     func health(timeout: TimeInterval = 5) async -> ServerHealth? {
         var request = URLRequest(url: baseURL.appending(path: "health"))

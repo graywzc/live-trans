@@ -44,6 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let prefetcher: Prefetcher
 
     override init() {
+        // Left by a copy that did not quit cleanly, or by one from before
+        // nothing was kept.
+        SessionTraces.erase()
         prefetcher = Prefetcher(engine: engine, video: video)
         super.init()
         engine.videoClock = { [video] in await video.moment(at: $0) }
@@ -57,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Quitting mid-session must still release the GPU. Hold the quit until
     /// /shutdown has been sent.
+    func applicationWillTerminate(_ notification: Notification) {
+        SessionTraces.erase()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard engine.isRunning else { return .terminateNow }
         let release = engine.stop()

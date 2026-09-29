@@ -52,6 +52,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -412,6 +413,14 @@ def unload_ollama():
 
 def exit_releasing_gpu():
     unload_ollama()
+    # Nothing of the session is kept: the log, which the app starts afresh
+    # with each launch, is emptied too. A crash leaves it for a look.
+    try:
+        sys.stdout.flush()
+        if os.path.isfile(f"/proc/self/fd/{sys.stdout.fileno()}"):
+            os.ftruncate(sys.stdout.fileno(), 0)
+    except OSError:
+        pass
     os._exit(0)
 
 
@@ -550,7 +559,7 @@ def resolve_media_url(url, page):
     runtime (deno)."""
     if url:
         return url, None
-    command = [_tool("yt-dlp"), "--no-playlist", "-f", "ba[protocol!*=m3u8]/ba/b", "--get-url", page]
+    command = [_tool("yt-dlp"), "--no-cache-dir", "--no-playlist", "-f", "ba[protocol!*=m3u8]/ba/b", "--get-url", page]
     deno = _tool("deno")
     if os.path.isabs(deno):
         command[1:1] = ["--js-runtimes", f"deno:{deno}"]

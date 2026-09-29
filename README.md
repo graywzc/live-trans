@@ -252,8 +252,12 @@ so this needs a current `asr_server.py` on the GPU host; an older one still
 works, with the sentences placed by their share of the text instead.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
-floating the captions over a video. Nothing is saved: the captions exist only
-in the window.
+floating the captions over a video. Nothing of a session outlives the app: the
+captions, analyses and lookups exist only in memory, network responses and the
+Jisho panel's pages are never cached on disk, and the app empties its cache
+and cookie folders at launch and at quit. On the GPU host the fetched audio
+lives in the server's memory, the log names no video and quotes nothing heard,
+and it is emptied when the server shuts down (a crash leaves it for a look).
 
 ## Development
 

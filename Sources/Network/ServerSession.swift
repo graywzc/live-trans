@@ -15,7 +15,7 @@ struct ServerConfig: Equatable {
         // dropping the ssh connection cannot take it down.
         return "cd \(remoteDir) && "
             + "setsid nohup \(remotePython) asr_server.py --host 0.0.0.0 --port \(port) "
-            + "--idle-timeout \(idleTimeout) < /dev/null >> \(log) 2>&1 & "
+            + "--idle-timeout \(idleTimeout) < /dev/null > \(log) 2>&1 & "
             + "disown; echo started"
     }
 }
