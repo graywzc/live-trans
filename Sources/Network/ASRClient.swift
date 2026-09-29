@@ -130,6 +130,17 @@ struct ASRClient {
         _ = try? await session.data(for: request)
     }
 
+    /// Holds the job's transcription, or lets it go on; the audio keeps
+    /// being fetched either way.
+    func setPrefetch(job: String, paused: Bool) async throws {
+        var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/\(paused ? "pause" : "resume")"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        let (data, response) = try await session.data(for: request)
+        struct Payload: Decodable { var state: String? }
+        _ = try Self.decode(Payload.self, from: data, statusCode: response)
+    }
+
     private struct ServerFailure: Decodable { var error: String? }
 
     private static func decode<T: Decodable>(_ type: T.Type, from data: Data, statusCode response: URLResponse) throws -> T {

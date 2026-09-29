@@ -20,7 +20,7 @@ POST /prefetch     body: {"url": media or page URL, "page": page URL,
                    ffmpeg (a page URL is resolved with yt-dlp first), and
                    transcribes it in chunks cut at silences.
 GET  /prefetch/<id>?since=N
-                   -> {"state": "running"|"done"|"failed", "error": ...,
+                   -> {"state": "running"|"paused"|"done"|"failed", "error": ...,
                        "duration": seconds or null, "fetched": seconds,
                        "ready": seconds, "count": lines so far,
                        "lines": the lines from index N on, with absolute
@@ -29,6 +29,9 @@ POST /prefetch/<id>/rehear?from=&to=
                    -> {"lines": [...]} that stretch heard again from the
                    fetched audio, with a wider search and its context.
 POST /prefetch/<id>/stop
+POST /prefetch/<id>/pause, /prefetch/<id>/resume
+                   holds or lets go the transcription (the GPU work); the
+                   audio keeps being fetched. A paused job reports "paused".
 POST /transcribe   body: raw PCM s16le mono 16kHz
                    query: beam_size=3, translate=1, prompt=<text said before>
                    -> {"ja": "...", "en": "...", "rtf": 0.05,
@@ -463,6 +466,7 @@ class PrefetchJob:
         self.state = "running"
         self.error = None
         self.stop_event = threading.Event()
+        self.paused = threading.Event()
         self.process = None
         self.started = time.time()
         threading.Thread(target=self._fetch, daemon=True).start()
@@ -530,6 +534,9 @@ class PrefetchJob:
                 self.state = "done"
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
                 return
+            if self.paused.is_set():
+                time.sleep(0.25)
+                continue
             if have - position < PREFETCH_CHUNK + PREFETCH_MIN_LOOKAHEAD and not done:
                 time.sleep(0.25)
                 continue
@@ -584,7 +591,7 @@ class PrefetchJob:
         with self.audio_lock:
             last = self.audio[-SAMPLE_RATE:]
         return {
-            "state": self.state,
+            "state": "paused" if self.state == "running" and self.paused.is_set() else self.state,
             "error": self.error,
             "duration": self.duration,
             "fetched": round(self.fetched, 2),
@@ -685,6 +692,13 @@ class Handler(BaseHTTPRequestHandler):
         if action == "stop":
             job.stop()
             self._send(200, {"state": job.state})
+        elif action in ("pause", "resume"):
+            if action == "pause":
+                job.paused.set()
+            else:
+                job.paused.clear()
+            print(f"prefetch {job.id}: {action}d", flush=True)
+            self._send(200, {"state": job.status(len(job.lines))["state"]})
         elif action == "rehear":
             query = parse_qs(parts.query)
             try:

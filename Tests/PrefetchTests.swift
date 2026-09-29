@@ -21,6 +21,17 @@ final class PrefetchTests: XCTestCase {
         XCTAssertNil(Prefetcher.current(in: captions, at: 13, tabID: 1, url: "v"))
     }
 
+    @MainActor
+    func testItStartsPausedAndTheToggleTakesItUp() {
+        let prefetcher = Prefetcher(engine: CaptionEngine(), video: ChromeVideo())
+        XCTAssertTrue(prefetcher.isPaused)
+        XCTAssertNil(prefetcher.job)
+        prefetcher.toggle()
+        XCTAssertFalse(prefetcher.isPaused)
+        prefetcher.toggle()
+        XCTAssertTrue(prefetcher.isPaused)
+    }
+
     func testTheBarScalesToTheLongestOfWhatItKnows() {
         XCTAssertEqual(PrefetchBar.fraction(30, of: 120), 0.25)
         XCTAssertEqual(PrefetchBar.fraction(150, of: 120), 1)
