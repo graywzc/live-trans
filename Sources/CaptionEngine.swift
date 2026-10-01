@@ -449,7 +449,9 @@ final class CaptionEngine {
         var replacing: [Int: [Caption]] = [:]  // first caption index -> its group's lines
         var removed = Set<Int>()
         var new: [Caption] = []
-        for group in groups.values where !group.lines.isEmpty {
+        // In the order the lines came in: a dictionary gives its groups back
+        // in any order, and two sentences of one utterance would swap.
+        for group in groups.values.filter({ !$0.lines.isEmpty }).sorted(by: { $0.lines[0] < $1.lines[0] }) {
             let heard = group.lines.map { lines[$0] }
             let text = heard.map(\.japanese).joined()
             guard !group.captions.isEmpty else {
@@ -485,13 +487,15 @@ final class CaptionEngine {
             if !removed.contains(ci) { result.append(caption) }
         }
         // New lines go before the first caption of the same page that starts
-        // after they end, else at the end: a sentence missed live and heard
+        // after they do, else at the end: a sentence missed live and heard
         // on the way back lands where it was said, and a live one is last.
+        // By where they start, not end: a sentence runs up to the next one,
+        // or a little into it, and would otherwise land after it.
         for line in new {
             let at = line.moment.flatMap { heard in
                 result.firstIndex { caption in
                     guard let old = caption.moment, old.tabID == heard.tabID, old.url == heard.url else { return false }
-                    return old.seconds > (heard.end ?? heard.seconds)
+                    return old.seconds > heard.seconds
                 }
             }
             result.insert(line, at: at ?? result.count)
