@@ -351,6 +351,28 @@ final class RehearingMergeTests: XCTestCase {
         XCTAssertEqual(merged.map(\.id), [0, 9, 1, 2])
     }
 
+    /// Sentences of one utterance run into each other: the first ends where
+    /// the second starts, or a little after.
+    func testSentencesThatTouchKeepTheOrderTheyWereSaidIn() {
+        for _ in 0..<50 {  // the grouping is a dictionary, whose order varies
+            let touching = CaptionEngine.merge(
+                [caption(7, "名前は山田花子です", 446.5, 449), caption(8, "どんな字を書きますか", 449, 451),
+                 caption(9, "えっと", 451, 452)],
+                into: existing, prompt: "")
+            XCTAssertEqual(touching.map(\.id), [0, 1, 2, 7, 8, 9])
+        }
+        let later = CaptionEngine.merge([caption(8, "えっと", 451, 456)], into: existing, prompt: "")
+        let earlier = CaptionEngine.merge([caption(7, "名前は山田花子です", 446.5, 451.8)], into: later, prompt: "")
+        XCTAssertEqual(earlier.map(\.id), [0, 1, 2, 7, 8])
+    }
+
+    func testLinesWithNoMomentKeepTheirOrder() {
+        let lines = (10..<16).map { Caption(id: $0, japanese: "あ", ruby: [], english: "", moment: nil) }
+        for _ in 0..<50 {
+            XCTAssertEqual(CaptionEngine.merge(lines, into: existing, prompt: "").map(\.id), [0, 1, 2] + Array(10..<16))
+        }
+    }
+
     func testAnotherPageAndNoMomentGoLast() {
         let elsewhere = CaptionEngine.merge([caption(9, "みなさん", 441, 442, url: "v")], into: existing, prompt: "")
         XCTAssertEqual(elsewhere.map(\.id), [0, 1, 2, 9])
