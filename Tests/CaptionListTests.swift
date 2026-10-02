@@ -73,7 +73,9 @@ final class CaptionListTests: XCTestCase {
         settle()
         model.partial = ""
         add(10)
-        XCTAssertEqual(try offset(), playing, accuracy: 1)
+        // Within a few points: a lazy stack shifts a little as it measures
+        // what it was only estimating, where the jump was a screenful.
+        XCTAssertEqual(try offset(), playing, accuracy: 6)
 
         model.playingID = 11
         settle()
@@ -96,7 +98,7 @@ final class CaptionListTests: XCTestCase {
 
         model.playingID = 11
         add(10)
-        XCTAssertEqual(try offset(), away, accuracy: 1)
+        XCTAssertEqual(try offset(), away, accuracy: 6)
 
         clickPill()
         XCTAssertEqual(try offset(), playing + 58, accuracy: 6)
@@ -113,7 +115,7 @@ final class CaptionListTests: XCTestCase {
         let away = try offset()
         XCTAssertLessThan(away, try end() - 300)
         add(5)
-        XCTAssertEqual(try offset(), away, accuracy: 1)
+        XCTAssertEqual(try offset(), away, accuracy: 6)
         snapshot("list-live-scrolled-away")
 
         XCTAssertTrue(try pillShows(), "no pill after scrolling away")
