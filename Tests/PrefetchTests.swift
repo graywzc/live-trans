@@ -21,6 +21,17 @@ final class PrefetchTests: XCTestCase {
         XCTAssertNil(Prefetcher.current(in: captions, at: 13, tabID: 1, url: "v"))
     }
 
+    func testBetweenSentencesTheVideoIsStillAtTheLastOne() {
+        let captions = [caption(0, 10, 12), caption(1, 12.5, 15), caption(2, 60, 62), caption(3, 30, 32, tab: 2)]
+        // A long pause in the talk leaves it on the sentence before ...
+        XCTAssertEqual(Prefetcher.nearest(in: captions, at: 40, tabID: 1, url: "u"), 1)
+        XCTAssertEqual(Prefetcher.nearest(in: captions, at: 300, tabID: 1, url: "u"), 2)
+        // ... and before anything is said, on the first one to come.
+        XCTAssertEqual(Prefetcher.nearest(in: captions, at: 5, tabID: 1, url: "u"), 0)
+        XCTAssertEqual(Prefetcher.nearest(in: captions, at: 40, tabID: 2, url: "u"), 3)
+        XCTAssertNil(Prefetcher.nearest(in: captions, at: 40, tabID: 1, url: "v"))
+    }
+
     @MainActor
     func testItStartsPausedAndTheToggleTakesItUp() {
         let prefetcher = Prefetcher(engine: CaptionEngine(), video: ChromeVideo())

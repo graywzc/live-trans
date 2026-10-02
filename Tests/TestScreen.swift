@@ -14,7 +14,7 @@ enum TestScreen {
     }
 
     static func window(size: CGSize) -> NSWindow {
-        let window = NSWindow(
+        let window = PlacedWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled], backing: .buffered, defer: false
         )
@@ -25,6 +25,14 @@ enum TestScreen {
             window.setFrameOrigin(screen.visibleFrame.origin)
         }
         return window
+    }
+}
+
+/// A window that stays where it is put. Brought to the front for the first
+/// time, a window is otherwise moved onto the display being worked on.
+private final class PlacedWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
     }
 }
 
