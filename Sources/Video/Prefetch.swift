@@ -34,8 +34,11 @@ final class Prefetcher {
     /// Where the video was when last asked, and when that was.
     private(set) var playhead: VideoMoment?
     private(set) var playheadAt = Date()
-    /// The caption being spoken, for the list to light and follow.
+    /// The caption being spoken, for the list to light.
     private(set) var currentCaptionID: Int?
+    /// The caption the video is at, between sentences too, for the list to
+    /// keep to.
+    private(set) var playingCaptionID: Int?
 
     var isActive: Bool { job != nil }
     /// Off at launch: the video is only fetched ahead once asked to.
@@ -183,17 +186,21 @@ final class Prefetcher {
         guard let job else { return }
         self.job = nil
         currentCaptionID = nil
+        playingCaptionID = nil
         await engine.client?.stopPrefetch(job: job.id)
     }
 
     private func followPlayhead() {
         guard job != nil, let playhead else {
             if currentCaptionID != nil { currentCaptionID = nil }
+            if playingCaptionID != nil { playingCaptionID = nil }
             return
         }
         let now = playhead.playing ? playhead.advanced(by: Date().timeIntervalSince(playheadAt)).seconds : playhead.seconds
         let id = Self.current(in: engine.captions, at: now, tabID: playhead.tabID, url: playhead.url)
         if id != currentCaptionID { currentCaptionID = id }
+        let near = id ?? Self.nearest(in: engine.captions, at: now, tabID: playhead.tabID, url: playhead.url)
+        if near != playingCaptionID { playingCaptionID = near }
     }
 
     /// The caption being spoken at `seconds` of the page's video: the one
@@ -210,5 +217,22 @@ final class Prefetcher {
         }
         guard let before, let moment = before.moment, seconds - (moment.end ?? moment.seconds) < 2 else { return nil }
         return before.id
+    }
+
+    /// Where `seconds` of the page's video is among its captions when no
+    /// sentence is being spoken: the last one that started before it, however
+    /// long ago, else the first one after it.
+    nonisolated static func nearest(in captions: [Caption], at seconds: Double, tabID: Int, url: String) -> Int? {
+        var before: Caption?
+        var after: Caption?
+        for caption in captions {
+            guard let moment = caption.moment, moment.tabID == tabID, moment.url == url else { continue }
+            if moment.seconds <= seconds {
+                if before?.moment.map({ $0.seconds <= moment.seconds }) ?? true { before = caption }
+            } else if after?.moment.map({ moment.seconds < $0.seconds }) ?? true {
+                after = caption
+            }
+        }
+        return (before ?? after)?.id
     }
 }

@@ -17,7 +17,6 @@ struct ContentView: View {
     /// One selection for the whole window, as in any text view.
     @State private var selection: CaptionSelection?
 
-    private static let bottom = "bottom"
     private static let minCaptionsWidth: CGFloat = 420
 
     var body: some View {
@@ -76,53 +75,24 @@ struct ContentView: View {
     }
 
     private var captionList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(engine.captions) { caption in
-                        CaptionRow(
-                            caption: caption, showFurigana: showFurigana, fontSize: fontSize,
-                            isAnalyzed: panel.isPresented && panel.tab == .analysis
-                                && analyzer.hasAnalyzed(caption),
-                            selection: selectionBinding(for: caption),
-                            onAnalyze: { analyze(caption) },
-                            onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
-                            isCurrent: prefetch.currentCaptionID == caption.id
-                        )
-                    }
-                    if !engine.partialText.isEmpty {
-                        Text(engine.partialText)
-                            .font(.system(size: fontSize))
-                            .foregroundStyle(.gray)
-                    }
-                    Color.clear.frame(height: 1).id(Self.bottom)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal)
-            }
-            .defaultScrollAnchor(.bottom)
-            .selectionActions(onLookUp: lookUp)
-            .overlay {
-                if engine.captions.isEmpty, engine.partialText.isEmpty {
-                    placeholder
-                }
-            }
-            .onChange(of: engine.captions.count) {
-                // Captions fetched ahead arrive below the one being spoken;
-                // the list stays on that one rather than running ahead.
-                guard prefetch.currentCaptionID == nil else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(Self.bottom, anchor: .bottom)
-                }
-            }
-            .onChange(of: engine.partialText) {
-                proxy.scrollTo(Self.bottom, anchor: .bottom)
-            }
-            .onChange(of: prefetch.currentCaptionID) { _, id in
-                guard let id else { return }
-                withAnimation(.easeOut(duration: 0.25)) {
-                    proxy.scrollTo(id, anchor: .center)
-                }
+        CaptionList(
+            captions: engine.captions, partialText: engine.partialText, fontSize: fontSize,
+            playingID: prefetch.playingCaptionID
+        ) { caption in
+            CaptionRow(
+                caption: caption, showFurigana: showFurigana, fontSize: fontSize,
+                isAnalyzed: panel.isPresented && panel.tab == .analysis
+                    && analyzer.hasAnalyzed(caption),
+                selection: selectionBinding(for: caption),
+                onAnalyze: { analyze(caption) },
+                onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
+                isCurrent: prefetch.currentCaptionID == caption.id
+            )
+        }
+        .selectionActions(onLookUp: lookUp)
+        .overlay {
+            if engine.captions.isEmpty, engine.partialText.isEmpty {
+                placeholder
             }
         }
     }
