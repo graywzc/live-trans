@@ -222,14 +222,23 @@ HLS or DASH stream, or a page yt-dlp knows), LiveTrans can caption it **ahead
 of you** from that audio instead of listening. It starts paused: while
 captioning, press **Caption ahead** under the captions to begin, and **Pause**
 to hold it (the host stops transcribing, the captions already fetched stay,
-and taking it up again goes on from there). Running, the host fetches the audio, cuts
+and taking it up again goes on from there). Running, the host fetches the audio
+from where you are in the video, not from its start, cuts
 it at silences into chunks of about a minute, and transcribes and translates
 each, so the captions are in place before the video gets there, with exact
 times. The whole script is listed as it arrives, the line being spoken is
-lit and kept in view, and a bar above the level meter shows how far the audio
-has been fetched (grey), how far the captions are ready (green, yellow while
-paused), and where you are (orange). Pause, seek and replay as you like; the fetch never touches the
-player. Encrypted streams (most subscription services) cannot be fetched and
+lit and kept in view. Pause, seek and replay as you like; the fetch never touches the
+player. When you jump to a part it has not captioned and is not about to
+reach, it starts again from there, keeping the captions it has; a part you
+skipped over is captioned when you go back to it, and a stretch already
+captioned is passed over rather than done twice.
+
+A bar above the level meter shows where you are in the Chrome video, between
+the time and the video's length. Drag the orange dot, or press anywhere on
+the bar, to move the video; it moves when you let go. The bar is there
+whenever LiveTrans knows of a video in Chrome, captioning ahead or not. On
+it are the stretches captioned ahead (green, yellow while paused) and the
+audio fetched for the next (grey). Encrypted streams (most subscription services) cannot be fetched and
 stay on live captioning, as does any page the host cannot resolve. The live
 listener stands down over the stretch that has been fetched and picks up
 again past it. **Offer captioning a Chrome video ahead from its own audio**

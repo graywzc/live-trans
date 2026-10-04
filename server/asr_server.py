@@ -17,14 +17,18 @@ the text->text NLLB model instead.
 POST /shutdown     exit now and release the GPU (unloads the ollama model too)
 POST /prefetch     body: {"url": media or page URL, "page": page URL,
                           "headers": {"Referer": ..., "User-Agent": ...},
-                          "duration": seconds or null}
-                   -> {"job": id}. Fetches the audio ahead of the viewer with
+                          "duration": seconds or null,
+                          "start": seconds into the video, 0 if absent}
+                   -> {"job": id}. Fetches the audio from there on with
                    ffmpeg (a page URL is resolved with yt-dlp first), and
-                   transcribes it in chunks cut at silences.
+                   transcribes it in chunks cut at silences. A job running
+                   for the same page is stopped; what it captioned can still
+                   be heard again.
 GET  /prefetch/<id>?since=N
                    -> {"state": "running"|"paused"|"done"|"failed", "error": ...,
-                       "duration": seconds or null, "fetched": seconds,
-                       "ready": seconds, "count": lines so far,
+                       "duration": seconds or null, "start": seconds,
+                       "fetched": seconds, "ready": seconds (both places in
+                       the video, like "start"), "count": lines so far,
                        "lines": the lines from index N on, with absolute
                        "start"/"end"}
 POST /prefetch/<id>/rehear?from=&to=
@@ -614,7 +618,7 @@ PREFETCH_MIN_LOOKAHEAD = 5.0
 # What the transcription of a chunk is told of the one before, so a name
 # carries over; Whisper reads at most ~224 tokens of prompt.
 PREFETCH_PROMPT_CHARS = 120
-PREFETCH_MAX_JOBS = 4
+PREFETCH_MAX_JOBS = 8
 PREFETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -675,18 +679,21 @@ def choose_boundary(audio, target):
 
 
 class PrefetchJob:
-    def __init__(self, url, page, headers, duration):
+    def __init__(self, url, page, headers, duration, start=0.0):
         self.id = uuid.uuid4().hex[:12]
         self.url = url
         self.page = page
         self.headers = {**PREFETCH_HEADERS, **(headers or {})}
         self.duration = duration
+        # Where in the video the audio begins: the viewer's place when the
+        # job was asked for, not always the top.
+        self.offset = max(float(start or 0), 0.0)
         self.audio = np.zeros(0, dtype=np.float32)
         self.audio_lock = threading.Lock()
         self.fetch_done = False
         self.lines = []
         self.text = ""
-        self.ready = 0.0
+        self.ready = self.offset
         self.state = "running"
         self.error = None
         self.stop_event = threading.Event()
@@ -698,12 +705,22 @@ class PrefetchJob:
 
     @property
     def fetched(self):
+        """Seconds of audio held, from `offset` on."""
         return self.audio.size / SAMPLE_RATE
 
     def stop(self):
         self.stop_event.set()
         if self.process and self.process.poll() is None:
             self.process.kill()
+
+    def retire(self):
+        """Stopped for another stretch of the same video. What it captioned
+        can still be heard again; the audio past that is let go."""
+        self.stop()
+        with self.audio_lock:
+            self.audio = self.audio[:int(max(self.ready - self.offset, 0) * SAMPLE_RATE)].copy()
+        if self.state == "running":
+            self.state = "stopped"
 
     def fail(self, message):
         print(f"prefetch {self.id}: {message}", flush=True)
@@ -723,7 +740,7 @@ class PrefetchJob:
         command = [
             _tool("ffmpeg"), "-nostdin", "-loglevel", "error",
             "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-            "-headers", header_lines, "-i", media,
+            "-headers", header_lines, *(["-ss", f"{self.offset:.3f}"] if self.offset > 0 else []), "-i", media,
             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
         ]
         print(f"prefetch {self.id}: fetching", flush=True)
@@ -745,8 +762,8 @@ class PrefetchJob:
             return
         self.fetch_done = True
         if self.duration is None or self.duration <= 0:
-            self.duration = self.fetched
-        print(f"prefetch {self.id}: fetched {self.fetched:.0f}s", flush=True)
+            self.duration = self.offset + self.fetched
+        print(f"prefetch {self.id}: fetched {self.fetched:.0f}s from {self.offset:.0f}s", flush=True)
 
     def _transcribe(self):
         position = 0.0
@@ -772,14 +789,20 @@ class PrefetchJob:
             else:
                 boundary = position + choose_boundary(window, PREFETCH_CHUNK)
             try:
-                self._transcribe_chunk(position, boundary, window[:int((boundary - position) * SAMPLE_RATE)])
+                self._transcribe_chunk(
+                    self.offset + position, self.offset + boundary,
+                    window[:int((boundary - position) * SAMPLE_RATE)],
+                )
             except Exception as exc:
                 self.fail(f"transcription: {type(exc).__name__}: {exc}")
                 return
+            if self.stop_event.is_set():
+                return
             position = boundary
-            self.ready = boundary
+            self.ready = self.offset + boundary
 
     def _transcribe_chunk(self, start, end, audio):
+        """`audio` is the video from `start` to `end`."""
         t0 = time.time()
         ja, _, lines = transcribe_and_translate(
             audio, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:], vad=True
@@ -792,6 +815,9 @@ class PrefetchJob:
                 # Not placed among the words: the whole chunk is the best
                 # that can be said.
                 line["start"], line["end"] = round(start, 2), round(end, 2)
+        if self.stop_event.is_set():
+            # Stopped while this was heard: its audio may be let go already.
+            return
         self.lines.extend(lines)
         self.text += ja
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
@@ -802,16 +828,16 @@ class PrefetchJob:
         where the speaker paused."""
         lead, tail = 0.3, 0.3
         with self.audio_lock:
-            from_sample = int(max(start - lead, 0) * SAMPLE_RATE)
-            audio = self.audio[from_sample:int((end + tail) * SAMPLE_RATE)].copy()
+            from_sample = int(max(start - lead - self.offset, 0) * SAMPLE_RATE)
+            audio = self.audio[from_sample:int(max(end + tail - self.offset, 0) * SAMPLE_RATE)].copy()
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
         words = []
         _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before), words=words)
         lines = split_at_pauses(lines, words, silences(audio), translate_text)
-        offset = from_sample / SAMPLE_RATE
+        began = self.offset + from_sample / SAMPLE_RATE
         for line in lines:
             if "start" in line:
-                line["start"], line["end"] = round(line["start"] + offset, 2), round(line["end"] + offset, 2)
+                line["start"], line["end"] = round(line["start"] + began, 2), round(line["end"] + began, 2)
         return lines
 
     def status(self, since=0):
@@ -821,7 +847,8 @@ class PrefetchJob:
             "state": "paused" if self.state == "running" and self.paused.is_set() else self.state,
             "error": self.error,
             "duration": self.duration,
-            "fetched": round(self.fetched, 2),
+            "start": round(self.offset, 2),
+            "fetched": round(self.offset + self.fetched, 2),
             # Loudness of the last second fetched, on the int16 scale: a
             # fetch that yields silence is a fetch of the wrong thing.
             "level": round(float(np.sqrt(np.mean(last * last))) * 32768, 1) if last.size else 0,
@@ -831,17 +858,16 @@ class PrefetchJob:
         }
 
 
-def start_prefetch(url, page, headers, duration):
+def start_prefetch(url, page, headers, duration, start=0.0):
     with _jobs_lock:
-        for job in list(_jobs.values()):
+        for job in _jobs.values():
             if job.page == page and job.state == "running":
-                job.stop()
-                del _jobs[job.id]
+                job.retire()
         while len(_jobs) >= PREFETCH_MAX_JOBS:
             oldest = min(_jobs.values(), key=lambda j: j.started)
             oldest.stop()
             del _jobs[oldest.id]
-        job = PrefetchJob(url, page, headers, duration)
+        job = PrefetchJob(url, page, headers, duration, start)
         _jobs[job.id] = job
         return job
 
@@ -904,7 +930,7 @@ class Handler(BaseHTTPRequestHandler):
                 request = json.loads(self._read_body() or b"{}")
                 job = start_prefetch(
                     request.get("url") or "", request.get("page") or "",
-                    request.get("headers") or {}, request.get("duration"),
+                    request.get("headers") or {}, request.get("duration"), request.get("start") or 0,
                 )
             except Exception as exc:
                 self._send(400, {"error": f"{type(exc).__name__}: {exc}"})

@@ -23,6 +23,8 @@ final class ChromeVideo {
         case skip(seconds: Double)
         /// Plays from a sentence, in the tab it was heard in.
         case seek(VideoMoment)
+        /// To this many seconds in, playing on if it was playing.
+        case scrub(to: Double)
     }
 
     private(set) var state = State.unknown
@@ -50,9 +52,11 @@ final class ChromeVideo {
     private var hasReachedChrome = false
     private let queue = DispatchQueue(label: "ChromeVideo")
 
-    func send(_ command: Command) {
+    /// Whether the command went to Chrome.
+    @discardableResult
+    func send(_ command: Command) -> Bool {
         // A click while Chrome is still answering would race the first one.
-        guard !inFlight, chromeIsRunning() else { return }
+        guard !inFlight, chromeIsRunning() else { return false }
         inFlight = true
         let target = if case .seek(let moment) = command { moment.tabID } else { pinned?.id }
         let source = ChromeScript.source(for: command, pinned: target, preferring: linked?.id)
@@ -67,6 +71,7 @@ final class ChromeVideo {
                 }
             }
         }
+        return true
     }
 
     /// Where the video is at `wall`, for noting when a sentence was heard.
@@ -275,6 +280,8 @@ struct VideoMoment: Equatable {
     var rate: Double = 1
     /// Whether the video was playing when this was read.
     var playing = false
+    /// How long the video is, when it has an end.
+    var duration: Double?
 
     /// This moment `heard` seconds of listening later.
     func advanced(by heard: TimeInterval) -> VideoMoment {
@@ -356,6 +363,16 @@ enum ChromeScript {
                 + "const resume = () => { if (v.paused) v.play(); }; "
                 + "if (v.seeking) { v.addEventListener('seeked', resume, { once: true }); } else { resume(); } "
                 + "return 'playing';"
+        case .scrub(let seconds):
+            // Paused over the jump like a seek, for the same reason. A
+            // sentence waiting to stop at its end is let go: the viewer has
+            // left it, and landing past its end would pause them there.
+            "if (v.liveTransStop) { v.removeEventListener('timeupdate', v.liveTransStop); v.liveTransStop = null; } "
+                + "const was = !v.paused; v.pause(); "
+                + "v.currentTime = Math.min(Math.max(\(seconds), 0), v.duration || Infinity); "
+                + "const resume = () => { if (v.paused) v.play(); }; "
+                + "if (was) { if (v.seeking) { v.addEventListener('seeked', resume, { once: true }); } else { resume(); } } "
+                + "return was ? 'playing' : 'paused';"
         }
     }
 
@@ -372,11 +389,12 @@ enum ChromeScript {
     }
 
     /// Where the video is and when that was, so the caller can work back to
-    /// when a sentence started: "<state> <time> <epoch seconds> <rate> <url>",
-    /// the url encoded so it holds no space or "|".
+    /// when a sentence started: "<state> <time> <epoch seconds> <rate>
+    /// <duration> <url>", the url encoded so it holds no space or "|", and
+    /// the duration 0 for a video with no end.
     static let momentJavaScript = javaScript(
         "return [v.paused ? 'paused' : 'playing', v.currentTime, Date.now() / 1000, v.playbackRate, "
-            + "encodeURIComponent(location.href)].join(' ');"
+            + "isFinite(v.duration) ? v.duration : 0, encodeURIComponent(location.href)].join(' ');"
     )
 
     /// The video's time at `wall`, from a `momentJavaScript` result.
@@ -384,14 +402,15 @@ enum ChromeScript {
         let parts = result.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2, let id = tabID(parts[1]) else { return nil }
         let fields = parts[0].split(separator: " ")
-        guard fields.count == 5, fields[0] == "playing" || fields[0] == "paused",
+        guard fields.count == 6, fields[0] == "playing" || fields[0] == "paused",
               let time = Double(fields[1]), let now = Double(fields[2]), let rate = Double(fields[3]),
-              let url = String(fields[4]).removingPercentEncoding
+              let duration = Double(fields[4]), let url = String(fields[5]).removingPercentEncoding
         else { return nil }
         // Asked when the sentence started, answered a moment later.
         let elapsed = fields[0] == "playing" ? max(now - wall.timeIntervalSince1970, 0) * rate : 0
         return VideoMoment(
-            tabID: id, url: url, seconds: max(time - elapsed, 0), rate: rate, playing: fields[0] == "playing"
+            tabID: id, url: url, seconds: max(time - elapsed, 0), rate: rate, playing: fields[0] == "playing",
+            duration: duration > 0 ? duration : nil
         )
     }
 
