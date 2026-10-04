@@ -50,6 +50,7 @@ GET /health       -> {"status": "ok", "asr": "...", "device": "cuda"}
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -96,7 +97,27 @@ _OLLAMA_SPLIT_PROMPT = (
     "Copy the Japanese characters exactly as given; do not add, drop, or change "
     "any. Output nothing else.\n\n"
 )
+# Whisper now and then returns half a minute of speech as one segment with
+# no punctuation. Among the other lines of a transcript the LLM leaves such
+# a line whole; given it alone and told it is too long, it breaks it up.
+_OLLAMA_LONG_PROMPT = (
+    "Below is one long stretch of Japanese speech, transcribed without sentence breaks.\n"
+    "Break it into short lines, each a sentence or a clause, cutting after sentence "
+    "endings and after connectives such as けど, ので, から, し, て or たら. "
+    "A line should be at most about 40 Japanese characters.\n"
+    "Translate each line into natural English.\n"
+    "Output one line per piece in exactly this format:\n"
+    "<Japanese> ||| <English translation>\n"
+    "Copy the Japanese characters exactly as given, in order; do not add, drop, or "
+    "change any. Output nothing else.\n\n"
+)
+# A line with more characters than this is one to break up: some fifteen
+# seconds of speech fit in a hundred, a sentence in well under sixty.
+LONG_LINE_CHARS = 60
 _PAIR_SEPARATOR = "|||"
+# How much of the transcript the LLM's copy must match for its sentence
+# breaks to be used.
+_COPY_MIN_RATIO = 0.9
 # Ignored when checking the LLM copied the transcript faithfully: it may add or
 # drop punctuation at the boundaries it found, which is harmless.
 _BOUNDARY_NOISE = set("。、，．,.!?！？…‥ 　\t\n")
@@ -430,7 +451,9 @@ def _content(text):
 
 def _parse_pairs(response, source):
     """Parse "ja ||| en" lines. None if the LLM strayed from the format or
-    rewrote the transcript instead of copying it."""
+    rewrote the transcript instead of copying it. A copy off by a character
+    or two (a particle dropped, a word respelled) is still good for where
+    the sentences break: the transcript's own text is put back in them."""
     pairs = []
     for line in response.splitlines():
         if not line.strip():
@@ -439,9 +462,72 @@ def _parse_pairs(response, source):
         if not sep or not ja.strip():
             return None
         pairs.append((ja.strip(), en.strip()))
-    if _content("".join(ja for ja, _ in pairs)) != _content(source):
+    copied = "".join(_content(ja) for ja, _ in pairs)
+    wanted = _content(source)
+    if copied == wanted:
+        return pairs
+    import difflib
+
+    matcher = difflib.SequenceMatcher(None, copied, wanted, autojunk=False)
+    if matcher.ratio() < _COPY_MIN_RATIO:
         return None
-    return pairs
+    blocks = matcher.get_opcodes()
+
+    def in_source(position):
+        for tag, i1, i2, j1, j2 in blocks:
+            if position <= i2:
+                return j1 + position - i1 if tag == "equal" else (j2 if position == i2 else j1)
+        return len(wanted)
+
+    counts, seen = [], 0
+    for ja, _ in pairs[:-1]:
+        seen += len(_content(ja))
+        counts.append(in_source(seen))
+    texts = [text.replace("\n", "") for text in _cut_text(source, counts)]
+    # A line with nothing of the transcript in it was made up, and one
+    # without English was not translated: neither is a split to trust.
+    restored = [(text, en) for text, (_, en) in zip(texts, pairs) if _content(text)]
+    if not restored or any(not en for _, en in restored):
+        return None
+    return restored
+
+
+_SENTENCE_END = re.compile(r"[。？！?!]+")
+
+
+def _at_sentence_ends(segments):
+    """Whisper's segments cut after the punctuation that ends a sentence,
+    where it wrote any: given a segment as a line, the LLM tends to keep it
+    as one however many sentences it holds. A piece too short to stand
+    alone ("え？") stays with what follows, and words being quoted are not
+    cut from the sentence quoting them."""
+    result = []
+    for segment in segments:
+        start = 0
+        for match in _SENTENCE_END.finditer(segment):
+            piece, rest = segment[start:match.end()], segment[match.end():]
+            quoted = rest[:1] in "」』" or piece.count("「") + piece.count("『") > piece.count("」") + piece.count("』")
+            if not quoted and len(_content(piece)) >= SPLIT_MIN_PIECE_CHARS \
+                    and len(_content(rest)) >= SPLIT_MIN_PIECE_CHARS:
+                result.append(piece.strip())
+                start = match.end()
+        result.append(segment[start:].strip())
+    return result
+
+
+def _split_long(pairs):
+    """`pairs` with the over-long ones broken into shorter sentences and
+    clauses, each asked of the LLM alone. One it cannot break stays whole."""
+    result = []
+    for ja, en in pairs:
+        pieces = None
+        if len(_content(ja)) > LONG_LINE_CHARS:
+            response = _ollama_generate(ja, timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_LONG_PROMPT)
+            pieces = _parse_pairs(response, ja)
+            print(f"long line of {len(_content(ja))} characters: "
+                  + (f"into {len(pieces)}" if pieces else "kept whole"), flush=True)
+        result.extend(pieces or [(ja, en or _ollama_generate(ja, timeout=OLLAMA_TIMEOUT))])
+    return result
 
 
 def translate_ollama(segments):
@@ -451,6 +537,7 @@ def translate_ollama(segments):
     # One Whisper segment per line: the LLM keeps a line break as a sentence
     # boundary far more reliably than it finds one in unbroken text, where it
     # reads a short exchange between two speakers as a single sentence.
+    segments = _at_sentence_ends(segments)
     text = "\n".join(segments)
     try:
         response = _ollama_generate(
@@ -458,13 +545,14 @@ def translate_ollama(segments):
         )
         pairs = _parse_pairs(response, text)
         if pairs:
-            return pairs
+            return _split_long(pairs)
         print(f"ollama split unusable ({len(text)} characters in, {len(response)} out); "
               "translating per segment", flush=True)
-        return [
-            (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
+        return _split_long([
+            (segment, "" if len(_content(segment)) > LONG_LINE_CHARS
+             else _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
             for segment in segments
-        ]
+        ])
     except Exception as exc:
         _ollama_ok = False
         print(f"ollama translation failed ({exc}); "
