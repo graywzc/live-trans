@@ -6,8 +6,8 @@ import XCTest
 final class ChromeVideoTests: XCTestCase {
     func testResultsNameTheTab() {
         XCTAssertEqual(
-            ChromeScript.outcome(fromResult: "playing|567|Episode 12 | example.tv"),
-            .controlled(ChromeScript.Tab(id: 567, title: "Episode 12 | example.tv", video: .playing), playing: true)
+            ChromeScript.outcome(fromResult: "playing|567|Video 12 | example.tv"),
+            .controlled(ChromeScript.Tab(id: 567, title: "Video 12 | example.tv", video: .playing), playing: true)
         )
         XCTAssertEqual(
             ChromeScript.outcome(fromResult: "paused|1173479941|Video"),
@@ -20,12 +20,12 @@ final class ChromeVideoTests: XCTestCase {
 
     func testListingKeepsEveryTab() {
         let listing = [
-            ["1", "1173479941", "paused", "https://example.tv/play/x", "Episode 12 | example"],
+            ["1", "1173479941", "paused", "https://example.tv/play/x", "Video 12 | example"],
             ["1", "1173479942", "", "https://github.com/", "GitHub"],
             ["2", "12", "none", "https://example.com/shop", ""],
         ].map { $0.joined(separator: "\u{1F}") + "\u{1E}" }.joined()
         XCTAssertEqual(ChromeScript.tabs(fromListing: listing), [
-            .init(id: 1_173_479_941, window: 1, title: "Episode 12 | example", url: "https://example.tv/play/x", video: .paused, isChecked: true, isFront: true),
+            .init(id: 1_173_479_941, window: 1, title: "Video 12 | example", url: "https://example.tv/play/x", video: .paused, isChecked: true, isFront: true),
             .init(id: 1_173_479_942, window: 1, title: "GitHub", url: "https://github.com/", video: nil, isChecked: false, isFront: false),
             .init(id: 12, window: 2, title: "", url: "https://example.com/shop", video: nil, isChecked: true, isFront: true),
         ])
@@ -57,19 +57,19 @@ final class ChromeVideoTests: XCTestCase {
         let encoded = try XCTUnwrap(url.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
         let wall = Date(timeIntervalSince1970: 1_000)
         // Answered 0.4 s after the sentence started, at double speed.
-        let moment = try XCTUnwrap(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 \(encoded)|567|Episode | 12", at: wall))
+        let moment = try XCTUnwrap(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 \(encoded)|567|Video | 12", at: wall))
         XCTAssertEqual(moment.seconds, 100, accuracy: 0.001)
         XCTAssertEqual(moment, VideoMoment(tabID: 567, url: url, seconds: moment.seconds, rate: 2, playing: true))
         // A paused video hasn't moved meanwhile.
         XCTAssertEqual(
-            ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 \(encoded)|567|Episode", at: wall)?.seconds,
+            ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 \(encoded)|567|Video", at: wall)?.seconds,
             100.8
         )
         XCTAssertNil(ChromeScript.moment(fromResult: "none", at: wall))
         XCTAssertEqual(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 \(encoded)|567|E", at: wall)?.playing, true)
         XCTAssertEqual(ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 \(encoded)|567|E", at: wall)?.playing, false)
         XCTAssertNil(ChromeScript.moment(fromResult: "gone", at: wall))
-        XCTAssertEqual(ChromeScript.outcome(fromResult: "moved|567|Episode"), .moved)
+        XCTAssertEqual(ChromeScript.outcome(fromResult: "moved|567|Video"), .moved)
     }
 
     func testJavaScriptParses() throws {
@@ -291,10 +291,10 @@ final class MediaProbeTests: XCTestCase {
     func testProbeReadsWhatTheVideoIsMadeOf() throws {
         let page = "https://example.tv/watch?v=1&t=2"
         let manifest = "https://cdn.example.tv/v/1/index.m3u8?token=a|b"
-        let result = "clear 1443.5  \(encoded(manifest)) \(encoded(page)) \(encoded("Mozilla/5.0 (X)"))|567|Episode | 12"
+        let result = "clear 600.5  \(encoded(manifest)) \(encoded(page)) \(encoded("Mozilla/5.0 (X)"))|567|Video | 12"
         let probe = try XCTUnwrap(ChromeScript.mediaProbe(fromResult: result))
         XCTAssertEqual(probe, MediaProbe(
-            tabID: 567, page: page, duration: 1443.5, source: nil, manifest: manifest, encrypted: false,
+            tabID: 567, page: page, duration: 600.5, source: nil, manifest: manifest, encrypted: false,
             userAgent: "Mozilla/5.0 (X)"
         ))
         XCTAssertEqual(probe.mediaURL, manifest)
@@ -302,7 +302,7 @@ final class MediaProbeTests: XCTestCase {
     }
 
     func testAFileSourceComesFirstAndDRMCannotBeFetched() throws {
-        let file = "https://example.tv/ep1.mp4"
+        let file = "https://example.tv/a.mp4"
         let clear = try XCTUnwrap(ChromeScript.mediaProbe(
             fromResult: "clear 0 \(encoded(file)) \(encoded("https://x/m.mpd")) \(encoded("https://x/")) ua|1|T"
         ))
