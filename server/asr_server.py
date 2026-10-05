@@ -844,7 +844,12 @@ class PrefetchJob:
         command = [
             _tool("ffmpeg"), "-nostdin", "-loglevel", "error",
             "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-            "-headers", header_lines, *(["-ss", f"{self.offset:.3f}"] if self.offset > 0 else []), "-i", media,
+            "-headers", header_lines,
+            # Without -copyts a seek into an HLS stream can land at the start
+            # of the segment the moment is in, up to a segment early, and the
+            # audio is then taken for later than it is; with it the seek is
+            # exact to a frame.
+            *(["-ss", f"{self.offset:.3f}", "-copyts"] if self.offset > 0 else []), "-i", media,
             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
         ]
         print(f"prefetch {self.id}: fetching", flush=True)
