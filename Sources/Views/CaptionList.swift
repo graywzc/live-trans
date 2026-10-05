@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The captions, kept on what is being said: the end, where live captions
 /// arrive, or the sentence a video captioned ahead has reached, whose later
-/// captions are already below it. Scrolled by hand the list stays where it
+/// captions are already below it. Between sentences a splitter marks where
+/// the video is. Scrolled by hand the list stays where it
 /// was put, and a pill over its foot takes it back.
 struct CaptionList<Row: View>: View {
     let captions: [Caption]
@@ -11,12 +12,15 @@ struct CaptionList<Row: View>: View {
     /// The caption the video is at, among ones fetched ahead of it. Nil when
     /// there are only live captions, which are followed at the end.
     let playingID: Int?
+    /// Where the video is while none of them is being spoken.
+    var lull: Lull? = nil
     @ViewBuilder let row: (Caption) -> Row
 
     @State private var isFollowing = true
     @State private var onScreen = RowsOnScreen()
 
     private static var bottom: String { "bottom" }
+    private static var spacing: CGFloat { 18 }
 
     private enum Target: Equatable {
         case caption(Int)
@@ -32,9 +36,22 @@ struct CaptionList<Row: View>: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: Self.spacing) {
                     ForEach(captions) { caption in
+                        // Ahead of the first sentence there is no gap to
+                        // draw it in, so it takes a place of its own.
+                        if let lull, !lull.isAfter, lull.captionID == caption.id {
+                            PlayheadSplitter(seconds: lull.seconds, fontSize: fontSize)
+                        }
                         row(caption)
+                            // In the gap under the row, so that the list
+                            // doesn't shift each time the talk pauses.
+                            .overlay(alignment: .bottom) {
+                                if let lull, lull.isAfter, lull.captionID == caption.id {
+                                    PlayheadSplitter(seconds: lull.seconds, fontSize: fontSize)
+                                        .offset(y: (Self.spacing + PlayheadSplitter.height) / 2)
+                                }
+                            }
                             .onAppear { onScreen.ids.insert(caption.id) }
                             .onDisappear { onScreen.ids.remove(caption.id) }
                     }
@@ -88,6 +105,35 @@ struct CaptionList<Row: View>: View {
             case .end: proxy.scrollTo(Self.bottom, anchor: .bottom)
             }
         }
+    }
+}
+
+/// Marks where the video is between two sentences: a line across the list,
+/// with the time at its right end.
+struct PlayheadSplitter: View {
+    let seconds: Int
+    let fontSize: Double
+
+    static let height: CGFloat = 14
+    /// The colour of the video bar's thumb, which is the same place.
+    static let color = Color.orange
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Capsule()
+                .fill(Self.color)
+                .frame(height: 2)
+            Text(CaptionRow.timestamp(Double(seconds)))
+                // The size of the rows' times, while that fits the gap.
+                .font(.system(size: min(fontSize * 0.55, 12), weight: .semibold).monospacedDigit())
+                .foregroundStyle(Self.color)
+        }
+        .frame(height: Self.height)
+        // Clicks go through it to the rows.
+        .allowsHitTesting(false)
+        .accessibilityElement()
+        .accessibilityLabel("Video is here")
+        .accessibilityValue(CaptionRow.timestamp(Double(seconds)))
     }
 }
 

@@ -1,6 +1,17 @@
 import Foundation
 import Observation
 
+/// Where the video is among its captions while no sentence is being spoken.
+struct Lull: Equatable {
+    /// The caption it is next to.
+    let captionID: Int
+    /// After that caption, the last one spoken; before it when the video has
+    /// not reached its first.
+    let isAfter: Bool
+    /// How far into the video, in whole seconds as the list shows it.
+    let seconds: Int
+}
+
 /// Captions a Chrome video ahead of the viewer from its own audio, through
 /// the GPU host: the tab's video is probed for what it is made of, the host
 /// fetches and transcribes it in chunks from where the viewer is, and the
@@ -70,6 +81,9 @@ final class Prefetcher {
     /// The caption the video is at, between sentences too, for the list to
     /// keep to.
     private(set) var playingCaptionID: Int?
+    /// Where the video is while no caption is being spoken, for the list to
+    /// mark.
+    private(set) var lull: Lull?
 
     var isActive: Bool { job != nil }
     /// Off at launch: the video is only fetched ahead once asked to.
@@ -368,6 +382,7 @@ final class Prefetcher {
         retire()
         currentCaptionID = nil
         playingCaptionID = nil
+        lull = nil
         await engine.client?.stopPrefetch(job: job.id)
     }
 
@@ -375,11 +390,15 @@ final class Prefetcher {
         guard job != nil || !finished.isEmpty, let playhead, let now = position else {
             if currentCaptionID != nil { currentCaptionID = nil }
             if playingCaptionID != nil { playingCaptionID = nil }
+            if lull != nil { lull = nil }
             return
         }
         let id = Self.current(in: engine.captions, at: now, tabID: playhead.tabID, url: playhead.url)
         if id != currentCaptionID { currentCaptionID = id }
-        let near = id ?? Self.nearest(in: engine.captions, at: now, tabID: playhead.tabID, url: playhead.url)
+        let between = id == nil
+            ? Self.lull(in: engine.captions, at: now, tabID: playhead.tabID, url: playhead.url) : nil
+        if between != lull { lull = between }
+        let near = id ?? between?.captionID
         if near != playingCaptionID { playingCaptionID = near }
     }
 
@@ -440,9 +459,9 @@ final class Prefetcher {
     }
 
     /// Where `seconds` of the page's video is among its captions when no
-    /// sentence is being spoken: the last one that started before it, however
-    /// long ago, else the first one after it.
-    nonisolated static func nearest(in captions: [Caption], at seconds: Double, tabID: Int, url: String) -> Int? {
+    /// sentence is being spoken: after the last one that started before it,
+    /// however long ago, else before the first one after it.
+    nonisolated static func lull(in captions: [Caption], at seconds: Double, tabID: Int, url: String) -> Lull? {
         var before: Caption?
         var after: Caption?
         for caption in captions {
@@ -453,6 +472,7 @@ final class Prefetcher {
                 after = caption
             }
         }
-        return (before ?? after)?.id
+        guard let beside = before ?? after else { return nil }
+        return Lull(captionID: beside.id, isAfter: before != nil, seconds: Int(max(seconds, 0)))
     }
 }

@@ -13,6 +13,7 @@ final class CaptionListTests: XCTestCase {
         var captions: [Caption] = []
         var partial = ""
         var playingID: Int?
+        var lull: Lull?
     }
 
     struct Host: View {
@@ -20,7 +21,8 @@ final class CaptionListTests: XCTestCase {
 
         var body: some View {
             CaptionList(
-                captions: model.captions, partialText: model.partial, fontSize: 16, playingID: model.playingID
+                captions: model.captions, partialText: model.partial, fontSize: 16, playingID: model.playingID,
+                lull: model.lull
             ) { caption in
                 Text(caption.japanese)
                     .foregroundStyle(.white)
@@ -125,6 +127,44 @@ final class CaptionListTests: XCTestCase {
         XCTAssertEqual(try offset(), try end(), accuracy: 1)
     }
 
+    func testBetweenSentencesASplitterMarksWhereTheVideoIs() throws {
+        // Five rows 40 high and 18 apart, all in sight at the foot of the
+        // list: the gap under the third is centred 174 down.
+        add(5)
+        let gap = CGPoint(x: 150, y: 174)
+        let height = try XCTUnwrap(scrollView().documentView).frame.height
+        XCTAssertFalse(try isOrange(at: gap))
+
+        model.lull = Lull(captionID: 2, isAfter: true, seconds: 754)
+        settle()
+        XCTAssertTrue(try isOrange(at: gap), "no splitter after the sentence just played")
+        XCTAssertFalse(try isOrange(at: CGPoint(x: gap.x, y: gap.y - 58)))
+        XCTAssertFalse(try isOrange(at: CGPoint(x: gap.x, y: gap.y + 58)))
+        // It takes no room of its own, so the list does not shift under it.
+        XCTAssertEqual(try XCTUnwrap(scrollView().documentView).frame.height, height)
+        snapshot("list-lull")
+
+        model.lull = Lull(captionID: 3, isAfter: true, seconds: 761)
+        settle()
+        XCTAssertFalse(try isOrange(at: gap))
+        XCTAssertTrue(try isOrange(at: CGPoint(x: gap.x, y: gap.y + 58)))
+
+        model.lull = nil
+        settle()
+        XCTAssertFalse(try isOrange(at: CGPoint(x: gap.x, y: gap.y + 58)))
+    }
+
+    func testBeforeTheFirstSentenceTheSplitterIsAboveIt() throws {
+        add(3)
+        model.lull = Lull(captionID: 0, isAfter: false, seconds: 5)
+        settle()
+        snapshot("list-lull-before")
+        // Three rows at the foot of the list, and the splitter over them.
+        let firstRow: CGFloat = 300 - 1 - 18 - 3 * 40 - 2 * 18
+        let splitter = CGPoint(x: 150, y: firstRow - 18 - PlayheadSplitter.height / 2)
+        XCTAssertTrue(try isOrange(at: splitter))
+    }
+
     func testRestingOnTheTrackpadIsNotScrolling() throws {
         add(40)
         try scroll(by: 0)
@@ -181,6 +221,21 @@ final class CaptionListTests: XCTestCase {
                 .usingColorSpace(.deviceRGB)
         )
         return color.brightnessComponent > 0.1 && color.saturationComponent < 0.1
+    }
+
+    /// Whether the splitter's line is drawn at a point from the window's
+    /// top left, give or take a point.
+    private func isOrange(at point: CGPoint) throws -> Bool {
+        let view = try XCTUnwrap(window.contentView)
+        let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        return (-2...2).contains { dy in
+            guard let color = rep.colorAt(x: Int(point.x * scale), y: Int((point.y + CGFloat(dy)) * scale))?
+                .usingColorSpace(.deviceRGB) else { return false }
+            return color.brightnessComponent > 0.7 && color.saturationComponent > 0.6
+                && (0.04...0.14).contains(color.hueComponent)
+        }
     }
 
     /// A turn of the wheel over the list. An event made here belongs to no
