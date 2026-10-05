@@ -188,14 +188,18 @@ final class Prefetcher {
     }
 
     /// The caption's sentence heard again from the fetched audio, with the
-    /// wider search and its context; what comes back corrects the caption.
+    /// wider search and its context, and with the neighbours it follows on
+    /// from, so a sentence cut in two is heard whole; what comes back
+    /// corrects the captions.
     func rehear(_ caption: Caption) {
-        guard let moment = caption.moment, let stretch = stretch(holding: moment), let end = moment.end,
+        guard let moment = caption.moment, let stretch = stretch(holding: moment),
+              let window = CaptionEngine.rehearingStretch(for: caption, among: engine.captions),
               let client = engine.client
         else { return }
+        let from = max(window.from, stretch.from), to = min(window.to, stretch.to)
         Task {
             do {
-                let lines = try await client.rehear(job: stretch.job, from: moment.seconds, to: end)
+                let lines = try await client.rehear(job: stretch.job, from: from, to: to)
                 engine.add(lines, tabID: moment.tabID, url: moment.url, heardAgain: true)
             } catch {
                 print("rehear failed: \(error.localizedDescription)")

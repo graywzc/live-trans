@@ -766,20 +766,35 @@ def resolve_media_url(url, page):
     return lines[0], None
 
 
+# A chunk ends only in a pause long enough to end a sentence. Cut at a
+# breath inside one, each half is heard alone, and Whisper makes a whole
+# sentence of each: the first half guessed to an end, the second taken
+# for the first again, from the prompt.
+PREFETCH_CUT_PAUSE = 1.0
+# How far into the pause the cut goes, so the last word keeps its tail.
+PREFETCH_CUT_LEAD = 0.3
+
+
 def choose_boundary(audio, target):
-    """Where to end a chunk, in seconds into `audio`: the quiet moment after
-    the last speech that ends by `target`, or `target` itself when the
-    speech runs on through it. The next chunk starts there, so no word is
-    cut in two."""
+    """Where to end a chunk, in seconds into `audio`: in the last pause of
+    PREFETCH_CUT_PAUSE or more that begins by `target`; when there is none,
+    in the longest pause that does, there being nowhere better; or `target`
+    itself when the speech runs on through it with no pause at all. The
+    next chunk starts there, so no word is cut in two. The pauses are
+    measured as they are, unpadded: Silero's padding would take most of a
+    second off each."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-    speech = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=300))
-    ends = [s["end"] / SAMPLE_RATE for s in speech if s["end"] / SAMPLE_RATE <= target]
-    if not ends:
+    speech = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=300, speech_pad_ms=0))
+    pauses = [(a["end"] / SAMPLE_RATE, b["start"] / SAMPLE_RATE) for a, b in zip(speech, speech[1:])]
+    if speech and speech[-1]["end"] < audio.size:
+        pauses.append((speech[-1]["end"] / SAMPLE_RATE, audio.size / SAMPLE_RATE))
+    pauses = [(a, b) for a, b in pauses if a <= target]
+    if not pauses:
         return target
-    last = ends[-1]
-    following = [s["start"] / SAMPLE_RATE for s in speech if s["start"] / SAMPLE_RATE > last]
-    return min(last + 0.15, (last + following[0]) / 2) if following else last + 0.15
+    long = [(a, b) for a, b in pauses if b - a >= PREFETCH_CUT_PAUSE]
+    start, end = long[-1] if long else max(pauses, key=lambda p: p[1] - p[0])
+    return min(start + PREFETCH_CUT_LEAD, (start + end) / 2)
 
 
 class PrefetchJob:

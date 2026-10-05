@@ -72,6 +72,17 @@ final class CaptionEngine {
     /// video are that caption heard again. Heard over less, but mostly
     /// inside it, they are a fragment of it.
     static let rehearingMinimumCover = 0.5
+    /// Lines heard over at least this share of a caption's stretch are
+    /// trusted however little they resemble it: what was heard over the
+    /// whole of it is what was said there, and a caption wrong from the
+    /// start can only be put right by something that resembles it less
+    /// than a correction would.
+    static let rehearingFullCover = 0.9
+    /// A sentence is heard again with its neighbours: the captions before
+    /// and after it that follow on within this many seconds. A sentence cut
+    /// in two, or a half of one heard as a whole, is only heard right with
+    /// the other half in the audio.
+    static let rehearingNeighbourGap: TimeInterval = 1.0
 
     private var session: ServerSession?
     private var source: AudioSource?
@@ -402,6 +413,29 @@ final class CaptionEngine {
         return max(min(aEnd, bEnd) - max(a.seconds, b.seconds), 0)
     }
 
+    /// The stretch of the video to hear again for `caption`: its own,
+    /// widened over the neighbour before and the one after when they follow
+    /// on within `rehearingNeighbourGap`. Nil for a caption not placed in a
+    /// video.
+    nonisolated static func rehearingStretch(for caption: Caption, among captions: [Caption]) -> (from: Double, to: Double)? {
+        guard let moment = caption.moment, let end = moment.end else { return nil }
+        let placed = captions.compactMap { other -> VideoMoment? in
+            guard other.id != caption.id, let m = other.moment, m.end != nil,
+                  m.tabID == moment.tabID, m.url == moment.url else { return nil }
+            return m
+        }
+        var from = moment.seconds, to = end
+        if let before = placed.filter({ $0.seconds < moment.seconds }).max(by: { $0.seconds < $1.seconds }),
+           moment.seconds - before.end! <= rehearingNeighbourGap {
+            from = min(from, before.seconds)
+        }
+        if let after = placed.filter({ $0.seconds > moment.seconds }).min(by: { $0.seconds < $1.seconds }),
+           after.seconds - end <= rehearingNeighbourGap {
+            to = max(to, after.end!)
+        }
+        return (from, to)
+    }
+
     /// Whether `spoken` seconds heard from `moment` are of a stretch of the
     /// video that has captions.
     nonisolated static func isCaptioned(_ captions: [Caption], from moment: VideoMoment, spoken: TimeInterval) -> Bool {
@@ -416,8 +450,11 @@ final class CaptionEngine {
     /// `lines` heard from the video put among `captions`. A line heard over
     /// a stretch the captions cover is one of them heard again: it takes
     /// their place, unless it is only the context the model was handed, or
-    /// keeps too little of them, as the model gives over sound that isn't
-    /// speech; then they are kept as they were. A line mostly inside a
+    /// covers them only in part and keeps too little of them, as the model
+    /// gives over sound that isn't speech; then they are kept as they were.
+    /// Heard over the whole of them it is believed whatever it says: a
+    /// caption that was wrong is put right by nothing that resembles it.
+    /// A line mostly inside a
     /// caption without covering it is a fragment, and dropped. Any other
     /// line is new, and goes in the order of the video. The lines replacing
     /// captions have ids of their own: an analysis of the old text must not
@@ -464,10 +501,11 @@ final class CaptionEngine {
             let length = { (moments: [Caption]) in
                 moments.reduce(0.0) { $0 + (($1.moment?.end ?? 0) - ($1.moment?.seconds ?? 0)) }
             }
-            if shared >= length(originals) * rehearingMinimumCover {
+            let cover = shared / max(length(originals), 0.001)
+            if cover >= rehearingMinimumCover {
                 if isEcho(text, of: prompt) {
                     print("heard again as its context, kept: \(original)")
-                } else if resemblance(of: text, to: original) < replayMinimumResemblance {
+                } else if cover < rehearingFullCover, resemblance(of: text, to: original) < replayMinimumResemblance {
                     print("heard again as something else, kept: \(original) (heard: \(text))")
                 } else {
                     print("heard again: \(original) -> \(text)")
