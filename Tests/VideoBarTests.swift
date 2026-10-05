@@ -8,7 +8,10 @@ final class VideoBarTests: XCTestCase {
     private var window: NSWindow!
     private var sought: [Double] = []
 
-    private static let size = CGSize(width: 480, height: 40)
+    private static let size = CGSize(width: 480, height: 60)
+    /// The bar sits at the foot of the window, leaving room above it for
+    /// the pointer's time.
+    private static let barY: CGFloat = 44
 
     override func setUp() async throws {
         sought = []
@@ -25,7 +28,8 @@ final class VideoBarTests: XCTestCase {
             duration: duration, playhead: playhead, captioned: [240...600, 0...120], fetched: 240...900
         ) { [unowned self] in sought.append($0) }
         window.contentView = NSHostingView(
-            rootView: bar.padding(.horizontal, 12).frame(width: Self.size.width, height: Self.size.height)
+            rootView: bar.padding(.horizontal, 12).padding(.bottom, 8)
+                .frame(width: Self.size.width, height: Self.size.height, alignment: .bottom)
                 .background(Color.black)
         )
         window.makeKeyAndOrderFront(nil)
@@ -38,7 +42,7 @@ final class VideoBarTests: XCTestCase {
     private func trackEnds() throws -> (left: CGFloat, right: CGFloat) {
         var places: [Double] = []
         for x in [240.0, 300.0] {
-            drag(from: CGPoint(x: x, y: 20), to: CGPoint(x: x, y: 20))
+            drag(from: CGPoint(x: x, y: Self.barY), to: CGPoint(x: x, y: Self.barY))
             places.append(try XCTUnwrap(sought.last, "a press on the bar seeks"))
         }
         sought = []
@@ -54,7 +58,7 @@ final class VideoBarTests: XCTestCase {
         XCTAssertLessThan(track.right, Self.size.width - 12)
         let quarter = track.left + (track.right - track.left) / 4
         let threeQuarters = track.left + (track.right - track.left) * 3 / 4
-        drag(from: CGPoint(x: quarter, y: 20), to: CGPoint(x: threeQuarters, y: 20))
+        drag(from: CGPoint(x: quarter, y: Self.barY), to: CGPoint(x: threeQuarters, y: Self.barY))
         // Not while it is dragged, only where it lands.
         XCTAssertEqual(sought.count, 1)
         XCTAssertEqual(try XCTUnwrap(sought.first), 900, accuracy: 3)
@@ -64,16 +68,79 @@ final class VideoBarTests: XCTestCase {
     func testDraggedOffTheEndItStopsAtTheEnd() throws {
         show(duration: 1200)
         let track = try trackEnds()
-        drag(from: CGPoint(x: (track.left + track.right) / 2, y: 20), to: CGPoint(x: Self.size.width + 200, y: 20))
+        drag(from: CGPoint(x: (track.left + track.right) / 2, y: Self.barY), to: CGPoint(x: Self.size.width + 200, y: Self.barY))
         XCTAssertEqual(sought, [1200])
-        drag(from: CGPoint(x: (track.left + track.right) / 2, y: 20), to: CGPoint(x: -50, y: 20))
+        drag(from: CGPoint(x: (track.left + track.right) / 2, y: Self.barY), to: CGPoint(x: -50, y: Self.barY))
         XCTAssertEqual(sought, [1200, 0])
+    }
+
+    func testTheTimeUnderThePointerFloatsAboveTheBar() throws {
+        show(duration: 1200)
+        let aboveBar = CGRect(x: 0, y: 0, width: Self.size.width, height: Self.barY - 10)
+        XCTAssertFalse(isLit(aboveBar), "nothing above the bar until the pointer comes")
+        let track = try trackEnds()
+        // Measuring the track pressed it, and the time stays over the
+        // pointer after a press until the pointer leaves.
+        let view = try dragView()
+        view.mouseExited(with: event(.mouseMoved, at: CGPoint(x: 300, y: Self.barY)))
+        pump()
+        XCTAssertFalse(isLit(aboveBar), "the time should go with the pointer")
+        let x = track.left + (track.right - track.left) * 3 / 4
+        // The bar's track is 16 high about barY, and the time floats
+        // VideoBar.labelRise above that, centred on the pointer.
+        let above = CGRect(
+            x: x - VideoBar.labelSize.width / 2, y: Self.barY - 8 - VideoBar.labelRise - VideoBar.labelSize.height,
+            width: VideoBar.labelSize.width, height: VideoBar.labelSize.height
+        )
+        view.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: x, y: Self.barY)))
+        pump()
+        XCTAssertTrue(isLit(above), "no time over the pointer")
+        // Only there: not where the press was.
+        XCTAssertFalse(isLit(CGRect(x: 0, y: 0, width: above.minX - 1, height: Self.barY - 10)))
+        snapshot("video-bar-hovered")
+        view.mouseExited(with: event(.mouseMoved, at: CGPoint(x: x, y: Self.barY)))
+        pump()
+        XCTAssertFalse(isLit(aboveBar))
+    }
+
+    func testAVideoWithNoEndShowsNoTimeUnderThePointer() throws {
+        show(duration: nil)
+        let view = try dragView()
+        view.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: 300, y: Self.barY)))
+        pump()
+        XCTAssertFalse(isLit(CGRect(x: 276, y: Self.barY - 8 - VideoBar.labelRise - 16, width: 48, height: 16)))
+        XCTAssertFalse(isLit(CGRect(x: 0, y: 0, width: Self.size.width, height: Self.barY - 10)), "nothing above the bar")
     }
 
     func testAVideoWithNoEndCannotBeDragged() {
         show(duration: nil)
-        drag(from: CGPoint(x: 200, y: 20), to: CGPoint(x: 300, y: 20))
+        drag(from: CGPoint(x: 200, y: Self.barY), to: CGPoint(x: 300, y: Self.barY))
         XCTAssertEqual(sought, [])
+    }
+
+    /// Whether anything light is drawn in `rect`, from the window's top
+    /// left: the time's white digits on the black window.
+    private func isLit(_ rect: CGRect) -> Bool {
+        let view = window.contentView!
+        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        for y in stride(from: rect.minY, to: rect.maxY, by: 1) {
+            for x in stride(from: rect.minX, to: rect.maxX, by: 1) {
+                if let color = rep.colorAt(x: Int(x * scale), y: Int(y * scale))?.usingColorSpace(.deviceRGB),
+                   color.brightnessComponent > 0.5 {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private func dragView() throws -> VideoBar.BarDrag.DragView {
+        func find(in view: NSView) -> VideoBar.BarDrag.DragView? {
+            (view as? VideoBar.BarDrag.DragView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        return try XCTUnwrap(TestScreen.wait { window.contentView.flatMap(find) }, "no drag view in the window")
     }
 
     private func event(_ type: NSEvent.EventType, at point: CGPoint) -> NSEvent {
