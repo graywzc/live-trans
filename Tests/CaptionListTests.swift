@@ -189,6 +189,10 @@ final class CaptionListTests: XCTestCase {
         let tracker = trackers[0]
         let frame = tracker.convert(tracker.bounds, to: nil)
         XCTAssertEqual(300 - frame.midY, gap.y, accuracy: 1, "the tracker should be in the gap under the third row")
+        // The whole gap, with nothing drawn in it yet: a tracker of no
+        // height is one the pointer never enters.
+        XCTAssertEqual(frame.height, 18, accuracy: 1)
+        XCTAssertGreaterThan(frame.width, 300)
 
         tracker.mouseEntered(with: event(.mouseMoved, at: gap))
         pump()

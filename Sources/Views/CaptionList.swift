@@ -138,7 +138,10 @@ private struct GapBelow: View {
                 GapSplitter(fontSize: fontSize, onRehear: onRehear)
             }
         }
-        .frame(maxWidth: .infinity)
+        // The whole gap, even while nothing is drawn in it: empty, the
+        // stack would be a line of no height, and so would the tracker
+        // under it, which the pointer could never enter.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             if onRehear != nil {
                 HoverTracker(isHovered: $isHovered)
