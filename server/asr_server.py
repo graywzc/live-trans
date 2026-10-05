@@ -288,6 +288,41 @@ def pause_between(words, i, quiet):
     return max((end - start for start, end in quiet if low <= (start + end) / 2 <= high), default=0.0)
 
 
+def pause_at_break(words, i, quiet):
+    """The quiet stretch the speaker left between word i and the next, as
+    (start, end), or None when they ran on: of those lying between the start
+    of the one word and the end of the other, the nearest to where Whisper
+    put the break."""
+    low, high, at = words[i][1], words[i + 1][2], words[i + 1][1]
+    between = [(start, end) for start, end in quiet if low < start and end < high]
+    return min(between, key=lambda q: max(q[0] - at, at - q[1], 0), default=None)
+
+
+def draw_in_to_speech(lines, words, quiet):
+    """The lines with their times drawn in to the speech. A sentence's first
+    word is stretched back over the pause before it, as far as the last
+    word of the sentence before, and its last word on over the pause after:
+    played from there, a sentence would open with the end of the one before
+    it. `quiet()` gives the silences in the audio."""
+    spans = sentence_word_spans([line["ja"] for line in lines], words)
+    silent = None
+    for line, span in zip(lines, spans):
+        if not span or "start" not in line:
+            continue
+        if silent is None:
+            silent = quiet()
+        start, end = line["start"], line["end"]
+        if span[0] > 0:
+            pause = pause_at_break(words, span[0] - 1, silent)
+            start = round(float(pause[1]), 2) if pause else start
+        if span[1] + 1 < len(words):
+            pause = pause_at_break(words, span[1], silent)
+            end = round(float(pause[0]), 2) if pause else end
+        if start < end:
+            line["start"], line["end"] = start, end
+    return lines
+
+
 def pause_cuts(words, first, last, quiet):
     """Where to cut the words first..last into sentences: the indices of the
     words each new piece starts with."""
@@ -640,11 +675,19 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
         if span:
             line["start"], line["end"] = round(span[0], 2), round(span[1], 2)
         lines.append(line)
+    quiet = []
+
+    def silent():
+        if not quiet:
+            quiet.append(silences(audio))
+        return quiet[0]
+
     if want_translation and (TRANSLATE_BACKEND == "nllb" or _ollama_ok):
         # What is still long after the LLM had its say: cut where the
         # speaker paused.
-        lines = split_at_pauses(lines, words, lambda: silences(audio), translate_text)
+        lines = split_at_pauses(lines, words, silent, translate_text)
         pairs = [(line["ja"], line["en"]) for line in lines]
+    lines = draw_in_to_speech(lines, words, silent)
     return ja, pairs, lines
 
 
