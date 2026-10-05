@@ -14,6 +14,11 @@ final class CaptionListTests: XCTestCase {
         var partial = ""
         var playingID: Int?
         var lull: Lull?
+        /// The captions with a gap under them that can be heard again.
+        var rehearable: Set<Int> = []
+        var reheard: [Int] = []
+        var canRehearLull = false
+        var lullReheard = 0
     }
 
     struct Host: View {
@@ -22,7 +27,10 @@ final class CaptionListTests: XCTestCase {
         var body: some View {
             CaptionList(
                 captions: model.captions, partialText: model.partial, fontSize: 16, playingID: model.playingID,
-                lull: model.lull
+                lull: model.lull, lullRehearing: model.canRehearLull ? { model.lullReheard += 1 } : nil,
+                gapRehearing: { caption in
+                    model.rehearable.contains(caption.id) ? { model.reheard.append(caption.id) } : nil
+                }
             ) { caption in
                 Text(caption.japanese)
                     .foregroundStyle(.white)
@@ -167,6 +175,58 @@ final class CaptionListTests: XCTestCase {
         XCTAssertTrue(try isOrange(at: splitter))
     }
 
+    func testUnderThePointerAGapOffersToBeHeardAgain() throws {
+        // Five rows 40 high and 18 apart, all in sight at the foot of the
+        // list: the gap under the third is centred 174 down.
+        add(5)
+        model.rehearable = [2]
+        settle()
+        let gap = CGPoint(x: 150, y: 174)
+        XCTAssertFalse(try isGrey(at: gap))
+        // Only a gap with something to hear tracks the pointer.
+        let trackers = try gapTrackers()
+        XCTAssertEqual(trackers.count, 1)
+        let tracker = trackers[0]
+        let frame = tracker.convert(tracker.bounds, to: nil)
+        XCTAssertEqual(300 - frame.midY, gap.y, accuracy: 1, "the tracker should be in the gap under the third row")
+
+        tracker.mouseEntered(with: event(.mouseMoved, at: gap))
+        pump()
+        XCTAssertTrue(try isGrey(at: gap), "no splitter under the pointer")
+        snapshot("list-gap-hovered")
+        // The button sits at the right end of the line.
+        let button = CGPoint(x: frame.maxX - SplitterLine.buttonWidth / 2, y: gap.y)
+        click(button)
+        XCTAssertEqual(model.reheard, [2])
+
+        tracker.mouseExited(with: event(.mouseMoved, at: gap))
+        pump()
+        XCTAssertFalse(try isGrey(at: gap))
+        click(button)
+        XCTAssertEqual(model.reheard, [2], "hidden, the button must not take clicks")
+    }
+
+    func testTheSplitterHasTheButtonWhereTheVideoIsInAGap() throws {
+        add(5)
+        model.rehearable = [2]
+        model.canRehearLull = true
+        model.lull = Lull(captionID: 2, isAfter: true, seconds: 754)
+        settle()
+        let gap = CGPoint(x: 150, y: 174)
+        XCTAssertTrue(try isOrange(at: gap))
+        snapshot("list-lull-rehear")
+        let tracker = try XCTUnwrap(gapTrackers().first)
+        let frame = tracker.convert(tracker.bounds, to: nil)
+        tracker.mouseEntered(with: event(.mouseMoved, at: gap))
+        pump()
+        // Under the pointer it is still the video's splitter, and its
+        // button hears the gap the video is in.
+        XCTAssertTrue(try isOrange(at: gap))
+        click(CGPoint(x: frame.maxX - SplitterLine.buttonWidth / 2, y: gap.y))
+        XCTAssertEqual(model.lullReheard, 1)
+        XCTAssertEqual(model.reheard, [])
+    }
+
     func testRestingOnTheTrackpadIsNotScrolling() throws {
         add(40)
         try scroll(by: 0)
@@ -238,6 +298,49 @@ final class CaptionListTests: XCTestCase {
             return color.brightnessComponent > 0.7 && color.saturationComponent > 0.6
                 && (0.04...0.14).contains(color.hueComponent)
         }
+    }
+
+    /// Whether a gap's splitter line is drawn at a point from the window's
+    /// top left, give or take a point: grey on the black list.
+    private func isGrey(at point: CGPoint) throws -> Bool {
+        let view = try XCTUnwrap(window.contentView)
+        let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        return (-2...2).contains { dy in
+            guard let color = rep.colorAt(x: Int(point.x * scale), y: Int((point.y + CGFloat(dy)) * scale))?
+                .usingColorSpace(.deviceRGB) else { return false }
+            return color.brightnessComponent > 0.3 && color.saturationComponent < 0.15
+        }
+    }
+
+    /// The hover trackers of the gaps under the rows, in order; the rows
+    /// here have none of their own.
+    private func gapTrackers() throws -> [HoverTracker.TrackerView] {
+        func find(_ view: NSView) -> [HoverTracker.TrackerView] {
+            ((view as? HoverTracker.TrackerView).map { [$0] } ?? []) + view.subviews.flatMap(find)
+        }
+        let found = try XCTUnwrap(TestScreen.wait {
+            self.window.contentView.map(find).flatMap { $0.isEmpty ? nil : $0 }
+        }, "no gap tracker in the window")
+        return found.sorted { $0.convert($0.bounds, to: nil).midY > $1.convert($1.bounds, to: nil).midY }
+    }
+
+    private func event(_ type: NSEvent.EventType, at point: CGPoint, clicks: Int = 0) -> NSEvent {
+        NSEvent.mouseEvent(
+            with: type, location: NSPoint(x: point.x, y: 300 - point.y), modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: clicks, pressure: 1
+        )!
+    }
+
+    private func click(_ point: CGPoint) {
+        // Both before pumping: a button that tracks the mouse in a loop of its
+        // own has to find the mouse-up waiting in the queue.
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            NSApp.postEvent(event(type, at: point, clicks: 1), atStart: false)
+        }
+        pump()
     }
 
     /// A turn of the wheel over the list. An event made here belongs to no

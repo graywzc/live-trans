@@ -31,7 +31,7 @@ GET  /prefetch/<id>?since=N
                        the video, like "start"), "count": lines so far,
                        "lines": the lines from index N on, with absolute
                        "start"/"end"}
-POST /prefetch/<id>/rehear?from=&to=
+POST /prefetch/<id>/rehear?from=&to=[&vad=1]
                    -> {"lines": [...]} that stretch heard again from the
                    fetched audio, with a wider search and its context; a
                    long line is split where the speaker paused after a word
@@ -946,17 +946,18 @@ class PrefetchJob:
         self.text += ja
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
 
-    def rehear(self, start, end):
+    def rehear(self, start, end, vad=False):
         """The stretch heard again from the fetched audio, with the wider
         search and the lines before it as context, and a long line split
-        where the speaker paused."""
+        where the speaker paused. With `vad` only the speech in it is
+        decoded, as for a gap in the captions that may be music."""
         lead, tail = 0.3, 0.3
         with self.audio_lock:
             from_sample = int(max(start - lead - self.offset, 0) * SAMPLE_RATE)
             audio = self.audio[from_sample:int(max(end + tail - self.offset, 0) * SAMPLE_RATE)].copy()
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
         words = []
-        _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before), words=words)
+        _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before), words=words, vad=vad)
         began = self.offset + from_sample / SAMPLE_RATE
         for line in lines:
             if "start" in line:
@@ -1079,7 +1080,8 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parts.query)
             try:
                 start, end = float(query["from"][0]), float(query["to"][0])
-                self._send(200, {"lines": job.rehear(start, end)})
+                vad = query.get("vad", ["0"])[0] == "1"
+                self._send(200, {"lines": job.rehear(start, end, vad=vad)})
             except Exception as exc:
                 self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
         else:

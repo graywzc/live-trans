@@ -87,7 +87,8 @@ struct ContentView: View {
     private var captionList: some View {
         CaptionList(
             captions: engine.captions, partialText: engine.partialText, fontSize: fontSize,
-            playingID: prefetch.playingCaptionID, lull: prefetch.lull
+            playingID: prefetch.playingCaptionID, lull: prefetch.lull, lullRehearing: prefetch.lullRehearing,
+            gapRehearing: { prefetch.gapRehearing(after: $0) }
         ) { caption in
             CaptionRow(
                 caption: caption, showFurigana: showFurigana, fontSize: fontSize,

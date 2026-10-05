@@ -232,7 +232,19 @@ each, so the captions are in place before the video gets there, with exact
 times. The whole script is listed as it arrives, the line being spoken is
 lit and kept in view. Between sentences an orange line, with the video's time
 at its right end, sits after the last one spoken. Pause, seek and replay as you like; the fetch never touches the
-player. When you jump to a part it has not captioned and is not about to
+player.
+
+A sentence can go uncaptioned: the model drops one now and then, and the
+live listener stands down over a fetched stretch, so playing through the
+gap does not catch it. Where the gap between two captions is two seconds
+or more, resting the pointer in it shows a grey line with an ear button at
+its right end; the orange line has the same button while the video is in
+such a gap. Press it and the gap is heard again from the fetched audio,
+with the wider search and the captions before it as context, and anything
+found lands where it was said. Only the speech in the gap is decoded, so a
+gap of music or silence gives nothing rather than invented lines; of a
+long gap, at most twenty seconds are heard at once, from the sentence
+before it or around where the video is. When you jump to a part it has not captioned and is not about to
 reach, it starts again from there, keeping the captions it has; a part you
 skipped over is captioned when you go back to it, and a stretch already
 captioned is passed over rather than done twice.
