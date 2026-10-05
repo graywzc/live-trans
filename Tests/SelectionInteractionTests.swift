@@ -105,6 +105,32 @@ final class SelectionInteractionTests: XCTestCase {
         XCTAssertTrue(model.lookedUp.isEmpty)
     }
 
+    func testCopyCommandCopiesTheSelection() throws {
+        // The clipboard is the machine's own; it gets back what it held.
+        let pasteboard = NSPasteboard.general
+        let held = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let held { pasteboard.setString(held, forType: .string) }
+        }
+        pasteboard.clearContents()
+
+        click(x: 110, y: 82, count: 2)
+        // As ⌘C sends it: to the first responder, by way of the Edit menu.
+        let responder = try XCTUnwrap(window.firstResponder)
+        XCTAssertTrue(responder.tryToPerform(#selector(NSText.copy(_:)), with: nil))
+        XCTAssertEqual(pasteboard.string(forType: .string), "学校")
+    }
+
+    func testCopyCommandIsOffWithNothingSelected() throws {
+        click(x: 110, y: 82)
+        let copy = NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        let responder = try XCTUnwrap(window.firstResponder as? NSMenuItemValidation)
+        XCTAssertFalse(responder.validateMenuItem(copy))
+        click(x: 110, y: 82, count: 2)
+        XCTAssertTrue(responder.validateMenuItem(copy))
+    }
+
     private func click(x: CGFloat, y: CGFloat, count: Int = 1) {
         for clicks in 1...count {
             mouse(.leftMouseDown, x: x, y: y, clicks: clicks)
