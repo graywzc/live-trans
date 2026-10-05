@@ -115,9 +115,6 @@ _OLLAMA_LONG_PROMPT = (
     "Copy the Japanese characters exactly as given, in order; do not add, drop, or "
     "change any. Output nothing else.\n\n"
 )
-# A line with more characters than this is one to break up: some fifteen
-# seconds of speech fit in a hundred, a sentence in well under sixty.
-LONG_LINE_CHARS = 60
 _PAIR_SEPARATOR = "|||"
 # How much of the transcript the LLM's copy must match for its sentence
 # breaks to be used.
@@ -254,9 +251,9 @@ def sentence_word_spans(sentences, words):
     return times
 
 
-# A line heard again that runs longer than this is looked at for pauses to
-# split it at: two sentences run together the first time are often heard as
-# one again.
+# A line that runs longer than this is taken to hold more than a sentence:
+# the LLM is asked to split it by itself, and what is still long after that
+# is looked at for pauses to split it at.
 SPLIT_MIN_SECONDS = 6.0
 SPLIT_MIN_CHARS = 40
 # A pause this long ends a sentence; a shorter one only after a word that
@@ -329,13 +326,17 @@ def split_at_pauses(lines, words, quiet, translate):
     """Long lines cut into sentences where the speaker paused, each piece
     with its own times and its own translation from `translate(ja)`. A line
     that cannot be placed among the words, or whose pieces cannot be
-    translated, is kept whole."""
+    translated, is kept whole. `quiet()` gives the silences in the audio,
+    asked for only when a line is long."""
     spans = sentence_word_spans([line["ja"] for line in lines], words)
     result = []
+    silent = None
     for line, span in zip(lines, spans):
-        long = (line.get("end", 0) - line.get("start", 0) > SPLIT_MIN_SECONDS
-                or len(_content(line["ja"])) > SPLIT_MIN_CHARS)
-        cuts = pause_cuts(words, *span, quiet) if span and long else []
+        cuts = []
+        if span and _is_long(line["ja"], span, words):
+            if silent is None:
+                silent = quiet()
+            cuts = pause_cuts(words, *span, silent)
         if not cuts:
             result.append(line)
             continue
@@ -519,18 +520,54 @@ def _at_sentence_ends(segments):
     return result
 
 
-def _split_long(pairs):
-    """`pairs` with the over-long ones broken into shorter sentences and
-    clauses, each asked of the LLM alone. One it cannot break stays whole."""
+_BREAK_IN_SPEECH = re.compile(r"(?<=[^\x00-\x7f])[ \u3000]+(?=[^\x00-\x7f])")
+
+
+def _for_splitting(text):
+    """`text` as the LLM is given it to split. Whisper writes a space where
+    a Japanese speaker broke off; the LLM takes a line with one for two
+    fields already and answers with no English. A comma says the same."""
+    return _BREAK_IN_SPEECH.sub("、", text)
+
+
+def _breaks_only(response, source):
+    """The pieces of `source` from an answer that broke it up but did not
+    translate it ("ja ||| ja ||| ja"), each translated by itself. None if
+    the answer is not that."""
+    fields = [field.strip() for line in response.splitlines() for field in line.split(_PAIR_SEPARATOR)]
+    japanese = [field for field in fields if any(ch > "\u3000" for ch in field)]
+    pieces = _parse_pairs("\n".join(f"{field} {_PAIR_SEPARATOR} -" for field in japanese), source)
+    if not pieces or len(pieces) < 2:
+        return None
+    return [(ja, _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)) for ja, _ in pieces]
+
+
+def _is_long(text, span, words):
+    """Whether a line runs long enough, in characters or in seconds, to hold
+    more than a sentence."""
+    return (len(_content(text)) > SPLIT_MIN_CHARS
+            or (span is not None and words[span[1]][2] - words[span[0]][1] > SPLIT_MIN_SECONDS))
+
+
+def _split_long(pairs, words):
+    """`pairs` with the long ones broken up, each asked of the LLM alone:
+    one long in characters into sentences and clauses, one long only by
+    the clock (a few short lines shouted over half a minute) into its
+    sentences. One the LLM cannot break stays whole."""
     result = []
-    for ja, en in pairs:
+    for (ja, en), span in zip(pairs, sentence_word_spans([ja for ja, _ in pairs], words)):
         pieces = None
-        if len(_content(ja)) > LONG_LINE_CHARS:
-            response = _ollama_generate(ja, timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_LONG_PROMPT)
-            pieces = _parse_pairs(response, ja)
-            print(f"long line of {len(_content(ja))} characters: "
+        size = len(_content(ja))
+        if _is_long(ja, span, words) and size >= 2 * SPLIT_MIN_PIECE_CHARS:
+            prompt = _OLLAMA_LONG_PROMPT if size > SPLIT_MIN_CHARS else _OLLAMA_SPLIT_PROMPT
+            try:
+                response = _ollama_generate(_for_splitting(ja), timeout=OLLAMA_TIMEOUT, prompt=prompt)
+                pieces = _parse_pairs(response, ja) or _breaks_only(response, ja)
+            except Exception as exc:
+                print(f"long line not split: {exc}", flush=True)
+            print(f"long line of {size} characters: "
                   + (f"into {len(pieces)}" if pieces else "kept whole"), flush=True)
-        result.extend(pieces or [(ja, en or _ollama_generate(ja, timeout=OLLAMA_TIMEOUT))])
+        result.extend(pieces or [(ja, en)])
     return result
 
 
@@ -545,18 +582,17 @@ def translate_ollama(segments):
     text = "\n".join(segments)
     try:
         response = _ollama_generate(
-            text, timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_SPLIT_PROMPT
+            _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_SPLIT_PROMPT
         )
         pairs = _parse_pairs(response, text)
         if pairs:
-            return _split_long(pairs)
+            return pairs
         print(f"ollama split unusable ({len(text)} characters in, {len(response)} out); "
               "translating per segment", flush=True)
-        return _split_long([
-            (segment, "" if len(_content(segment)) > LONG_LINE_CHARS
-             else _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
+        return [
+            (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
             for segment in segments
-        ])
+        ]
     except Exception as exc:
         _ollama_ok = False
         print(f"ollama translation failed ({exc}); "
@@ -596,12 +632,19 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
                 pairs = [(ja, " ".join(run_whisper(
                     audio, beam_size=beam_size, task="translate"
                 )))]
+            else:
+                pairs = _split_long(pairs, words)
     lines = []
     for (j, e), span in zip(pairs, sentence_times([j for j, _ in pairs], words)):
         line = {"ja": j, "en": e}
         if span:
             line["start"], line["end"] = round(span[0], 2), round(span[1], 2)
         lines.append(line)
+    if want_translation and (TRANSLATE_BACKEND == "nllb" or _ollama_ok):
+        # What is still long after the LLM had its say: cut where the
+        # speaker paused.
+        lines = split_at_pauses(lines, words, lambda: silences(audio), translate_text)
+        pairs = [(line["ja"], line["en"]) for line in lines]
     return ja, pairs, lines
 
 
@@ -833,7 +876,6 @@ class PrefetchJob:
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
         words = []
         _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before), words=words)
-        lines = split_at_pauses(lines, words, silences(audio), translate_text)
         began = self.offset + from_sample / SAMPLE_RATE
         for line in lines:
             if "start" in line:
