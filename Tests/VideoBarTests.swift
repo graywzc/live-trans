@@ -76,7 +76,15 @@ final class VideoBarTests: XCTestCase {
 
     func testTheTimeUnderThePointerFloatsAboveTheBar() throws {
         show(duration: 1200)
+        let aboveBar = CGRect(x: 0, y: 0, width: Self.size.width, height: Self.barY - 10)
+        XCTAssertFalse(isLit(aboveBar), "nothing above the bar until the pointer comes")
         let track = try trackEnds()
+        // Measuring the track pressed it, and the time stays over the
+        // pointer after a press until the pointer leaves.
+        let view = try dragView()
+        view.mouseExited(with: event(.mouseMoved, at: CGPoint(x: 300, y: Self.barY)))
+        pump()
+        XCTAssertFalse(isLit(aboveBar), "the time should go with the pointer")
         let x = track.left + (track.right - track.left) * 3 / 4
         // The bar's track is 16 high about barY, and the time floats
         // VideoBar.labelRise above that, centred on the pointer.
@@ -84,15 +92,15 @@ final class VideoBarTests: XCTestCase {
             x: x - VideoBar.labelSize.width / 2, y: Self.barY - 8 - VideoBar.labelRise - VideoBar.labelSize.height,
             width: VideoBar.labelSize.width, height: VideoBar.labelSize.height
         )
-        XCTAssertFalse(isLit(above))
-        let view = try dragView()
         view.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: x, y: Self.barY)))
         pump()
         XCTAssertTrue(isLit(above), "no time over the pointer")
+        // Only there: not where the press was.
+        XCTAssertFalse(isLit(CGRect(x: 0, y: 0, width: above.minX - 1, height: Self.barY - 10)))
         snapshot("video-bar-hovered")
         view.mouseExited(with: event(.mouseMoved, at: CGPoint(x: x, y: Self.barY)))
         pump()
-        XCTAssertFalse(isLit(above), "the time should go with the pointer")
+        XCTAssertFalse(isLit(aboveBar))
     }
 
     func testAVideoWithNoEndShowsNoTimeUnderThePointer() throws {
