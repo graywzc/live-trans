@@ -336,9 +336,17 @@ enum ChromeScript {
     /// Finds the page's main video, the largest one that has loaded, so a
     /// muted preview or an ad thumbnail isn't what gets paused. Evaluates to
     /// "none", or to "playing" / "paused" after running `action` on `v`.
+    ///
+    /// Frames are looked into as well, as many sites put their player in
+    /// one. Only a frame from the page's own site can be: another site's
+    /// has no document to read from here.
     static func javaScript(_ action: String) -> String {
         """
-        (() => { const v = [...document.querySelectorAll('video')]\
+        (() => { const all = d => { let found = [...d.querySelectorAll('video')];\
+         for (const f of d.querySelectorAll('iframe, frame')) {\
+         try { if (f.contentDocument) found = found.concat(all(f.contentDocument)); } catch (e) {} }\
+         return found; };\
+         const v = all(document)\
         .filter(e => e.readyState > 0)\
         .sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0];\
          if (!v) return 'none'; \(action) return v.paused ? 'paused' : 'playing'; })()
@@ -418,10 +426,12 @@ enum ChromeScript {
     /// of the viewer: "<clear|drm> <duration> <source> <manifest> <page>
     /// <user agent>", the texts percent-encoded. The source is empty for a
     /// player that assembles the stream itself (a blob:), and the manifest
-    /// is the last HLS or DASH playlist the page loaded, if any.
+    /// is the last HLS or DASH playlist the video's frame loaded, if any.
     static let mediaProbeJavaScript = javaScript(
         "const src = v.currentSrc || v.src || ''; "
-            + "const names = performance.getEntriesByType('resource').map(e => e.name); "
+            // The player's own frame is the one that loaded the playlist.
+            + "const names = (v.ownerDocument.defaultView || window).performance"
+            + ".getEntriesByType('resource').map(e => e.name); "
             + "const isManifest = n => { const p = n.split('?')[0].toLowerCase(); "
             + "return p.endsWith('.m3u8') || p.endsWith('.mpd'); }; "
             + "const manifest = names.filter(isManifest).pop() || ''; "
