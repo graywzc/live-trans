@@ -189,8 +189,9 @@ def decode_pcm(pcm_bytes):
 def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False):
     """task="transcribe" -> Japanese, task="translate" -> English.
 
-    `vad` runs Whisper's own voice filter (Silero) first, for audio that was
-    not cut by the Mac: music and silence between the lines are skipped.
+    `vad` runs Whisper's own voice filter (Silero) first: music and silence
+    between the lines are skipped, and a stretch with no speech in it gives
+    nothing, where Whisper alone invents a stock line over it.
 
     `prompt` is what was said just before the audio, given to Whisper as
     context: a name or a term it has seen is one it is likelier to hear.
@@ -1070,7 +1071,10 @@ class Handler(BaseHTTPRequestHandler):
             t0 = time.time()
             audio = decode_pcm(pcm)
             duration = audio.size / SAMPLE_RATE
-            ja, pairs, lines = transcribe_and_translate(audio, beam_size, prompt, want_translation)
+            # The Mac cuts utterances by loudness alone, so a piano or a music
+            # bed after a quiet stretch arrives here as one: Whisper's own
+            # voice filter drops it, where Whisper alone invents a line.
+            ja, pairs, lines = transcribe_and_translate(audio, beam_size, prompt, want_translation, vad=True)
             elapsed = time.time() - t0
             self._send(200, {
                 "ja": ja,
