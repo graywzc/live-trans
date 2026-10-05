@@ -62,7 +62,14 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "trash")
                 }
+                .help("Clear the captions")
             }
+            Button(role: .destructive) {
+                AppRelaunch.relaunch(engine: engine)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .help("Clear everything and restart")
             Text(AppVersion.display)
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.gray.opacity(0.7))
