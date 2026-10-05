@@ -912,8 +912,10 @@ struct VideoBar: View {
     @State private var pointer: CGFloat?
 
     static let thumb: CGFloat = 12
-    /// How far above the bar the pointer's time floats.
+    /// How far above the bar the pointer's time floats, and its size,
+    /// enough for "1:02:03" in the bar's font.
     static let labelRise: CGFloat = 12
+    static let labelSize = CGSize(width: 50, height: 16)
 
     var body: some View {
         let total = max(duration ?? 0, fetched?.upperBound ?? 0, playhead ?? 0, 1)
@@ -960,16 +962,15 @@ struct VideoBar: View {
                     // a press lands where it was meant to. Drawn where the
                     // pointer is, kept from running off either end.
                     if canSeek, let pointer {
+                        let half = Self.labelSize.width / 2
                         Text(CaptionRow.timestamp(Self.seconds(at: pointer, in: width, of: total)))
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
+                            .frame(width: Self.labelSize.width, height: Self.labelSize.height)
                             .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
-                            .fixedSize()
-                            .alignmentGuide(.leading) { label in
-                                min(max(label.width / 2 - pointer, -width + label.width), 0)
-                            }
-                            .alignmentGuide(.top) { label in label.height + Self.labelRise }
+                            .position(
+                                x: min(max(pointer, half), max(width - half, half)),
+                                y: -(Self.labelRise + Self.labelSize.height / 2)
+                            )
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
                     }

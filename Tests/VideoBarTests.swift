@@ -79,8 +79,11 @@ final class VideoBarTests: XCTestCase {
         let track = try trackEnds()
         let x = track.left + (track.right - track.left) * 3 / 4
         // The bar's track is 16 high about barY, and the time floats
-        // VideoBar.labelRise above that.
-        let above = CGRect(x: x - 24, y: Self.barY - 8 - VideoBar.labelRise - 16, width: 48, height: 16)
+        // VideoBar.labelRise above that, centred on the pointer.
+        let above = CGRect(
+            x: x - VideoBar.labelSize.width / 2, y: Self.barY - 8 - VideoBar.labelRise - VideoBar.labelSize.height,
+            width: VideoBar.labelSize.width, height: VideoBar.labelSize.height
+        )
         XCTAssertFalse(isLit(above))
         let view = try dragView()
         view.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: x, y: Self.barY)))
@@ -98,6 +101,7 @@ final class VideoBarTests: XCTestCase {
         view.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: 300, y: Self.barY)))
         pump()
         XCTAssertFalse(isLit(CGRect(x: 276, y: Self.barY - 8 - VideoBar.labelRise - 16, width: 48, height: 16)))
+        XCTAssertFalse(isLit(CGRect(x: 0, y: 0, width: Self.size.width, height: Self.barY - 10)), "nothing above the bar")
     }
 
     func testAVideoWithNoEndCannotBeDragged() {
