@@ -189,9 +189,14 @@ def decode_pcm(pcm_bytes):
 def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False):
     """task="transcribe" -> Japanese, task="translate" -> English.
 
-    `vad` runs Whisper's own voice filter (Silero) first: music and silence
-    between the lines are skipped, and a stretch with no speech in it gives
-    nothing, where Whisper alone invents a stock line over it.
+    `vad` finds the speech in the audio first (Silero), and Whisper is
+    given only those stretches, as clips: music and silence between the
+    lines are skipped, and a stretch with no speech in it gives nothing,
+    where Whisper alone invents a stock line over it. The clips are decoded
+    in place, pauses and all, not cut out and glued end to end as Whisper's
+    own voice filter would: glued, a grunt four seconds before a sentence
+    lands on its first word and changes it, and the word times are
+    stretched over the silence that was cut.
 
     `prompt` is what was said just before the audio, given to Whisper as
     context: a name or a term it has seen is one it is likelier to hear.
@@ -205,9 +210,14 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
     """
     if audio.size == 0:
         return []
+    clips = "0"
+    if vad:
+        clips = speech_clips(audio)
+        if not clips:
+            return []
     with _asr_lock:
         segments, _ = _asr.transcribe(
-            audio, language="ja", task=task, beam_size=beam_size, vad_filter=vad,
+            audio, language="ja", task=task, beam_size=beam_size, clip_timestamps=clips,
             initial_prompt=prompt or None, word_timestamps=words is not None,
         )
         texts = []
@@ -219,6 +229,19 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
             if words is not None:
                 words.extend((w.word, w.start, w.end) for w in (s.words or []))
         return texts
+
+
+def speech_clips(audio):
+    """Where the speech is in `audio`, as [start, end, start, end, ...] in
+    seconds, for Whisper's `clip_timestamps`; empty when there is none.
+    Silero's own defaults, as its filter in Whisper would use them: a pause
+    shorter than two seconds stays inside a clip."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    clips = []
+    for chunk in get_speech_timestamps(audio, VadOptions()):
+        clips += [chunk["start"] / SAMPLE_RATE, chunk["end"] / SAMPLE_RATE]
+    return clips
 
 
 def sentence_times(sentences, words):
