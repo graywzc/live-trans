@@ -251,7 +251,9 @@ captioned is passed over rather than done twice.
 
 A bar above the level meter shows where you are in the Chrome video, between
 the time and the video's length. Drag the orange dot, or press anywhere on
-the bar, to move the video; it moves when you let go. The bar is there
+the bar, to move the video; it moves when you let go. Rest the pointer on
+the bar and the time under it floats above, so a press lands where you
+meant it to. The bar is there
 whenever LiveTrans knows of a video in Chrome, captioning ahead or not. On
 it are the stretches captioned ahead (green, yellow while paused) and the
 audio fetched for the next (grey). Encrypted streams (most subscription services) cannot be fetched and

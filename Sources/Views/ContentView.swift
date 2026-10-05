@@ -908,8 +908,12 @@ struct VideoBar: View {
 
     /// Where the thumb is being dragged, until it is dropped.
     @State private var dragged: Double?
+    /// Where along the bar the pointer is, in points, while it is over it.
+    @State private var pointer: CGFloat?
 
     static let thumb: CGFloat = 12
+    /// How far above the bar the pointer's time floats.
+    static let labelRise: CGFloat = 12
 
     var body: some View {
         let total = max(duration ?? 0, fetched?.upperBound ?? 0, playhead ?? 0, 1)
@@ -947,8 +951,28 @@ struct VideoBar: View {
                         onDrop: {
                             onSeek?(Self.seconds(at: $0, in: width, of: total))
                             dragged = nil
-                        }
+                        },
+                        onHover: { pointer = $0 }
                     )
+                }
+                .overlay(alignment: .topLeading) {
+                    // The time under the pointer, floating above the bar, so
+                    // a press lands where it was meant to. Drawn where the
+                    // pointer is, kept from running off either end.
+                    if canSeek, let pointer {
+                        Text(CaptionRow.timestamp(Self.seconds(at: pointer, in: width, of: total)))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
+                            .fixedSize()
+                            .alignmentGuide(.leading) { label in
+                                min(max(label.width / 2 - pointer, -width + label.width), 0)
+                            }
+                            .alignmentGuide(.top) { label in label.height + Self.labelRise }
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
                 }
             }
             .frame(height: 16)
@@ -982,15 +1006,18 @@ struct VideoBar: View {
         return Double(min(max(x / width, 0), 1)) * total
     }
 
-    /// Presses and drags along the bar, told as x within it. An AppKit view:
+    /// Presses and drags along the bar, told as x within it, and the
+    /// pointer's place over it, or nil once it has left. An AppKit view:
     /// the bar is used while Chrome is the active app, where a SwiftUI
-    /// gesture would spend the press on activating the window, and a drag
-    /// that nothing takes moves the window.
-    private struct BarDrag: NSViewRepresentable {
+    /// gesture would spend the press on activating the window, a drag
+    /// that nothing takes moves the window, and SwiftUI's onHover only
+    /// reports in the active app.
+    struct BarDrag: NSViewRepresentable {
         var isEnabled: Bool
         var help: String
         var onMove: (CGFloat) -> Void
         var onDrop: (CGFloat) -> Void
+        var onHover: (CGFloat?) -> Void = { _ in }
 
         func makeNSView(context: Context) -> DragView {
             DragView()
@@ -1001,16 +1028,39 @@ struct VideoBar: View {
             view.toolTip = help
             view.onMove = onMove
             view.onDrop = onDrop
+            view.onHover = onHover
         }
 
         final class DragView: NSView {
             var isEnabled = false
             var onMove: (CGFloat) -> Void = { _ in }
             var onDrop: (CGFloat) -> Void = { _ in }
+            var onHover: (CGFloat?) -> Void = { _ in }
 
             override var mouseDownCanMoveWindow: Bool { !isEnabled }
 
             override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isEnabled }
+
+            override func updateTrackingAreas() {
+                super.updateTrackingAreas()
+                trackingAreas.forEach(removeTrackingArea)
+                addTrackingArea(NSTrackingArea(
+                    rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                    owner: self
+                ))
+            }
+
+            override func mouseEntered(with event: NSEvent) {
+                onHover(convert(event.locationInWindow, from: nil).x)
+            }
+
+            override func mouseMoved(with event: NSEvent) {
+                onHover(convert(event.locationInWindow, from: nil).x)
+            }
+
+            override func mouseExited(with event: NSEvent) {
+                onHover(nil)
+            }
 
             override func mouseDown(with event: NSEvent) {
                 guard isEnabled else { return super.mouseDown(with: event) }
@@ -1019,7 +1069,9 @@ struct VideoBar: View {
 
             override func mouseDragged(with event: NSEvent) {
                 guard isEnabled else { return super.mouseDragged(with: event) }
-                onMove(convert(event.locationInWindow, from: nil).x)
+                let x = convert(event.locationInWindow, from: nil).x
+                onMove(x)
+                onHover(x)
             }
 
             override func mouseUp(with event: NSEvent) {
