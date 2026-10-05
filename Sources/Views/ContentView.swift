@@ -80,7 +80,7 @@ struct ContentView: View {
     private var captionList: some View {
         CaptionList(
             captions: engine.captions, partialText: engine.partialText, fontSize: fontSize,
-            playingID: prefetch.playingCaptionID
+            playingID: prefetch.playingCaptionID, lull: prefetch.lull
         ) { caption in
             CaptionRow(
                 caption: caption, showFurigana: showFurigana, fontSize: fontSize,
@@ -667,7 +667,8 @@ struct CaptionRow: View {
         .padding(Self.highlightInset)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(isCurrent ? Color.green.opacity(0.16) : Color.white.opacity(isHovered && onSeek != nil ? 0.1 : 0))
+                .fill(isCurrent ? Color.green.opacity(0.3) : Color.white.opacity(isHovered && onSeek != nil ? 0.1 : 0))
+                .strokeBorder(Color.green.opacity(isCurrent ? 0.9 : 0), lineWidth: 1.5)
                 // Showing, a shape takes clicks; the row's must reach the
                 // tracker behind it.
                 .allowsHitTesting(false)

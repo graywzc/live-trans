@@ -227,7 +227,8 @@ from where you are in the video, not from its start, cuts
 it at silences into chunks of about a minute, and transcribes and translates
 each, so the captions are in place before the video gets there, with exact
 times. The whole script is listed as it arrives, the line being spoken is
-lit and kept in view. Pause, seek and replay as you like; the fetch never touches the
+lit and kept in view. Between sentences an orange line, with the video's time
+at its right end, sits after the last one spoken. Pause, seek and replay as you like; the fetch never touches the
 player. When you jump to a part it has not captioned and is not about to
 reach, it starts again from there, keeping the captions it has; a part you
 skipped over is captioned when you go back to it, and a stretch already

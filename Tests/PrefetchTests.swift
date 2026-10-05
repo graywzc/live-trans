@@ -21,15 +21,23 @@ final class PrefetchTests: XCTestCase {
         XCTAssertNil(Prefetcher.current(in: captions, at: 13, tabID: 1, url: "v"))
     }
 
-    func testBetweenSentencesTheVideoIsStillAtTheLastOne() {
+    func testBetweenSentencesTheVideoIsAfterTheLastOne() {
         let captions = [caption(0, 10, 12), caption(1, 12.5, 15), caption(2, 60, 62), caption(3, 30, 32, tab: 2)]
-        // A long pause in the talk leaves it on the sentence before ...
-        XCTAssertEqual(Prefetcher.nearest(in: captions, at: 40, tabID: 1, url: "u"), 1)
-        XCTAssertEqual(Prefetcher.nearest(in: captions, at: 300, tabID: 1, url: "u"), 2)
-        // ... and before anything is said, on the first one to come.
-        XCTAssertEqual(Prefetcher.nearest(in: captions, at: 5, tabID: 1, url: "u"), 0)
-        XCTAssertEqual(Prefetcher.nearest(in: captions, at: 40, tabID: 2, url: "u"), 3)
-        XCTAssertNil(Prefetcher.nearest(in: captions, at: 40, tabID: 1, url: "v"))
+        // A long pause in the talk leaves it after the sentence before ...
+        XCTAssertEqual(
+            Prefetcher.lull(in: captions, at: 40.7, tabID: 1, url: "u"), Lull(captionID: 1, isAfter: true, seconds: 40)
+        )
+        XCTAssertEqual(
+            Prefetcher.lull(in: captions, at: 300, tabID: 1, url: "u"), Lull(captionID: 2, isAfter: true, seconds: 300)
+        )
+        // ... and before anything is said, before the first one to come.
+        XCTAssertEqual(
+            Prefetcher.lull(in: captions, at: 5, tabID: 1, url: "u"), Lull(captionID: 0, isAfter: false, seconds: 5)
+        )
+        XCTAssertEqual(
+            Prefetcher.lull(in: captions, at: 40, tabID: 2, url: "u"), Lull(captionID: 3, isAfter: true, seconds: 40)
+        )
+        XCTAssertNil(Prefetcher.lull(in: captions, at: 40, tabID: 1, url: "v"))
     }
 
     @MainActor

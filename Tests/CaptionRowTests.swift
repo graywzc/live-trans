@@ -11,6 +11,7 @@ final class CaptionRowTests: XCTestCase {
         var selection: Range<Int>?
         var analyzed = 0
         var sought = 0
+        var isCurrent = false
     }
 
     struct Host: View {
@@ -25,7 +26,7 @@ final class CaptionRowTests: XCTestCase {
                 ),
                 showFurigana: true, fontSize: 20, isAnalyzed: false,
                 selection: $model.selection, onAnalyze: { model.analyzed += 1 },
-                onSeek: { model.sought += 1 }
+                onSeek: { model.sought += 1 }, isCurrent: model.isCurrent
             )
             .padding(16)
             .frame(width: 400, height: 140, alignment: .topLeading)
@@ -134,6 +135,23 @@ final class CaptionRowTests: XCTestCase {
         XCTAssertEqual(brightness(at: inside), 0, accuracy: 0.02)
     }
 
+    func testTheSentenceBeingSpokenStandsOut() throws {
+        _ = try hoverTracker()
+        let inside = CGPoint(x: 200, y: 70)
+        model.isCurrent = true
+        pump()
+        snapshot("row-current")
+        let fill = color(at: inside)
+        XCTAssertGreaterThan(fill.greenComponent, 0.2, "a green that can't be missed")
+        XCTAssertGreaterThan(fill.greenComponent, fill.redComponent * 2)
+        // Outlined too: the row's edge is 6 out from the text, which starts
+        // 16 in.
+        XCTAssertGreaterThan(color(at: CGPoint(x: 10.5, y: 70)).greenComponent, 0.6, "no outline")
+        model.isCurrent = false
+        pump()
+        XCTAssertEqual(brightness(at: inside), 0, accuracy: 0.02)
+    }
+
     /// Puts the pointer over the row, as it is when the row is clicked: the
     /// highlight is showing, and must not take the click.
     private func hover() throws {
@@ -144,13 +162,17 @@ final class CaptionRowTests: XCTestCase {
 
     /// How light the window is at a point: 0 for black, 1 for white.
     private func brightness(at point: CGPoint) -> CGFloat {
+        color(at: point).brightnessComponent
+    }
+
+    private func color(at point: CGPoint) -> NSColor {
         let view = window.contentView!
         let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
         view.cacheDisplay(in: view.bounds, to: rep)
         // The bitmap may be drawn at the screen's scale.
         let scale = CGFloat(rep.pixelsWide) / view.bounds.width
         let color = rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))!
-        return color.usingColorSpace(.deviceRGB)!.brightnessComponent
+        return color.usingColorSpace(.deviceRGB)!
     }
 
     /// The row's hover tracker, waited for: the hosting view may not have
