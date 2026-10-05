@@ -105,7 +105,9 @@ That is all: the app starts the server when you press Start and shuts it down
 when you stop or quit, so the GPU is only held while you are captioning.
 
 - **Clean stop or quit** - the app calls `/shutdown` and the GPU is free in
-  about a second.
+  about a second. The circular arrow in the header does the same and opens
+  the app again: a fresh start with nothing kept, for when a page's stream
+  link has gone stale or the window has got into a state.
 - **Crash, force-quit or a closed lid** - the app's heartbeat stops and the
   server exits on its own idle timeout (3 minutes).
 - **Network blip** - nothing dies. The app retries the utterance and, if the
