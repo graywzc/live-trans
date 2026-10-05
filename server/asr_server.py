@@ -280,6 +280,38 @@ def silences(audio):
     return [(a["end"] / SAMPLE_RATE, b["start"] / SAMPLE_RATE) for a, b in zip(speech, speech[1:])]
 
 
+# No word lasts across a silence this long: one that does was put astride
+# it by Whisper, and is taken back to the side it was said on.
+STRETCH_PAUSE = 1.0
+
+
+def unstretch(words, quiet):
+    """`words` with none lasting across a long stretch of `quiet` (the
+    silences in the audio). Whisper hears the audio with the silences cut
+    out, and a word at a cut can land on either side of it when its times
+    are put back: the first word of a sentence spoken after a pause gets
+    the end of the sentence before as its start, half a minute early, and
+    the last word before a pause can run on to the sentence after. A word
+    that starts in a long silence starts where it ends; one that ends in
+    one ends where it begins; one spanning it whole keeps the side more of
+    it is on."""
+    long = [(a, b) for a, b in quiet if b - a >= STRETCH_PAUSE]
+    result = []
+    for text, start, end in words:
+        for qa, qb in long:
+            if start < qa and end > qb:
+                if end - qb >= qa - start:
+                    start = qb
+                else:
+                    end = qa
+            elif qa <= start < qb < end:
+                start = qb
+            elif start < qa < end <= qb:
+                end = qa
+        result.append((text, start, end))
+    return result
+
+
 def pause_between(words, i, quiet):
     """How long the speaker paused between word i and the next: the longest
     quiet stretch centred between the start of the one and the end of the
@@ -621,6 +653,11 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
     `words`, a list, is filled with the words heard and their times."""
     words = [] if words is None else words
     segments = run_whisper(audio, beam_size=beam_size, prompt=prompt, words=words, vad=vad)
+    quiet = None
+    # Only a word this long can lie across a long silence.
+    if any(end - start >= STRETCH_PAUSE for _, start, end in words):
+        quiet = silences(audio)
+        words[:] = unstretch(words, quiet)
     ja = "".join(segments)
     pairs = [(ja, "")] if ja else []
     if want_translation and ja and not _is_untranslatable(ja):
@@ -643,7 +680,7 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
     if want_translation and (TRANSLATE_BACKEND == "nllb" or _ollama_ok):
         # What is still long after the LLM had its say: cut where the
         # speaker paused.
-        lines = split_at_pauses(lines, words, lambda: silences(audio), translate_text)
+        lines = split_at_pauses(lines, words, lambda: quiet if quiet is not None else silences(audio), translate_text)
         pairs = [(line["ja"], line["en"]) for line in lines]
     return ja, pairs, lines
 
