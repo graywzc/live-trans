@@ -215,7 +215,8 @@ server logs its requests (vLLM's `--enable-log-requests`) is up to its own
 configuration.
 
 When the sound is a video playing in Chrome, each caption notes where in the
-video its sentence was said, and shows the time. Click a caption to play its
+video its sentence was said, and shows when it starts and ends. Click a caption to
+play its
 sentence again from there; the video pauses when the sentence ends. What is
 When the video is one whose audio the GPU host can fetch (a plain file, an
 HLS or DASH stream, or a page yt-dlp knows), LiveTrans can caption it **ahead

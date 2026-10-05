@@ -643,7 +643,7 @@ struct CaptionRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if onSeek != nil, let moment = caption.moment {
-                Text(Self.timestamp(moment.seconds))
+                Text(Self.span(of: moment))
                     .font(.system(size: fontSize * 0.55).monospacedDigit())
                     .foregroundStyle(.gray)
                     // On the Japanese's baseline, below the row of readings.
@@ -678,6 +678,13 @@ struct CaptionRow: View {
     }
 
     static let highlightInset: CGFloat = 6
+
+    /// "4:05–4:09", from where the sentence starts to where it ends; the
+    /// start alone while the end is not known.
+    static func span(of moment: VideoMoment) -> String {
+        guard let end = moment.end else { return timestamp(moment.seconds) }
+        return "\(timestamp(moment.seconds))–\(timestamp(end))"
+    }
 
     /// "4:05", or "1:02:03" past the hour, as a player shows it.
     static func timestamp(_ seconds: Double) -> String {

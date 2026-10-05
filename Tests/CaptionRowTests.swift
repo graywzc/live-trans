@@ -79,6 +79,15 @@ final class CaptionRowTests: XCTestCase {
     // time and the button; its first line's base text is at y 28...48, the
     // English under the second at y 100...115, and the time at x 328...358.
 
+    func testTheTimeRunsFromTheStartToTheEnd() {
+        var moment = VideoMoment(tabID: 1, url: "https://example.tv/", seconds: 91.7)
+        XCTAssertEqual(CaptionRow.span(of: moment), "1:31")
+        moment.end = 93.2
+        XCTAssertEqual(CaptionRow.span(of: moment), "1:31–1:33")
+        moment.end = 3723
+        XCTAssertEqual(CaptionRow.span(of: moment), "1:31–1:02:03")
+    }
+
     func testClickingTheJapanesePlaysFromTheSentence() throws {
         try hover()
         snapshot("row-time")
