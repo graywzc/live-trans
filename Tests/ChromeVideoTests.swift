@@ -94,6 +94,41 @@ final class ChromeVideoTests: XCTestCase {
         XCTAssertFalse(ChromeScript.action(for: .seek(moment)).contains("timeupdate"))
     }
 
+    /// A player in a frame of the page's own site is found, and the playlist
+    /// is the one that frame loaded. Another site's frame is passed over.
+    func testFindsAVideoInsideAFrame() throws {
+        let context = try XCTUnwrap(JSContext())
+        context.evaluateScript("""
+            const doc = (videos, frames, view) => ({
+                defaultView: view,
+                querySelectorAll: q => q === 'video' ? videos : frames,
+            });
+            const entries = names => ({ performance: { getEntriesByType: () => names.map(name => ({ name })) } });
+            const inner = entries(['https://example.tv/player.js', 'https://cdn.example.tv/a/index.m3u8?t=1']);
+            const video = {
+                readyState: 4, clientWidth: 640, clientHeight: 360, paused: false, duration: 600,
+                currentSrc: 'blob:https://example.tv/1', mediaKeys: null,
+            };
+            video.ownerDocument = doc([video], [], inner);
+            const foreign = { get contentDocument() { throw new Error('blocked'); } };
+            const window = entries(['https://example.tv/page.css']);
+            const performance = window.performance;
+            const document = doc([], [{ contentDocument: null }, foreign, { contentDocument: video.ownerDocument }], window);
+            const location = { href: 'https://example.tv/watch' };
+            const navigator = { userAgent: 'Agent' };
+            """)
+        XCTAssertEqual(context.evaluateScript(ChromeScript.javaScript(""))?.toString(), "playing")
+        let result = try XCTUnwrap(context.evaluateScript(ChromeScript.mediaProbeJavaScript)?.toString())
+        XCTAssertNil(context.exception)
+        let probe = try XCTUnwrap(ChromeScript.mediaProbe(fromResult: result + "|7|Title"))
+        XCTAssertEqual(probe.manifest, "https://cdn.example.tv/a/index.m3u8?t=1")
+        XCTAssertEqual(probe.page, "https://example.tv/watch")
+        XCTAssertNil(probe.source)
+        // With no video anywhere, the frames change nothing.
+        context.evaluateScript("video.readyState = 0")
+        XCTAssertEqual(context.evaluateScript(ChromeScript.javaScript(""))?.toString(), "none")
+    }
+
     /// Playing one sentence pauses at its end, and only that once.
     func testPlayingASentenceStopsAtItsEnd() throws {
         let context = try XCTUnwrap(JSContext())
