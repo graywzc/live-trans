@@ -3,7 +3,9 @@ import SwiftUI
 /// The captions, kept on what is being said: the end, where live captions
 /// arrive, or the sentence a video captioned ahead has reached, whose later
 /// captions are already below it. Between sentences a splitter marks where
-/// the video is. Scrolled by hand the list stays where it
+/// the video is, and a gap long enough to hold a sentence that went
+/// unheard shows one under the pointer; each has a button that hears the
+/// gap again. Scrolled by hand the list stays where it
 /// was put, and a pill over its foot takes it back.
 struct CaptionList<Row: View>: View {
     let captions: [Caption]
@@ -14,6 +16,11 @@ struct CaptionList<Row: View>: View {
     let playingID: Int?
     /// Where the video is while none of them is being spoken.
     var lull: Lull? = nil
+    /// Hears the gap the video is in again, when there is one to hear.
+    var lullRehearing: (() -> Void)? = nil
+    /// Hears the gap under a caption again, for the captions whose gap can
+    /// be; nil for the others.
+    var gapRehearing: (Caption) -> (() -> Void)? = { _ in nil }
     @ViewBuilder let row: (Caption) -> Row
 
     @State private var isFollowing = true
@@ -41,16 +48,18 @@ struct CaptionList<Row: View>: View {
                         // Ahead of the first sentence there is no gap to
                         // draw it in, so it takes a place of its own.
                         if let lull, !lull.isAfter, lull.captionID == caption.id {
-                            PlayheadSplitter(seconds: lull.seconds, fontSize: fontSize)
+                            PlayheadSplitter(seconds: lull.seconds, fontSize: fontSize, onRehear: lullRehearing)
                         }
                         row(caption)
                             // In the gap under the row, so that the list
                             // doesn't shift each time the talk pauses.
                             .overlay(alignment: .bottom) {
-                                if let lull, lull.isAfter, lull.captionID == caption.id {
-                                    PlayheadSplitter(seconds: lull.seconds, fontSize: fontSize)
-                                        .offset(y: (Self.spacing + PlayheadSplitter.height) / 2)
-                                }
+                                GapBelow(
+                                    lull: lull.flatMap { $0.isAfter && $0.captionID == caption.id ? $0 : nil },
+                                    fontSize: fontSize, onRehearLull: lullRehearing, onRehear: gapRehearing(caption)
+                                )
+                                .frame(height: Self.spacing)
+                                .offset(y: Self.spacing)
                             }
                             .onAppear { onScreen.ids.insert(caption.id) }
                             .onDisappear { onScreen.ids.remove(caption.id) }
@@ -108,33 +117,116 @@ struct CaptionList<Row: View>: View {
     }
 }
 
+/// The gap under a row: the playhead splitter while the video is there,
+/// else, with the pointer in the gap and a sentence's worth of unheard
+/// video in it, a splitter offering to hear it again.
+private struct GapBelow: View {
+    /// The video's place, when it is in this gap.
+    let lull: Lull?
+    let fontSize: Double
+    let onRehearLull: (() -> Void)?
+    /// Hears the gap again; nil when there is nothing in it to hear.
+    let onRehear: (() -> Void)?
+
+    @State private var isHovered = false
+
+    var body: some View {
+        ZStack {
+            if let lull {
+                PlayheadSplitter(seconds: lull.seconds, fontSize: fontSize, onRehear: onRehearLull)
+            } else if isHovered, let onRehear {
+                GapSplitter(fontSize: fontSize, onRehear: onRehear)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background {
+            if onRehear != nil {
+                HoverTracker(isHovered: $isHovered)
+            }
+        }
+    }
+}
+
 /// Marks where the video is between two sentences: a line across the list,
-/// with the time at its right end.
+/// with the time at its right end, and after it, when the gap can be heard
+/// again, the button that does.
 struct PlayheadSplitter: View {
     let seconds: Int
     let fontSize: Double
+    var onRehear: (() -> Void)? = nil
 
     static let height: CGFloat = 14
     /// The colour of the video bar's thumb, which is the same place.
     static let color = Color.orange
 
     var body: some View {
-        HStack(spacing: 8) {
-            Capsule()
-                .fill(Self.color)
-                .frame(height: 2)
-            Text(CaptionRow.timestamp(Double(seconds)))
-                // The size of the rows' times, while that fits the gap.
-                .font(.system(size: min(fontSize * 0.55, 12), weight: .semibold).monospacedDigit())
-                .foregroundStyle(Self.color)
-        }
-        .frame(height: Self.height)
-        // Clicks go through it to the rows.
-        .allowsHitTesting(false)
-        .accessibilityElement()
-        .accessibilityLabel("Video is here")
-        .accessibilityValue(CaptionRow.timestamp(Double(seconds)))
+        SplitterLine(
+            label: CaptionRow.timestamp(Double(seconds)), color: Self.color, fontSize: fontSize, onRehear: onRehear
+        )
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Video is here")
+            .accessibilityValue(CaptionRow.timestamp(Double(seconds)))
     }
+}
+
+/// Offers the gap between two sentences to be heard again: a line across
+/// the list with the button at its right end. Shown under the pointer.
+struct GapSplitter: View {
+    let fontSize: Double
+    let onRehear: () -> Void
+
+    static let color = Color.gray
+
+    var body: some View {
+        SplitterLine(label: nil, color: Self.color, fontSize: fontSize, onRehear: onRehear)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Nothing captioned here")
+    }
+}
+
+/// A line across the list with, at its right end, a label and the button
+/// that hears the gap again.
+struct SplitterLine: View {
+    let label: String?
+    let color: Color
+    let fontSize: Double
+    let onRehear: (() -> Void)?
+
+    /// The size of the rows' times, while that fits the gap.
+    private var font: Font { .system(size: min(fontSize * 0.55, 12), weight: .semibold) }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Clicks go through the line and the time to the rows; only the
+            // button takes them.
+            Capsule()
+                .fill(color)
+                .frame(height: 2)
+                .allowsHitTesting(false)
+            if let label {
+                Text(label)
+                    .font(font.monospacedDigit())
+                    .foregroundStyle(color)
+                    .allowsHitTesting(false)
+            }
+            if let onRehear {
+                Button(action: onRehear) {
+                    Image(systemName: Self.symbol)
+                        .font(font)
+                        .foregroundStyle(color)
+                        .frame(width: Self.buttonWidth, height: PlayheadSplitter.height)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Hear this gap again, for a sentence that went uncaptioned")
+                .accessibilityLabel("Hear this gap again")
+            }
+        }
+        .frame(height: PlayheadSplitter.height)
+    }
+
+    static let symbol = "ear"
+    static let buttonWidth: CGFloat = 16
 }
 
 /// The captions whose rows are on screen. Only the pill reads it, so a row

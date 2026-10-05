@@ -117,12 +117,17 @@ struct ASRClient {
         return try Self.decode(PrefetchStatus.self, from: data, statusCode: response)
     }
 
-    /// The stretch heard again from the fetched audio.
-    func rehear(job: String, from start: Double, to end: Double) async throws -> [CaptionPair] {
+    /// The stretch heard again from the fetched audio. With `speechOnly`
+    /// the host's voice filter picks the speech out of it first, and music
+    /// or silence gives nothing rather than invented lines.
+    func rehear(job: String, from start: Double, to end: Double, speechOnly: Bool = false) async throws -> [CaptionPair] {
         var components = URLComponents(url: baseURL.appending(path: "prefetch/\(job)/rehear"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
             URLQueryItem(name: "from", value: String(start)), URLQueryItem(name: "to", value: String(end)),
         ]
+        if speechOnly {
+            components.queryItems?.append(URLQueryItem(name: "vad", value: "1"))
+        }
         var request = URLRequest(url: components.url!)
         request.httpMethod = "POST"
         request.timeoutInterval = 30

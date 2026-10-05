@@ -380,6 +380,53 @@ final class RehearingMergeTests: XCTestCase {
             for: Caption(id: 9, japanese: "あ", ruby: [], english: "", moment: nil), among: existing))
     }
 
+    /// The captions sit 437-440, 441-442 and 444-446. A gap is heard again
+    /// from the end of the sentence before it to the start of the one after,
+    /// when that is long enough to hold a sentence.
+    func testTheGapInTheCaptionsIsHeardAgainBetweenItsNeighbours() {
+        let fetched = [430.0...500.0]
+        let gap = { (at: Double) in
+            CaptionEngine.gapStretch(at: at, among: self.existing, tabID: 1, url: "u", within: fetched)
+        }
+        XCTAssertEqual(gap(443)?.from, 442)
+        XCTAssertEqual(gap(443)?.to, 444)
+        // A second's pause between sentences holds no sentence.
+        XCTAssertNil(gap(440.5))
+        // From inside a sentence it is the gap after it.
+        XCTAssertEqual(gap(441.5)?.from, 442)
+        XCTAssertEqual(gap(441.5)?.to, 444)
+        // Before the first caption and after the last, the fetched audio
+        // bounds it, and a long gap is heard around the place asked for.
+        XCTAssertEqual(gap(432)?.from, 430)
+        XCTAssertEqual(gap(432)?.to, 437)
+        XCTAssertEqual(gap(450)?.from, 446)
+        XCTAssertEqual(gap(450)?.to, 466)
+        XCTAssertEqual(gap(470)?.from, 460)
+        XCTAssertEqual(gap(470)?.to, 480)
+        XCTAssertEqual(gap(499)?.from, 480)
+        XCTAssertEqual(gap(499)?.to, 500)
+    }
+
+    func testTheGapHeardAgainIsKeptToTheAudioFetched() {
+        let gap = { (at: Double, fetched: [ClosedRange<Double>]) in
+            CaptionEngine.gapStretch(at: at, among: self.existing, tabID: 1, url: "u", within: fetched)
+        }
+        // Only part of the gap was fetched: that part, when it is enough.
+        XCTAssertEqual(gap(450, [400.0...452.0])?.from, 446)
+        XCTAssertEqual(gap(450, [400.0...452.0])?.to, 452)
+        XCTAssertEqual(gap(450, [449.0...500.0])?.from, 449)
+        XCTAssertEqual(gap(450, [449.0...500.0])?.to, 469)
+        XCTAssertNil(gap(443, [443.0...460.0]), "a second of the gap is not enough")
+        XCTAssertNil(gap(443, []))
+        // Of several stretches, the one holding most of the gap.
+        XCTAssertEqual(gap(450, [400.0...447.0, 448.0...460.0])?.from, 448)
+        XCTAssertEqual(gap(450, [400.0...447.0, 448.0...460.0])?.to, 460)
+        // Another page's captions are no neighbours.
+        let elsewhere = CaptionEngine.gapStretch(at: 443, among: existing, tabID: 1, url: "v", within: [430.0...450.0])
+        XCTAssertEqual(elsewhere?.from, 430)
+        XCTAssertEqual(elsewhere?.to, 450)
+    }
+
     func testASentenceMissedLiveLandsWhereItWasSaid() {
         let merged = CaptionEngine.merge([caption(9, "今", 440.2, 440.8)], into: existing, prompt: "")
         XCTAssertEqual(merged.map(\.id), [0, 9, 1, 2])

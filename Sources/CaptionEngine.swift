@@ -83,6 +83,12 @@ final class CaptionEngine {
     /// in two, or a half of one heard as a whole, is only heard right with
     /// the other half in the audio.
     static let rehearingNeighbourGap: TimeInterval = 1.0
+    /// A gap between captions this long or longer can hold a sentence that
+    /// went unheard, and is offered to be heard again.
+    static let rehearingGapMinimum: TimeInterval = 2.0
+    /// At most this much of a gap is heard again at once: a gap can be
+    /// minutes of music, over which Whisper is slow and invents lines.
+    static let rehearingGapLength: TimeInterval = 20.0
 
     private var session: ServerSession?
     private var source: AudioSource?
@@ -434,6 +440,39 @@ final class CaptionEngine {
             to = max(to, after.end!)
         }
         return (from, to)
+    }
+
+    /// The stretch of a page's video to hear again for the gap in its
+    /// captions at `seconds`: from the end of the last caption that starts
+    /// by then to the start of the first after it, or the edge of the
+    /// fetched audio where there is no caption. Of the `fetched` stretches
+    /// it is kept to the one that holds most of the gap, and to
+    /// `rehearingGapLength`, around `seconds`. Nil when what is left is
+    /// shorter than `rehearingGapMinimum`.
+    nonisolated static func gapStretch(
+        at seconds: Double, among captions: [Caption], tabID: Int, url: String, within fetched: [ClosedRange<Double>]
+    ) -> (from: Double, to: Double)? {
+        var before: VideoMoment?
+        var after: VideoMoment?
+        for caption in captions {
+            guard let moment = caption.moment, moment.tabID == tabID, moment.url == url else { continue }
+            if moment.seconds <= seconds {
+                if before.map({ $0.seconds <= moment.seconds }) ?? true { before = moment }
+            } else if after.map({ moment.seconds < $0.seconds }) ?? true {
+                after = moment
+            }
+        }
+        let gaps = fetched.map { stretch -> (from: Double, to: Double) in
+            (max(before.map { $0.end ?? $0.seconds } ?? stretch.lowerBound, stretch.lowerBound),
+             min(after?.seconds ?? stretch.upperBound, stretch.upperBound))
+        }
+        guard let longest = gaps.max(by: { $0.to - $0.from < $1.to - $1.from }),
+              longest.to - longest.from >= rehearingGapMinimum
+        else { return nil }
+        let (from, to) = longest
+        guard to - from > rehearingGapLength else { return (from, to) }
+        let start = min(max(seconds - rehearingGapLength / 2, from), to - rehearingGapLength)
+        return (start, start + rehearingGapLength)
     }
 
     /// Whether `spoken` seconds heard from `moment` are of a stretch of the

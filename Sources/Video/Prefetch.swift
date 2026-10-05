@@ -207,6 +207,47 @@ final class Prefetcher {
         }
     }
 
+    /// Hears the gap in the captions at `seconds` of a page's video again
+    /// from the fetched audio, for a sentence that went unheard there, as
+    /// the action to do so; what comes back goes among the captions. Only
+    /// the speech in it is given to Whisper, which over music invents
+    /// lines. Nil when the gap is too short to hold a sentence, or its
+    /// audio was never fetched.
+    func gapRehearing(at seconds: Double, tabID: Int, url: String) -> (() -> Void)? {
+        guard let finishedIn, tabID == finishedIn.tabID, url == finishedIn.page, let client = engine.client,
+              let gap = CaptionEngine.gapStretch(
+                  at: seconds, among: engine.captions, tabID: tabID, url: url,
+                  within: stretches.map { $0.from...$0.to }
+              ),
+              let stretch = stretches.first(where: { $0.holds((gap.from + gap.to) / 2) })
+        else { return nil }
+        let engine = self.engine
+        return {
+            Task {
+                do {
+                    let lines = try await client.rehear(job: stretch.job, from: gap.from, to: gap.to, speechOnly: true)
+                    engine.add(lines, tabID: tabID, url: url, heardAgain: true)
+                } catch {
+                    print("gap rehear failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// The gap under `caption`, before the one after it, heard again: the
+    /// action, or nil when there is nothing there to hear.
+    func gapRehearing(after caption: Caption) -> (() -> Void)? {
+        guard let moment = caption.moment, let end = moment.end else { return nil }
+        return gapRehearing(at: end, tabID: moment.tabID, url: moment.url)
+    }
+
+    /// The gap the video is in, heard again: the action, or nil when there
+    /// is nothing there to hear.
+    var lullRehearing: (() -> Void)? {
+        guard let lull, let playhead else { return nil }
+        return gapRehearing(at: Double(lull.seconds), tabID: playhead.tabID, url: playhead.url)
+    }
+
     /// Every stretch captioned ahead: the job's own first, then those of
     /// the jobs before it.
     private var stretches: [Stretch] {
