@@ -342,8 +342,42 @@ final class RehearingMergeTests: XCTestCase {
     func testTheContextGivenBackOrSomethingElseKeepsTheCaption() {
         let echo = CaptionEngine.merge([caption(9, "駅まで歩いたのに", 441, 442)], into: existing, prompt: "駅まで歩いたのに")
         XCTAssertEqual(echo.map(\.id), [0, 1, 2])
-        let other = CaptionEngine.merge([caption(9, "ご視聴ありがとうございました", 441, 442)], into: existing, prompt: "")
+        let other = CaptionEngine.merge([caption(9, "ご視聴ありがとうございました", 441.2, 441.9)], into: existing, prompt: "")
         XCTAssertEqual(other.map(\.id), [0, 1, 2])
+    }
+
+    /// A caption wrong from the start resembles nothing it should have
+    /// been: heard over the whole of its stretch, what was heard wins.
+    func testHeardOverTheWholeCaptionTakesItsPlaceHoweverDifferent() {
+        let merged = CaptionEngine.merge([caption(9, "ではまた明日", 441, 442)], into: existing, prompt: "")
+        XCTAssertEqual(merged.map(\.japanese), ["駅まで歩いたのに", "ではまた明日", "やっぱり今日休みなのかな"])
+        let echo = CaptionEngine.merge([caption(9, "ではまた明日", 441, 442)], into: existing, prompt: "ではまた明日")
+        XCTAssertEqual(echo.map(\.id), [0, 1, 2])
+    }
+
+    /// Two halves of one sentence, each captioned as the whole: heard
+    /// together they come back as one line over both, and replace both.
+    func testOneLineHeardOverTwoWrongHalvesReplacesBoth() {
+        let halves = [caption(3, "よし決定", 434, 437), caption(4, "よし決定", 437, 440)]
+        let merged = CaptionEngine.merge([caption(9, "じゃあこれで決定", 434.2, 439.8)], into: halves, prompt: "")
+        XCTAssertEqual(merged.map(\.japanese), ["じゃあこれで決定"])
+    }
+
+    func testTheStretchHeardAgainTakesInTheNeighboursThatFollowOn() {
+        // The three captions sit 437-440, 441-442 and 444-446: the first two
+        // follow on within a second, the third does not.
+        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[1], among: existing)?.from, 437)
+        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[1], among: existing)?.to, 442)
+        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[0], among: existing)?.from, 437)
+        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[0], among: existing)?.to, 442)
+        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[2], among: existing)?.from, 444)
+        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[2], among: existing)?.to, 446)
+        // Another page's captions are not neighbours, and a caption with no
+        // place has no stretch.
+        let elsewhere = [caption(5, "はい", 440.5, 441, url: "v")] + existing
+        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[1], among: elsewhere)?.from, 437)
+        XCTAssertNil(CaptionEngine.rehearingStretch(
+            for: Caption(id: 9, japanese: "あ", ruby: [], english: "", moment: nil), among: existing))
     }
 
     func testASentenceMissedLiveLandsWhereItWasSaid() {
