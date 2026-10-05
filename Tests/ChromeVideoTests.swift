@@ -57,17 +57,21 @@ final class ChromeVideoTests: XCTestCase {
         let encoded = try XCTUnwrap(url.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
         let wall = Date(timeIntervalSince1970: 1_000)
         // Answered 0.4 s after the sentence started, at double speed.
-        let moment = try XCTUnwrap(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 \(encoded)|567|Video | 12", at: wall))
+        let moment = try XCTUnwrap(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 600 \(encoded)|567|Video | 12", at: wall))
         XCTAssertEqual(moment.seconds, 100, accuracy: 0.001)
-        XCTAssertEqual(moment, VideoMoment(tabID: 567, url: url, seconds: moment.seconds, rate: 2, playing: true))
+        XCTAssertEqual(
+            moment, VideoMoment(tabID: 567, url: url, seconds: moment.seconds, rate: 2, playing: true, duration: 600)
+        )
         // A paused video hasn't moved meanwhile.
         XCTAssertEqual(
-            ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 \(encoded)|567|Video", at: wall)?.seconds,
+            ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 0 \(encoded)|567|Video", at: wall)?.seconds,
             100.8
         )
+        // A video with no end has no duration.
+        XCTAssertNil(ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 0 \(encoded)|567|E", at: wall)?.duration)
         XCTAssertNil(ChromeScript.moment(fromResult: "none", at: wall))
-        XCTAssertEqual(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 \(encoded)|567|E", at: wall)?.playing, true)
-        XCTAssertEqual(ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 \(encoded)|567|E", at: wall)?.playing, false)
+        XCTAssertEqual(ChromeScript.moment(fromResult: "playing 100.8 1000.4 2 0 \(encoded)|567|E", at: wall)?.playing, true)
+        XCTAssertEqual(ChromeScript.moment(fromResult: "paused 100.8 1000.4 1 0 \(encoded)|567|E", at: wall)?.playing, false)
         XCTAssertNil(ChromeScript.moment(fromResult: "gone", at: wall))
         XCTAssertEqual(ChromeScript.outcome(fromResult: "moved|567|Video"), .moved)
     }
@@ -78,6 +82,7 @@ final class ChromeVideoTests: XCTestCase {
         for script in [
             ChromeScript.momentJavaScript, ChromeScript.mediaProbeJavaScript,
             ChromeScript.javaScript(ChromeScript.action(for: .seek(moment))),
+            ChromeScript.javaScript(ChromeScript.action(for: .scrub(to: 754.25))),
         ] {
             // Parsed but not run: there is no document here.
             context.exception = nil
@@ -143,6 +148,48 @@ final class ChromeVideoTests: XCTestCase {
         XCTAssertEqual(context.evaluateScript("log.join()").toString(), "pause,play")
     }
 
+    /// Dropping the bar's thumb moves the video and leaves it playing or
+    /// paused as it was, without a sound from where it had been.
+    func testScrubbingKeepsTheVideoPlayingOrPaused() throws {
+        let context = try XCTUnwrap(JSContext())
+        context.evaluateScript("""
+            const listeners = []; const log = []; let onSeeked = null;
+            const v = {
+                _t: 30, paused: false, playbackRate: 1, seeking: false, duration: 600,
+                play() { this.paused = false; log.push('play'); }, pause() { this.paused = true; log.push('pause'); },
+                addEventListener(name, f) { if (name === 'seeked') { onSeeked = f; } else { listeners.push(f); } },
+                removeEventListener(_, f) { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); },
+            };
+            Object.defineProperty(v, 'currentTime', { get() { return this._t; }, set(t) { this._t = t; this.seeking = true; } });
+            const location = { href: 'u' };
+            """)
+        func scrub(to seconds: Double) -> String? {
+            context.evaluateScript("(() => { \(ChromeScript.action(for: .scrub(to: seconds))) })();")?.toString()
+        }
+        XCTAssertEqual(scrub(to: 240), "playing")
+        XCTAssertNil(context.exception)
+        XCTAssertEqual(context.evaluateScript("v.currentTime").toDouble(), 240)
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "pause")
+        context.evaluateScript("v.seeking = false; onSeeked();")
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "pause,play")
+        // A paused video stays paused, and the thumb can't leave the video.
+        context.evaluateScript("v.pause(); log.length = 0; onSeeked = null;")
+        XCTAssertEqual(scrub(to: 9_000), "paused")
+        XCTAssertEqual(context.evaluateScript("v.currentTime").toDouble(), 600)
+        XCTAssertEqual(scrub(to: -4), "paused")
+        XCTAssertEqual(context.evaluateScript("v.currentTime").toDouble(), 0)
+        XCTAssertEqual(context.evaluateScript("log.join()").toString(), "pause,pause")
+        XCTAssertTrue(context.evaluateScript("onSeeked === null").toBool())
+        // A sentence that was to stop at its end is let go, so landing past
+        // it doesn't pause the video.
+        let moment = VideoMoment(tabID: 1, url: "u", seconds: 10, end: 14)
+        context.evaluateScript("(() => { \(ChromeScript.action(for: .seek(moment))) })(); v.seeking = false; onSeeked();")
+        XCTAssertEqual(context.evaluateScript("listeners.length").toInt32(), 1)
+        XCTAssertEqual(scrub(to: 300), "playing")
+        XCTAssertEqual(context.evaluateScript("listeners.length").toInt32(), 0)
+        XCTAssertTrue(context.evaluateScript("v.liveTransStop === null").toBool())
+    }
+
     func testScriptsCompile() throws {
         var sources = [
             ChromeScript.listSource, ChromeScript.probeSource(tab: 1_173_479_941),
@@ -150,7 +197,7 @@ final class ChromeVideoTests: XCTestCase {
             ChromeScript.source(running: ChromeScript.mediaProbeJavaScript, pinned: 1_173_479_941, preferring: nil),
         ]
         let moment = VideoMoment(tabID: 1_173_479_941, url: "https://example.tv/?a=\"b\"", seconds: 3)
-        for command: ChromeVideo.Command in [.toggle, .skip(seconds: -5), .skip(seconds: 5), .seek(moment)] {
+        for command: ChromeVideo.Command in [.toggle, .skip(seconds: -5), .skip(seconds: 5), .seek(moment), .scrub(to: 754.25)] {
             sources.append(ChromeScript.source(for: command, pinned: nil, preferring: nil))
             sources.append(ChromeScript.source(for: command, pinned: nil, preferring: 1_173_479_941))
             sources.append(ChromeScript.source(for: command, pinned: 1_173_479_941, preferring: 1_173_479_941))

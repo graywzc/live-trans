@@ -56,7 +56,10 @@ struct ContentView: View {
             OutputPicker()
             VideoControls()
             if !engine.captions.isEmpty {
-                Button(role: .destructive, action: engine.clear) {
+                Button(role: .destructive) {
+                    engine.clear()
+                    prefetch.forget()
+                } label: {
                     Image(systemName: "trash")
                 }
             }
@@ -151,32 +154,33 @@ struct ContentView: View {
 
     private var footer: some View {
         VStack(spacing: 12) {
-            if engine.isRunning && engine.serverCanPrefetch && prefetchVideo {
+            let canCaptionAhead = engine.isRunning && engine.serverCanPrefetch && prefetchVideo
+            if canCaptionAhead || prefetch.playhead != nil {
                 HStack(spacing: 10) {
-                    Button {
-                        prefetch.toggle()
-                    } label: {
-                        Label(
-                            prefetch.isPaused ? "Caption ahead" : "Pause",
-                            systemImage: prefetch.isPaused ? "forward.fill" : "pause.fill"
+                    if canCaptionAhead {
+                        Button {
+                            prefetch.toggle()
+                        } label: {
+                            Label(
+                                prefetch.isPaused ? "Caption ahead" : "Pause",
+                                systemImage: prefetch.isPaused ? "forward.fill" : "pause.fill"
+                            )
+                            .frame(minWidth: 104)
+                        }
+                        .controlSize(.small)
+                        .help(
+                            prefetch.isPaused
+                                ? "Fetch the Chrome video's audio from where you are and caption it before you get there"
+                                : "Stop captioning ahead; what is fetched stays"
                         )
-                        .frame(minWidth: 104)
                     }
-                    .controlSize(.small)
-                    .help(
-                        prefetch.isPaused
-                            ? "Fetch the Chrome video's audio ahead and caption it before you get there"
-                            : "Stop captioning ahead; what is fetched stays"
-                    )
-                    if let job = prefetch.job {
-                        PrefetchBar(
-                            duration: job.duration, fetched: job.fetched, ready: job.ready,
-                            playhead: prefetch.playhead.map { playhead in
-                                playhead.playing
-                                    ? playhead.advanced(by: Date().timeIntervalSince(prefetch.playheadAt)).seconds
-                                    : playhead.seconds
-                            },
-                            isPaused: prefetch.isPaused
+                    if let playhead = prefetch.playhead {
+                        VideoBar(
+                            duration: prefetch.job?.duration ?? playhead.duration,
+                            playhead: prefetch.position,
+                            captioned: prefetch.captioned, fetched: prefetch.fetchedAhead,
+                            isPaused: prefetch.isPaused,
+                            onSeek: { prefetch.scrub(to: $0) }
                         )
                     } else {
                         Spacer()
@@ -872,37 +876,83 @@ private struct WindowLevel: NSViewRepresentable {
     }
 }
 
-/// How far the video's captions have been fetched ahead: the audio fetched,
-/// the stretch captioned, and where the viewer is.
-struct PrefetchBar: View {
+/// The Chrome video's timeline: where the viewer is, with a thumb to drag
+/// the video elsewhere, and on it the stretches captioned ahead and the
+/// audio fetched for the next.
+struct VideoBar: View {
     let duration: Double?
-    let fetched: Double
-    let ready: Double
     let playhead: Double?
+    var captioned: [ClosedRange<Double>] = []
+    var fetched: ClosedRange<Double>?
     var isPaused = false
+    /// Called with where the thumb was dropped. The video only moves then:
+    /// following the drag would play a moment of each place it passed, and
+    /// the captions would hear them as sentences.
+    var onSeek: ((Double) -> Void)?
+
+    /// Where the thumb is being dragged, until it is dropped.
+    @State private var dragged: Double?
+
+    static let thumb: CGFloat = 12
 
     var body: some View {
-        let total = max(duration ?? 0, fetched, playhead ?? 0, 1)
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.12))
-                Capsule()
-                    .fill(Color.white.opacity(0.3))
-                    .frame(width: geometry.size.width * Self.fraction(fetched, of: total))
-                Capsule()
-                    .fill((isPaused ? Color.yellow : Color.green).opacity(0.7))
-                    .frame(width: geometry.size.width * Self.fraction(ready, of: total))
-                if let playhead {
-                    Rectangle()
-                        .fill(Color.orange)
-                        .frame(width: 2)
-                        .offset(x: geometry.size.width * Self.fraction(playhead, of: total) - 1)
+        let total = max(duration ?? 0, fetched?.upperBound ?? 0, playhead ?? 0, 1)
+        // A video with no end can't be moved about in.
+        let canSeek = onSeek != nil && duration != nil
+        HStack(spacing: 8) {
+            Text(CaptionRow.timestamp(dragged ?? playhead ?? 0))
+                .foregroundStyle(dragged == nil ? Color.gray : Color.orange)
+            GeometryReader { geometry in
+                let width = geometry.size.width
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.12))
+                        .frame(height: 6)
+                    if let fetched {
+                        stretch(fetched, of: total, in: width, color: Color.white.opacity(0.3))
+                    }
+                    ForEach(Array(captioned.enumerated()), id: \.offset) { _, range in
+                        stretch(range, of: total, in: width, color: (isPaused ? Color.yellow : Color.green).opacity(0.7))
+                    }
+                    if let at = dragged ?? playhead {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: Self.thumb, height: Self.thumb)
+                            .offset(x: width * Self.fraction(at, of: total) - Self.thumb / 2)
+                    }
+                }
+                .frame(maxHeight: .infinity)
+                .overlay {
+                    BarDrag(
+                        isEnabled: canSeek,
+                        help: Self.summary(
+                            duration: duration, fetched: fetched?.upperBound, ready: captioned.map(\.upperBound).max()
+                        ),
+                        onMove: { dragged = Self.seconds(at: $0, in: width, of: total) },
+                        onDrop: {
+                            onSeek?(Self.seconds(at: $0, in: width, of: total))
+                            dragged = nil
+                        }
+                    )
                 }
             }
+            .frame(height: 16)
+            Text(duration.map(CaptionRow.timestamp) ?? "live")
+                .foregroundStyle(.gray)
         }
-        .frame(height: 6)
-        .help(Self.summary(duration: duration, fetched: fetched, ready: ready))
-        .accessibilityLabel(Self.summary(duration: duration, fetched: fetched, ready: ready))
+        .font(.caption.monospacedDigit())
+        .accessibilityElement()
+        .accessibilityLabel("Video position")
+        .accessibilityValue(
+            CaptionRow.timestamp(playhead ?? 0) + (duration.map { " of \(CaptionRow.timestamp($0))" } ?? "")
+        )
+    }
+
+    private func stretch(_ range: ClosedRange<Double>, of total: Double, in width: CGFloat, color: Color) -> some View {
+        let from = Self.fraction(range.lowerBound, of: total)
+        return Capsule()
+            .fill(color)
+            .frame(width: width * (Self.fraction(range.upperBound, of: total) - from), height: 6)
+            .offset(x: width * from)
     }
 
     static func fraction(_ seconds: Double, of total: Double) -> CGFloat {
@@ -910,8 +960,65 @@ struct PrefetchBar: View {
         return CGFloat(min(max(seconds / total, 0), 1))
     }
 
-    static func summary(duration: Double?, fetched: Double, ready: Double) -> String {
+    /// The place in the video under `x` of a bar `width` wide.
+    static func seconds(at x: CGFloat, in width: CGFloat, of total: Double) -> Double {
+        guard width > 0 else { return 0 }
+        return Double(min(max(x / width, 0), 1)) * total
+    }
+
+    /// Presses and drags along the bar, told as x within it. An AppKit view:
+    /// the bar is used while Chrome is the active app, where a SwiftUI
+    /// gesture would spend the press on activating the window, and a drag
+    /// that nothing takes moves the window.
+    private struct BarDrag: NSViewRepresentable {
+        var isEnabled: Bool
+        var help: String
+        var onMove: (CGFloat) -> Void
+        var onDrop: (CGFloat) -> Void
+
+        func makeNSView(context: Context) -> DragView {
+            DragView()
+        }
+
+        func updateNSView(_ view: DragView, context: Context) {
+            view.isEnabled = isEnabled
+            view.toolTip = help
+            view.onMove = onMove
+            view.onDrop = onDrop
+        }
+
+        final class DragView: NSView {
+            var isEnabled = false
+            var onMove: (CGFloat) -> Void = { _ in }
+            var onDrop: (CGFloat) -> Void = { _ in }
+
+            override var mouseDownCanMoveWindow: Bool { !isEnabled }
+
+            override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isEnabled }
+
+            override func mouseDown(with event: NSEvent) {
+                guard isEnabled else { return super.mouseDown(with: event) }
+                onMove(convert(event.locationInWindow, from: nil).x)
+            }
+
+            override func mouseDragged(with event: NSEvent) {
+                guard isEnabled else { return super.mouseDragged(with: event) }
+                onMove(convert(event.locationInWindow, from: nil).x)
+            }
+
+            override func mouseUp(with event: NSEvent) {
+                guard isEnabled else { return super.mouseUp(with: event) }
+                onDrop(convert(event.locationInWindow, from: nil).x)
+            }
+        }
+    }
+
+    /// What the bar says of captioning ahead, or how to use it when there
+    /// is none.
+    static func summary(duration: Double?, fetched: Double?, ready: Double?) -> String {
+        guard fetched != nil || ready != nil else { return "Drag to move the Chrome video" }
         let whole = duration.map { " of \(CaptionRow.timestamp($0))" } ?? ""
-        return "Captions ready to \(CaptionRow.timestamp(ready)), audio fetched to \(CaptionRow.timestamp(fetched))\(whole)"
+        return "Captions ready to \(CaptionRow.timestamp(ready ?? 0)), "
+            + "audio fetched to \(CaptionRow.timestamp(fetched ?? ready ?? 0))\(whole)"
     }
 }

@@ -21,6 +21,9 @@ struct PrefetchStatus: Decodable, Equatable {
     var state: String
     var error: String?
     var duration: Double?
+    /// Where in the video the job began. A server that can only begin at
+    /// the top doesn't say.
+    var start: Double?
     var fetched: Double
     var ready: Double
     var count: Int
@@ -86,13 +89,16 @@ struct ASRClient {
         )
     }
 
-    /// Start fetching a video's audio ahead of the viewer. Returns the job.
-    func startPrefetch(url: String?, page: String, headers: [String: String], duration: Double?) async throws -> String {
+    /// Start fetching a video's audio from `start` seconds in, ahead of the
+    /// viewer. Returns the job.
+    func startPrefetch(
+        url: String?, page: String, headers: [String: String], duration: Double?, start: Double = 0
+    ) async throws -> String {
         var request = URLRequest(url: baseURL.appending(path: "prefetch"))
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var body: [String: Any] = ["url": url ?? "", "page": page, "headers": headers]
+        var body: [String: Any] = ["url": url ?? "", "page": page, "headers": headers, "start": start]
         if let duration { body["duration"] = duration }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)
