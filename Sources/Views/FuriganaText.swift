@@ -63,6 +63,7 @@ struct FuriganaText: View {
                     onDown: { point, clicks in pointerDown(at: point, clicks: clicks, map: map) },
                     onDrag: { point in pointerDragged(to: point, map: map) },
                     onClick: onClick.map { onClick in { if !dismissedSelection { onClick() } } },
+                    selectedText: selection.map { map.text(in: $0) },
                     onResign: {
                         anchor = nil
                         if selection != nil { selection = nil }
@@ -118,6 +119,11 @@ struct FuriganaText: View {
 struct SelectedText {
     let text: String
     let bounds: Anchor<CGRect>
+
+    static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
 
     struct Key: PreferenceKey {
         static let defaultValue: SelectedText? = nil
@@ -202,8 +208,7 @@ private struct SelectionActions: View {
             Divider()
                 .frame(height: 12)
             Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+                SelectedText.copy(text)
             } label: {
                 Image(systemName: "doc.on.doc")
                     .contentShape(Rectangle())
@@ -230,6 +235,8 @@ private struct PointerTracker: NSViewRepresentable {
     let onDrag: (CGPoint) -> Void
     /// A plain click, told after the double-click interval.
     let onClick: (() -> Void)?
+    /// What ⌘C copies.
+    let selectedText: String?
     /// Something else in the window was clicked: other text, a text field.
     let onResign: () -> Void
 
@@ -241,12 +248,14 @@ private struct PointerTracker: NSViewRepresentable {
         view.onDown = onDown
         view.onDrag = onDrag
         view.click.onClick = onClick ?? {}
+        view.selectedText = selectedText
         view.onResign = onResign
     }
 
-    final class TrackerView: NSView {
+    final class TrackerView: NSView, NSMenuItemValidation {
         var onDown: (CGPoint, Int) -> Void = { _, _ in }
         var onDrag: (CGPoint) -> Void = { _ in }
+        var selectedText: String?
         var onResign: () -> Void = {}
         let click = SingleClick()
 
@@ -266,6 +275,17 @@ private struct PointerTracker: NSViewRepresentable {
         override func resignFirstResponder() -> Bool {
             onResign()
             return true
+        }
+
+        // ⌘C and Edit > Copy come down the responder chain to the text
+        // clicked last, as they do to a SelectableText's text view.
+        @objc func copy(_ sender: Any?) {
+            guard let selectedText else { return }
+            SelectedText.copy(selectedText)
+        }
+
+        func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+            menuItem.action != #selector(copy(_:)) || selectedText != nil
         }
 
         override func mouseDown(with event: NSEvent) {
