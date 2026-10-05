@@ -94,6 +94,31 @@ final class ChromeVideoTests: XCTestCase {
         XCTAssertFalse(ChromeScript.action(for: .seek(moment)).contains("timeupdate"))
     }
 
+    /// A seek doesn't reach back into the sentence before: the lead stops
+    /// where that one ends, when it ends short of this one.
+    func testSeekLeadStopsAtTheSentenceBefore() {
+        let url = "https://example.tv/watch"
+        let sentence = VideoMoment(tabID: 1, url: url, seconds: 12.5, end: 14)
+        let near = VideoMoment(tabID: 1, url: url, seconds: 11.8, end: 12.3)
+        let far = VideoMoment(tabID: 1, url: url, seconds: 9, end: 10.5)
+        let abutting = VideoMoment(tabID: 1, url: url, seconds: 11, end: 12.5)
+        let elsewhere = VideoMoment(tabID: 2, url: url, seconds: 11.8, end: 12.4)
+        let later = VideoMoment(tabID: 1, url: url, seconds: 14.2, end: 15)
+
+        XCTAssertEqual(sentence.keptClear(of: [far, near, sentence, later, elsewhere]).floor, 12.3)
+        XCTAssertEqual(sentence.keptClear(of: [far, sentence]).floor, 10.5)
+        XCTAssertNil(sentence.keptClear(of: [abutting, sentence, later, elsewhere]).floor)
+
+        let from: (VideoMoment) -> String = { moment in
+            let action = ChromeScript.action(for: .seek(moment))
+            let start = action.range(of: "const from = ")!.upperBound
+            return String(action[start..<action[start...].firstIndex(of: ";")!])
+        }
+        XCTAssertEqual(from(sentence.keptClear(of: [far, near])), "Math.max(12.3, 0)")
+        XCTAssertEqual(from(sentence.keptClear(of: [far])), "Math.max(12.0, 0)")
+        XCTAssertEqual(from(sentence.keptClear(of: [abutting])), "Math.max(12.0, 0)")
+    }
+
     /// A player in a frame of the page's own site is found, and the playlist
     /// is the one that frame loaded. Another site's frame is passed over.
     func testFindsAVideoInsideAFrame() throws {

@@ -104,7 +104,7 @@ struct ContentView: View {
     /// the fetched audio, which corrects it; a live one is heard again
     /// through the speakers as it plays.
     private func replay(_ caption: Caption, at moment: VideoMoment) {
-        video.send(.seek(moment))
+        video.send(.seek(moment.keptClear(of: engine.captions.compactMap(\.moment))))
         prefetch.rehear(caption)
     }
 

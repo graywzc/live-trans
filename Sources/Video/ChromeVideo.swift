@@ -282,6 +282,22 @@ struct VideoMoment: Equatable {
     var playing = false
     /// How long the video is, when it has an end.
     var duration: Double?
+    /// Where the sentence before this one ends, when there is quiet between
+    /// the two: a seek's lead stops there.
+    var floor: Double?
+
+    /// This moment with the end of the sentence before it, among `others`
+    /// from the same video. One that runs up to this sentence, or into it,
+    /// is no floor: its end is a guess, and the lead is still wanted.
+    func keptClear(of others: [VideoMoment]) -> VideoMoment {
+        var moment = self
+        moment.floor = others
+            .filter { $0.tabID == tabID && $0.url == url && $0.seconds < seconds }
+            .compactMap(\.end)
+            .filter { $0 < seconds }
+            .max()
+        return moment
+    }
 
     /// This moment `heard` seconds of listening later.
     func advanced(by heard: TimeInterval) -> VideoMoment {
@@ -323,7 +339,8 @@ enum ChromeScript {
     }
 
     /// Seeking lands this far before the sentence, so its first word isn't
-    /// clipped: the VAD only notices speech once it is under way.
+    /// clipped: the VAD only notices speech once it is under way. Less when
+    /// the sentence before ends nearer than that, or its last word is played.
     static let seekLead = 0.5
     /// Playing a sentence runs this far past its end, which is an estimate
     /// and shouldn't cut the last word.
@@ -365,7 +382,7 @@ enum ChromeScript {
             // from where it was, which the captions would hear as a
             // sentence of its own.
             "if (location.href !== \(javaScriptString(moment.url))) return 'moved'; "
-                + "const from = Math.max(\(moment.seconds - seekLead), 0); "
+                + "const from = Math.max(\(max(moment.seconds - seekLead, moment.floor ?? 0)), 0); "
                 + (moment.end.map { "\(stopScript(at: $0 + seekTail)) " } ?? "")
                 + "v.pause(); v.currentTime = from; "
                 + "const resume = () => { if (v.paused) v.play(); }; "
