@@ -380,24 +380,6 @@ final class RehearingMergeTests: XCTestCase {
             for: Caption(id: 9, japanese: "あ", ruby: [], english: "", moment: nil), among: existing))
     }
 
-    /// A click plays from the caption's own start, on to the end of the
-    /// stretch heard again for it: the first of two that follow on plays
-    /// through the second, not pausing between them.
-    func testAClickPlaysOnThroughTheNeighbourHeardAgainWithIt() {
-        let first = CaptionEngine.playedMoment(for: existing[0], among: existing)
-        XCTAssertEqual(first?.seconds, 437)
-        XCTAssertEqual(first?.end, 442)
-        // The second starts where it does, not back at the first.
-        let second = CaptionEngine.playedMoment(for: existing[1], among: existing)
-        XCTAssertEqual(second?.seconds, 441)
-        XCTAssertEqual(second?.end, 442)
-        let apart = CaptionEngine.playedMoment(for: existing[2], among: existing)
-        XCTAssertEqual(apart?.seconds, 444)
-        XCTAssertEqual(apart?.end, 446)
-        XCTAssertNil(CaptionEngine.playedMoment(
-            for: Caption(id: 9, japanese: "あ", ruby: [], english: "", moment: nil), among: existing))
-    }
-
     /// The captions sit 437-440, 441-442 and 444-446. A gap is heard again
     /// from the end of the sentence before it to the start of the one after,
     /// when that is long enough to hold a sentence.

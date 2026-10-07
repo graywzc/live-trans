@@ -442,18 +442,6 @@ final class CaptionEngine {
         return (from, to)
     }
 
-    /// What a click on `caption` plays: from its own start to the end of
-    /// the stretch heard again for it, so a sentence cut in two plays on
-    /// through its second half, rather than pausing where it was cut while
-    /// the rest is heard again. Nil for a caption not placed in a video.
-    nonisolated static func playedMoment(for caption: Caption, among captions: [Caption]) -> VideoMoment? {
-        guard var moment = caption.moment else { return nil }
-        if let end = moment.end, let heard = rehearingStretch(for: caption, among: captions) {
-            moment.end = max(end, heard.to)
-        }
-        return moment
-    }
-
     /// The stretch of a page's video to hear again for the gap in its
     /// captions at `seconds`: from the end of the last caption that starts
     /// by then to the start of the first after it, or the edge of the
