@@ -862,9 +862,14 @@ class PrefetchJob:
             "-headers", header_lines,
             # Without -copyts a seek into an HLS stream can land at the start
             # of the segment the moment is in, up to a segment early, and the
-            # audio is then taken for later than it is; with it the seek is
-            # exact to a frame.
-            *(["-ss", f"{self.offset:.3f}", "-copyts"] if self.offset > 0 else []), "-i", media,
+            # audio is then taken for later than it is. Without -seek2any it
+            # can land late instead: the HLS demuxer drops everything up to
+            # the next video keyframe after the moment, seconds away in a
+            # segment with few of them, and the audio that starts there is
+            # taken for the moment, so every caption comes early by that
+            # much. With both, the seek is exact to a frame at every point
+            # tried; the audio needs no keyframe to be decoded from.
+            *(["-ss", f"{self.offset:.3f}", "-copyts", "-seek2any", "1"] if self.offset > 0 else []), "-i", media,
             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
         ]
         print(f"prefetch {self.id}: fetching", flush=True)
@@ -957,11 +962,14 @@ class PrefetchJob:
             audio = self.audio[from_sample:int(max(end + tail - self.offset, 0) * SAMPLE_RATE)].copy()
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
         words = []
+        t0 = time.time()
         _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before), words=words, vad=vad)
         began = self.offset + from_sample / SAMPLE_RATE
         for line in lines:
             if "start" in line:
                 line["start"], line["end"] = round(line["start"] + began, 2), round(line["end"] + began, 2)
+        print(f"prefetch {self.id}: {start:.1f}-{end:.1f}s heard again, {len(lines)} lines in {time.time() - t0:.1f}s",
+              flush=True)
         return lines
 
     def status(self, since=0):
