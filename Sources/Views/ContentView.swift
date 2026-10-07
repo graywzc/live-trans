@@ -109,10 +109,15 @@ struct ContentView: View {
     }
 
     /// Plays the sentence again. One fetched ahead is also heard again from
-    /// the fetched audio, which corrects it; a live one is heard again
-    /// through the speakers as it plays.
+    /// the fetched audio, which corrects it, together with the neighbour it
+    /// runs on into, and plays as far as it is heard: cut in two, it is
+    /// not paused in the middle. A live one is heard again through the
+    /// speakers as it plays.
     private func replay(_ caption: Caption, at moment: VideoMoment) {
-        video.send(.seek(moment))
+        let played = prefetch.covers(moment)
+            ? CaptionEngine.playedMoment(for: caption, among: engine.captions) ?? moment
+            : moment
+        video.send(.seek(played))
         prefetch.rehear(caption)
     }
 

@@ -957,11 +957,14 @@ class PrefetchJob:
             audio = self.audio[from_sample:int(max(end + tail - self.offset, 0) * SAMPLE_RATE)].copy()
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
         words = []
+        t0 = time.time()
         _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before), words=words, vad=vad)
         began = self.offset + from_sample / SAMPLE_RATE
         for line in lines:
             if "start" in line:
                 line["start"], line["end"] = round(line["start"] + began, 2), round(line["end"] + began, 2)
+        print(f"prefetch {self.id}: {start:.1f}-{end:.1f}s heard again, {len(lines)} lines in {time.time() - t0:.1f}s",
+              flush=True)
         return lines
 
     def status(self, since=0):
