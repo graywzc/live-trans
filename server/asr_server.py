@@ -862,9 +862,14 @@ class PrefetchJob:
             "-headers", header_lines,
             # Without -copyts a seek into an HLS stream can land at the start
             # of the segment the moment is in, up to a segment early, and the
-            # audio is then taken for later than it is; with it the seek is
-            # exact to a frame.
-            *(["-ss", f"{self.offset:.3f}", "-copyts"] if self.offset > 0 else []), "-i", media,
+            # audio is then taken for later than it is. Without -seek2any it
+            # can land late instead: the HLS demuxer drops everything up to
+            # the next video keyframe after the moment, seconds away in a
+            # segment with few of them, and the audio that starts there is
+            # taken for the moment, so every caption comes early by that
+            # much. With both, the seek is exact to a frame at every point
+            # tried; the audio needs no keyframe to be decoded from.
+            *(["-ss", f"{self.offset:.3f}", "-copyts", "-seek2any", "1"] if self.offset > 0 else []), "-i", media,
             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
         ]
         print(f"prefetch {self.id}: fetching", flush=True)
