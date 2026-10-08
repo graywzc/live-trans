@@ -34,6 +34,12 @@ struct CaptionList<Row: View>: View {
         case end
     }
 
+    /// What the list is kept on, and the sentence it is for.
+    private struct Place: Equatable {
+        let playingID: Int?
+        let target: Target
+    }
+
     /// The last caption is followed at the end like a live one, so that what
     /// is being heard after it shows too.
     private var target: Target {
@@ -99,7 +105,11 @@ struct CaptionList<Row: View>: View {
                 guard isFollowing, target == .end else { return }
                 proxy.scrollTo(Self.bottom, anchor: .bottom)
             }
-            .onChange(of: playingID) {
+            // The sentence the video has moved to, and also the one it is
+            // still at when captions fetched ahead land under it: it was
+            // the last and followed at the end, which they would take the
+            // list along with.
+            .onChange(of: Place(playingID: playingID, target: target)) {
                 // With nothing playing any more the list stays where it is.
                 guard isFollowing, playingID != nil else { return }
                 show(target, in: proxy, over: 0.25)

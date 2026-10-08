@@ -95,6 +95,29 @@ final class CaptionListTests: XCTestCase {
         XCTAssertFalse(try pillShows())
     }
 
+    func testCaptionsLandingUnderTheLastSentenceLeaveTheListOnIt() throws {
+        add(40)
+        model.playingID = 39
+        model.lull = Lull(captionID: 39, isAfter: true, seconds: 754)
+        settle()
+        let atEnd = try offset()
+        XCTAssertEqual(atEnd, try end(), accuracy: 1)
+
+        // The next stretch of the video is captioned while it is in the
+        // pause after the last sentence so far: ten rows, most of two
+        // screens. The list goes no further than putting that sentence in
+        // the middle, where one being played is kept.
+        add(10)
+        let landed = try offset()
+        XCTAssertGreaterThan(landed, atEnd, "the sentence should have moved up from the foot of the list")
+        XCTAssertLessThan(landed, atEnd + 150, "the list went past the sentence, after the new captions")
+        XCTAssertFalse(try pillShows())
+        snapshot("list-landed-under")
+
+        add(10)
+        XCTAssertEqual(try offset(), landed, accuracy: 20)
+    }
+
     func testScrolledByHandItStaysUntilThePillIsPressed() throws {
         add(40)
         model.playingID = 10
