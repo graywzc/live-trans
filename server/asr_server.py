@@ -914,14 +914,16 @@ class CutGrid:
     def cut_between(self, before, after, heard, tail="", head=""):
         """A cut between the words `before` and `after`, (text, start,
         end): at the longest pause of GRID_SOFT_PAUSE or more centred
-        between the start of the one and the end of the other, which is as
-        close as Whisper's word times place a break; without one, between
-        the words themselves when the sentence was `heard` to end there,
-        and not at all when it was only suggested. `tail` and `head` are
-        the text either side, kept as the cut's marks. Whether one was
-        made."""
-        _, low, _ = before
-        _, _, high = after
+        within GRID_SNAP of the gap between them, which is as close as
+        Whisper's word times place a break (the first word after a pause
+        is timed early, into it, so a pause is looked for only near the
+        gap, not anywhere under the words: under the next word's whole
+        span it would be claimed by the gap after it); without one,
+        between the words themselves when the sentence was `heard` to end
+        there, and not at all when it was only suggested. `tail` and
+        `head` are the text either side, kept as the cut's marks. Whether
+        one was made."""
+        low, high = before[2] - GRID_SNAP, after[1] + GRID_SNAP
         with self.lock:
             found = max(
                 ((b - a, (a + b) / 2) for a, b in self.pauses if low <= (a + b) / 2 <= high), default=None
