@@ -101,7 +101,8 @@ final class CaptionListTests: XCTestCase {
         model.lull = Lull(captionID: 39, isAfter: true, seconds: 754)
         settle()
         let atEnd = try offset()
-        XCTAssertEqual(atEnd, try end(), accuracy: 1)
+        // A lazy stack's height is partly an estimate, as below.
+        XCTAssertEqual(atEnd, try end(), accuracy: 20)
 
         // The next stretch of the video is captioned while it is in the
         // pause after the last sentence so far: ten rows, most of two
