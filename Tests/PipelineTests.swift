@@ -363,6 +363,51 @@ final class RehearingMergeTests: XCTestCase {
         XCTAssertEqual(merged.map(\.japanese), ["じゃあこれで決定"])
     }
 
+    /// A click re-hears a caption with its neighbours, and a short
+    /// neighbour can come back fused into the line after it with its own
+    /// words gone. The lines cover it, but say nothing of it: it stays.
+    func testANeighbourWhoseWordsWereLostIsKept() {
+        let captions = [
+            caption(0, "そう、やっぱりそうなるよね", 162.4, 166.4), caption(1, "困るよね", 167.1, 168),
+            caption(2, "今年はゆっくりすると決めたのに", 168.7, 173.3),
+        ]
+        let fused = [
+            caption(8, "そう、やっぱりそうなるよね", 162.1, 166.4),
+            caption(9, "今年はゆっくりすると決めたのに", 167.1, 173.2),
+        ]
+        XCTAssertEqual(
+            CaptionEngine.merge(fused, into: captions, prompt: "").map(\.japanese),
+            ["そう、やっぱりそうなるよね", "困るよね", "今年はゆっくりすると決めたのに"]
+        )
+        // Fused with its words kept, the one line stands for both.
+        let whole = [
+            caption(8, "そう、やっぱりそうなるよね", 162.1, 166.4),
+            caption(9, "困るよね、今年はゆっくりすると決めたのに", 167.1, 173.2),
+        ]
+        XCTAssertEqual(
+            CaptionEngine.merge(whole, into: captions, prompt: "").map(\.japanese),
+            ["そう、やっぱりそうなるよね", "困るよね、今年はゆっくりすると決めたのに"]
+        )
+    }
+
+    /// The neighbour before the clicked caption came back as a fragment of
+    /// its tail, running a little into the clicked caption's own line. The
+    /// group of them resembles the pair well enough, but the neighbour
+    /// itself is covered only in part: it stays, and the fragment goes.
+    func testANeighbourHeardOnlyInPartIsKept() {
+        let captions = [
+            caption(0, "今度は大阪に新しい店を出すことになり", 155.2, 159.6),
+            caption(1, "大阪ですかすごいじゃないですか", 159.6, 162.4),
+        ]
+        let heard = [
+            caption(8, "店を出すことになって", 158.2, 159.7),
+            caption(9, "大阪ですか、すごいじゃないですか", 159.7, 162.4),
+        ]
+        let merged = CaptionEngine.merge(heard, into: captions, prompt: "")
+        XCTAssertEqual(merged.map(\.japanese), ["今度は大阪に新しい店を出すことになり", "大阪ですか、すごいじゃないですか"])
+        XCTAssertEqual(merged.map(\.id), [0, 9])
+    }
+
     func testTheStretchHeardAgainTakesInTheNeighboursThatFollowOn() {
         // The three captions sit 437-440, 441-442 and 444-446: the first two
         // follow on within a second, the third does not.
