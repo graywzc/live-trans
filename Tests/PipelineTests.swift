@@ -408,23 +408,6 @@ final class RehearingMergeTests: XCTestCase {
         XCTAssertEqual(merged.map(\.id), [0, 9])
     }
 
-    func testTheStretchHeardAgainTakesInTheNeighboursThatFollowOn() {
-        // The three captions sit 437-440, 441-442 and 444-446: the first two
-        // follow on within a second, the third does not.
-        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[1], among: existing)?.from, 437)
-        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[1], among: existing)?.to, 442)
-        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[0], among: existing)?.from, 437)
-        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[0], among: existing)?.to, 442)
-        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[2], among: existing)?.from, 444)
-        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[2], among: existing)?.to, 446)
-        // Another page's captions are not neighbours, and a caption with no
-        // place has no stretch.
-        let elsewhere = [caption(5, "はい", 440.5, 441, url: "v")] + existing
-        XCTAssertEqual(CaptionEngine.rehearingStretch(for: existing[1], among: elsewhere)?.from, 437)
-        XCTAssertNil(CaptionEngine.rehearingStretch(
-            for: Caption(id: 9, japanese: "あ", ruby: [], english: "", moment: nil), among: existing))
-    }
-
     /// The captions sit 437-440, 441-442 and 444-446. A gap is heard again
     /// from the end of the sentence before it to the start of the one after,
     /// when that is long enough to hold a sentence.

@@ -79,11 +79,6 @@ final class CaptionEngine {
     /// that resembles it less than a correction would. A line fused with a
     /// neighbour's is not its own: it must keep the caption's words.
     static let rehearingFullCover = 0.9
-    /// A sentence is heard again with its neighbours: the captions before
-    /// and after it that follow on within this many seconds. A sentence cut
-    /// in two, or a half of one heard as a whole, is only heard right with
-    /// the other half in the audio.
-    static let rehearingNeighbourGap: TimeInterval = 1.0
     /// A gap between captions this long or longer can hold a sentence that
     /// went unheard, and is offered to be heard again.
     static let rehearingGapMinimum: TimeInterval = 2.0
@@ -418,29 +413,6 @@ final class CaptionEngine {
     nonisolated static func overlap(_ a: VideoMoment, _ b: VideoMoment) -> TimeInterval {
         guard a.tabID == b.tabID, a.url == b.url, let aEnd = a.end, let bEnd = b.end else { return 0 }
         return max(min(aEnd, bEnd) - max(a.seconds, b.seconds), 0)
-    }
-
-    /// The stretch of the video to hear again for `caption`: its own,
-    /// widened over the neighbour before and the one after when they follow
-    /// on within `rehearingNeighbourGap`. Nil for a caption not placed in a
-    /// video.
-    nonisolated static func rehearingStretch(for caption: Caption, among captions: [Caption]) -> (from: Double, to: Double)? {
-        guard let moment = caption.moment, let end = moment.end else { return nil }
-        let placed = captions.compactMap { other -> VideoMoment? in
-            guard other.id != caption.id, let m = other.moment, m.end != nil,
-                  m.tabID == moment.tabID, m.url == moment.url else { return nil }
-            return m
-        }
-        var from = moment.seconds, to = end
-        if let before = placed.filter({ $0.seconds < moment.seconds }).max(by: { $0.seconds < $1.seconds }),
-           moment.seconds - before.end! <= rehearingNeighbourGap {
-            from = min(from, before.seconds)
-        }
-        if let after = placed.filter({ $0.seconds > moment.seconds }).min(by: { $0.seconds < $1.seconds }),
-           after.seconds - end <= rehearingNeighbourGap {
-            to = max(to, after.end!)
-        }
-        return (from, to)
     }
 
     /// The stretch of a page's video to hear again for the gap in its
