@@ -72,17 +72,13 @@ final class CaptionEngine {
     /// video are that caption heard again. Heard over less, but mostly
     /// inside it, they are a fragment of it.
     static let rehearingMinimumCover = 0.5
-    /// Lines heard over at least this share of a caption's stretch are
-    /// trusted however little they resemble it: what was heard over the
-    /// whole of it is what was said there, and a caption wrong from the
-    /// start can only be put right by something that resembles it less
-    /// than a correction would.
+    /// Lines of a caption's own, mostly inside it, heard over at least
+    /// this share of its stretch are trusted however little they resemble
+    /// it: what was heard over the whole of it is what was said there, and
+    /// a caption wrong from the start can only be put right by something
+    /// that resembles it less than a correction would. A line fused with a
+    /// neighbour's is not its own: it must keep the caption's words.
     static let rehearingFullCover = 0.9
-    /// A sentence is heard again with its neighbours: the captions before
-    /// and after it that follow on within this many seconds. A sentence cut
-    /// in two, or a half of one heard as a whole, is only heard right with
-    /// the other half in the audio.
-    static let rehearingNeighbourGap: TimeInterval = 1.0
     /// A gap between captions this long or longer can hold a sentence that
     /// went unheard, and is offered to be heard again.
     static let rehearingGapMinimum: TimeInterval = 2.0
@@ -419,29 +415,6 @@ final class CaptionEngine {
         return max(min(aEnd, bEnd) - max(a.seconds, b.seconds), 0)
     }
 
-    /// The stretch of the video to hear again for `caption`: its own,
-    /// widened over the neighbour before and the one after when they follow
-    /// on within `rehearingNeighbourGap`. Nil for a caption not placed in a
-    /// video.
-    nonisolated static func rehearingStretch(for caption: Caption, among captions: [Caption]) -> (from: Double, to: Double)? {
-        guard let moment = caption.moment, let end = moment.end else { return nil }
-        let placed = captions.compactMap { other -> VideoMoment? in
-            guard other.id != caption.id, let m = other.moment, m.end != nil,
-                  m.tabID == moment.tabID, m.url == moment.url else { return nil }
-            return m
-        }
-        var from = moment.seconds, to = end
-        if let before = placed.filter({ $0.seconds < moment.seconds }).max(by: { $0.seconds < $1.seconds }),
-           moment.seconds - before.end! <= rehearingNeighbourGap {
-            from = min(from, before.seconds)
-        }
-        if let after = placed.filter({ $0.seconds > moment.seconds }).min(by: { $0.seconds < $1.seconds }),
-           after.seconds - end <= rehearingNeighbourGap {
-            to = max(to, after.end!)
-        }
-        return (from, to)
-    }
-
     /// The stretch of a page's video to hear again for the gap in its
     /// captions at `seconds`: from the end of the last caption that starts
     /// by then to the start of the first after it, or the edge of the
@@ -487,15 +460,20 @@ final class CaptionEngine {
     }
 
     /// `lines` heard from the video put among `captions`. A line heard over
-    /// a stretch the captions cover is one of them heard again: it takes
-    /// their place, unless it is only the context the model was handed, or
-    /// covers them only in part and keeps too little of them, as the model
-    /// gives over sound that isn't speech; then they are kept as they were.
-    /// Heard over the whole of them it is believed whatever it says: a
-    /// caption that was wrong is put right by nothing that resembles it.
-    /// A line mostly inside a
-    /// caption without covering it is a fragment, and dropped. Any other
-    /// line is new, and goes in the order of the video. The lines replacing
+    /// a stretch the captions cover is one of them heard again, and the
+    /// captions it was heard over are judged one by one: a caption is
+    /// replaced when the lines account for it, by covering at least
+    /// `rehearingMinimumCover` of its stretch and keeping
+    /// `replayMinimumResemblance` of its characters, or by a line of its
+    /// own, mostly inside it, over `rehearingFullCover` of it, which is
+    /// believed whatever it says: a caption that was wrong is put right by
+    /// nothing that resembles it. A caption the lines cover only in part,
+    /// or whose words a line fused with its neighbour's lost, is kept: a
+    /// re-hearing may mend a caption, never lose one. Lines that are only
+    /// the context the model was handed are its echo over sound that
+    /// isn't speech, and change nothing. A line mostly over captions it
+    /// did not replace is a fragment of them, and dropped. Any other line
+    /// is new, and goes in the order of the video. The lines replacing
     /// captions have ids of their own: an analysis of the old text must not
     /// pass for one of the new.
     nonisolated static func merge(_ lines: [Caption], into captions: [Caption], prompt: String) -> [Caption] {
@@ -522,6 +500,9 @@ final class CaptionEngine {
         for li in lines.indices { groups[root(li), default: ([], [])].lines.append(li) }
         for ci in captions.indices { groups[root(lines.count + ci), default: ([], [])].captions.append(ci) }
 
+        let length = { (caption: Caption) -> TimeInterval in
+            max((caption.moment?.end ?? 0) - (caption.moment?.seconds ?? 0), 0.001)
+        }
         var replacing: [Int: [Caption]] = [:]  // first caption index -> its group's lines
         var removed = Set<Int>()
         var new: [Caption] = []
@@ -534,27 +515,53 @@ final class CaptionEngine {
                 new.append(contentsOf: heard)
                 continue
             }
-            let originals = group.captions.map { captions[$0] }
-            let original = originals.map(\.japanese).joined()
-            let shared = group.lines.reduce(0) { $0 + (overlaps[$1] ?? 0) }
-            let length = { (moments: [Caption]) in
-                moments.reduce(0.0) { $0 + (($1.moment?.end ?? 0) - ($1.moment?.seconds ?? 0)) }
+            if isEcho(text, of: prompt) {
+                print("heard again as its context, kept: \(group.captions.map { captions[$0].japanese }.joined())")
+                continue
             }
-            let cover = shared / max(length(originals), 0.001)
-            if cover >= rehearingMinimumCover {
-                if isEcho(text, of: prompt) {
-                    print("heard again as its context, kept: \(original)")
-                } else if cover < rehearingFullCover, resemblance(of: text, to: original) < replayMinimumResemblance {
-                    print("heard again as something else, kept: \(original) (heard: \(text))")
-                } else {
-                    print("heard again: \(original) -> \(text)")
-                    replacing[group.captions.min()!] = heard
-                    removed.formUnion(group.captions)
+            var taken: [Int] = []
+            for ci in group.captions {
+                let caption = captions[ci]
+                guard let old = caption.moment else { continue }
+                var cover = 0.0, own = 0.0
+                for line in heard {
+                    guard let moment = line.moment else { continue }
+                    let shared = overlap(moment, old)
+                    cover += shared
+                    if shared >= length(line) / 2 { own += shared }
                 }
-            } else if shared >= length(heard) * rehearingMinimumCover {
-                print("a fragment of a caption, dropped: \(text)")
-            } else {
-                new.append(contentsOf: heard)
+                cover /= length(caption)
+                own /= length(caption)
+                if own >= rehearingFullCover
+                    || cover >= rehearingMinimumCover && resemblance(of: text, to: caption.japanese) >= replayMinimumResemblance {
+                    taken.append(ci)
+                } else if cover >= rehearingMinimumCover {
+                    print("heard again as something else, kept: \(caption.japanese) (heard: \(text))")
+                } else if cover > 0 {
+                    print("heard again only in part, kept: \(caption.japanese) (heard: \(text))")
+                }
+            }
+            // A line belongs to the captions it replaced when it lies over
+            // them more than over the ones kept; one over a kept caption is
+            // a fragment of it, or it heard again, and dropped.
+            var replacement: [Caption] = []
+            for li in group.lines {
+                let line = lines[li]
+                guard let moment = line.moment else { continue }
+                let overTaken = taken.reduce(0.0) { $0 + overlap(moment, captions[$1].moment!) }
+                let overAll = overlaps[li] ?? 0
+                if !taken.isEmpty, overTaken >= overAll / 2 {
+                    replacement.append(line)
+                } else if overAll >= length(line) * rehearingMinimumCover {
+                    print("a fragment of a caption, dropped: \(line.japanese)")
+                } else {
+                    new.append(line)
+                }
+            }
+            if let first = taken.min(), !replacement.isEmpty {
+                print("heard again: \(taken.map { captions[$0].japanese }.joined()) -> \(replacement.map(\.japanese).joined())")
+                replacing[first] = replacement
+                removed.formUnion(taken)
             }
         }
 

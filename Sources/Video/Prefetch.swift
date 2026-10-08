@@ -188,15 +188,15 @@ final class Prefetcher {
     }
 
     /// The caption's sentence heard again from the fetched audio, with the
-    /// wider search and its context, and with the neighbours it follows on
-    /// from, so a sentence cut in two is heard whole; what comes back
-    /// corrects the captions.
+    /// wider search and its context; the server hears the neighbours it
+    /// follows on from with it, so a sentence cut in two is heard whole,
+    /// and gives back the caption's own pieces of its grid, on the same
+    /// cuts as before or finer. What comes back corrects the caption.
     func rehear(_ caption: Caption) {
-        guard let moment = caption.moment, let stretch = stretch(holding: moment),
-              let window = CaptionEngine.rehearingStretch(for: caption, among: engine.captions),
+        guard let moment = caption.moment, let end = moment.end, let stretch = stretch(holding: moment),
               let client = engine.client
         else { return }
-        let from = max(window.from, stretch.from), to = min(window.to, stretch.to)
+        let from = max(moment.seconds, stretch.from), to = min(end, stretch.to)
         Task {
             do {
                 let lines = try await client.rehear(job: stretch.job, from: from, to: to)

@@ -21,9 +21,11 @@ POST /prefetch     body: {"url": media or page URL, "page": page URL,
                           "start": seconds into the video, 0 if absent}
                    -> {"job": id}. Fetches the audio from there on with
                    ffmpeg (a page URL is resolved with yt-dlp first), and
-                   transcribes it in chunks cut at silences. A job running
-                   for the same page is stopped; what it captioned can still
-                   be heard again.
+                   transcribes it in chunks cut at silences, the words of
+                   each put into the pieces of a grid of cuts made at the
+                   pauses in the audio (see CutGrid). A job running for the
+                   same page is stopped; what it captioned can still be
+                   heard again.
 GET  /prefetch/<id>?since=N
                    -> {"state": "running"|"paused"|"done"|"failed", "error": ...,
                        "duration": seconds or null, "start": seconds,
@@ -32,10 +34,11 @@ GET  /prefetch/<id>?since=N
                        "lines": the lines from index N on, with absolute
                        "start"/"end"}
 POST /prefetch/<id>/rehear?from=&to=[&vad=1]
-                   -> {"lines": [...]} that stretch heard again from the
-                   fetched audio, with a wider search and its context; a
-                   long line is split where the speaker paused after a word
-                   that can end a sentence, or paused long.
+                   -> {"lines": [...]} the pieces of the grid at that
+                   stretch heard again from the fetched audio, with a wider
+                   search, their context, and the neighbours that follow on
+                   in the audio heard with them; the lines come back on the
+                   same cuts as before, or finer, never otherwise.
 POST /prefetch/<id>/stop
 POST /prefetch/<id>/pause, /prefetch/<id>/resume
                    holds or lets go the transcription (the GPU work); the
@@ -186,7 +189,7 @@ def decode_pcm(pcm_bytes):
     return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False):
+def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False, breaks=None, clips=None):
     """task="transcribe" -> Japanese, task="translate" -> English.
 
     `vad` finds the speech in the audio first (Silero), and Whisper is
@@ -201,8 +204,13 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
     `prompt` is what was said just before the audio, given to Whisper as
     context: a name or a term it has seen is one it is likelier to hear.
 
+    `clips`, [(start, end), ...] in seconds, are the stretches to decode,
+    each on its own, in place of `vad` finding them.
+
     `words`, a list, is filled with (text, start, end) for every word heard,
-    the times in seconds into the audio.
+    the times in seconds into the audio; `breaks`, a list, with (index,
+    start) for each segment: the index in `words` of its first word, and
+    where it starts in the audio.
 
     Returns Whisper's segments as a list. It ends a segment at a pause in the
     speech, so the boundaries are worth keeping: they are the only sign of a
@@ -210,11 +218,16 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
     """
     if audio.size == 0:
         return []
-    clips = "0"
-    if vad:
+    if clips is not None:
+        clips = [t for clip in clips for t in clip]
+        if not clips:
+            return []
+    elif vad:
         clips = speech_clips(audio)
         if not clips:
             return []
+    else:
+        clips = "0"
     with _asr_lock:
         segments, _ = _asr.transcribe(
             audio, language="ja", task=task, beam_size=beam_size, clip_timestamps=clips,
@@ -226,6 +239,8 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
             if not text:
                 continue
             texts.append(text)
+            if breaks is not None:
+                breaks.append((len(words), s.start))
             if words is not None:
                 words.extend((w.word, w.start, w.end) for w in (s.words or []))
         return texts
@@ -797,6 +812,361 @@ def choose_boundary(audio, target):
     return min(start + PREFETCH_CUT_LEAD, (start + end) / 2)
 
 
+# ---------------------------------------------------------------------------
+# The cut grid: where a job's audio is cut into captions.
+#
+# Whisper and the LLM cut a stretch of speech into sentences differently
+# each time they hear it, so a caption heard again came back cut
+# otherwise, and the lines took the place of its neighbours too, some of
+# them lost. The cuts are kept instead, as times in the video, and the
+# words of every hearing are put into the pieces between them: a line is a
+# piece, and a piece heard again is the same piece with other words. A
+# long pause in the audio cuts from the start, hard: the audio either side
+# is decoded on its own, so a word belongs to the piece it was heard in
+# whatever time Whisper gives it. A sentence heard to end between two
+# words, in its punctuation or by the LLM, cuts there for good, soft; one
+# that a word ending a sentence or a segment of Whisper's suggests cuts
+# when the speaker paused there too. The grid only gets finer, so clicking
+# a caption converges on the sentences and never moves a cut back.
+
+# A pause this long always cuts.
+GRID_HARD_PAUSE = 0.5
+# A pause this long is where a sentence suggested to end is cut, and
+# where a sentence heard to end is cut if one lies between the words.
+GRID_SOFT_PAUSE = 0.2
+# The shortest pause the grid knows of.
+GRID_PAUSE_MIN = 0.15
+# A piece is heard again with the neighbours that follow on within this
+# many seconds, for Whisper to hear it in its context.
+GRID_NEIGHBOUR_GAP = 1.0
+# How far from a soft cut the gap between two words may lie and still be
+# the one the cut falls in, when it reads like a sentence break or
+# matches the cut's marks.
+GRID_SNAP = 0.4
+# How many characters either side of a soft cut are kept as its marks,
+# and how far from the cut a gap matching them may lie: Whisper's times
+# can be out by more than GRID_SNAP, and the text says where the cut is.
+GRID_MARK_CHARS = 3
+GRID_MARK_REACH = 1.0
+# How far into the pauses either side of a hard piece its audio is
+# decoded, so the first and last words keep their edges.
+GRID_CLIP_PAD = 0.15
+
+
+def _is_kanji(ch):
+    return "\u4e00" <= ch <= "\u9fff"
+
+
+class CutGrid:
+    """The speech, pauses and cuts of a job's audio, in seconds of the
+    video. `cuts` are the middles of pauses, the edges of the chunks the
+    audio was heard in, and where sentences were heard to end; `hard` are
+    the first two kinds."""
+
+    def __init__(self):
+        self.speech = []
+        self.pauses = []
+        self.cuts = []
+        self.hard = set()
+        # For a soft cut, the last characters before it and the first
+        # after, as heard when it was made: where it falls among the words
+        # of a later hearing, whatever times they are given.
+        self.marks = {}
+        self.lock = threading.Lock()
+
+    def add_chunk(self, audio, began, end):
+        """The speech and pauses of `audio`, the video from `began` to
+        `end`, and the cuts in it that the audio alone decides: at its
+        edges and at every long pause."""
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+        found = get_speech_timestamps(
+            audio, VadOptions(min_silence_duration_ms=int(GRID_PAUSE_MIN * 1000), speech_pad_ms=0)
+        )
+        self.add_speech([(began + s["start"] / SAMPLE_RATE, began + s["end"] / SAMPLE_RATE) for s in found], began, end)
+
+    def add_speech(self, speech, began, end):
+        """`speech`, the (start, end) stretches of it in the video from
+        `began` to `end`, and the cuts the audio alone decides."""
+        pauses = [(a[1], b[0]) for a, b in zip(speech, speech[1:])]
+        with self.lock:
+            self.speech = sorted(self.speech + speech)
+            self.pauses = sorted(self.pauses + pauses)
+            for cut in (began, end):
+                self._cut(cut, hard=True)
+            for a, b in pauses:
+                if b - a >= GRID_HARD_PAUSE:
+                    self._cut((a + b) / 2, hard=True)
+
+    def _cut(self, at, hard=False):
+        """A cut at `at`; whether it is new."""
+        import bisect
+
+        index = bisect.bisect_left(self.cuts, at)
+        if (index < len(self.cuts) and abs(self.cuts[index] - at) < 1e-6) \
+                or (index > 0 and abs(self.cuts[index - 1] - at) < 1e-6):
+            return False
+        self.cuts.insert(index, at)
+        if hard:
+            self.hard.add(at)
+        return True
+
+    def cut_between(self, before, after, heard, tail="", head=""):
+        """A cut between the words `before` and `after`, (text, start,
+        end): at the longest pause of GRID_SOFT_PAUSE or more centred
+        between the start of the one and the end of the other, which is as
+        close as Whisper's word times place a break; without one, between
+        the words themselves when the sentence was `heard` to end there,
+        and not at all when it was only suggested. `tail` and `head` are
+        the text either side, kept as the cut's marks. Whether one was
+        made."""
+        _, low, _ = before
+        _, _, high = after
+        with self.lock:
+            found = max(
+                ((b - a, (a + b) / 2) for a, b in self.pauses if low <= (a + b) / 2 <= high), default=None
+            )
+            if found is not None and found[0] >= GRID_SOFT_PAUSE:
+                at = found[1]
+            elif heard:
+                at = min(max((before[2] + after[1]) / 2, low + 1e-3), high - 1e-3)
+            else:
+                return False
+            if not self._cut(at):
+                return False
+            self.marks[at] = (_content(tail)[-GRID_MARK_CHARS:], _content(head)[:GRID_MARK_CHARS])
+            return True
+
+    def pieces(self, low, high):
+        """The pieces between cuts whose speech lies partly in `low`..`high`
+        of the video (a piece without speech, by its cuts): [(from, to)].
+        A piece whose speech only touches the stretch, within the
+        rounding of a line's times, is not in it."""
+        with self.lock:
+            cuts = list(self.cuts)
+        result = []
+        for a, b in zip(cuts, cuts[1:]):
+            inside = self.bounds(a, b) or (a, b)
+            if inside[1] > low + 0.01 and inside[0] < high - 0.01:
+                result.append((a, b))
+        return result
+
+    def bounds(self, a, b):
+        """Where the speech in the piece `a`..`b` starts and ends, or None
+        when there is none."""
+        inside = [(max(s, a), min(e, b)) for s, e in self.speech if e > a and s < b]
+        return (inside[0][0], inside[-1][1]) if inside else None
+
+    def clips(self, low, high):
+        """The hard pieces lying partly in `low`..`high`, as the stretches
+        of the video to decode, each on its own: the speech in each, let
+        run GRID_CLIP_PAD into the pauses either side but not past its
+        cuts. A hard piece with no speech in it gives no clip."""
+        with self.lock:
+            hard = sorted(c for c in self.cuts if c in self.hard)
+        result = []
+        for a, b in zip(hard, hard[1:]):
+            if b <= low or a >= high:
+                continue
+            inside = self.bounds(a, b)
+            if inside:
+                result.append((max(inside[0] - GRID_CLIP_PAD, a), min(inside[1] + GRID_CLIP_PAD, b)))
+        return result
+
+    def with_neighbours(self, pieces):
+        """`pieces` and the ones before and after that follow on within
+        GRID_NEIGHBOUR_GAP of their speech, as (from, to) of the whole."""
+        with self.lock:
+            cuts = list(self.cuts)
+        low, high = pieces[0][0], pieces[-1][1]
+        first, last = cuts.index(low), cuts.index(high)
+        here = self.bounds(low, high) or (low, high)
+        if first > 0:
+            before = self.bounds(cuts[first - 1], low)
+            if before and here[0] - before[1] <= GRID_NEIGHBOUR_GAP:
+                low = cuts[first - 1]
+        if last < len(cuts) - 1:
+            after = self.bounds(high, cuts[last + 1])
+            if after and after[0] - here[1] <= GRID_NEIGHBOUR_GAP:
+                high = cuts[last + 1]
+        return low, high
+
+
+def _content_offsets(texts):
+    """Where each of `texts` begins and ends in their content (the
+    characters that are not punctuation or spaces) joined."""
+    offsets, at = [], 0
+    for text in texts:
+        size = len(_content(text))
+        offsets.append((at, at + size))
+        at += size
+    return offsets
+
+
+def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
+    """`audio`, the video from `began` on, heard by its hard pieces, and
+    its words put into the pieces of `grid`: the lines [{"ja", "en",
+    "start", "end"}] of the pieces with words in them, those partly in
+    `within` (seconds of the video) when given. Where a sentence ends
+    inside a piece in `within`, a cut is made (see CutGrid). A piece's
+    times are its speech's."""
+    import bisect
+
+    low, high = within or (began, began + audio.size / SAMPLE_RATE)
+    clips = grid.clips(began, began + audio.size / SAMPLE_RATE)
+    words, breaks = [], []
+    run_whisper(
+        audio, beam_size=beam_size, prompt=prompt, words=words, breaks=breaks,
+        clips=[(max(a - began, 0), b - began) for a, b in clips],
+    )
+    words = [(text, began + start, began + end) for text, start, end in words]
+    if not words:
+        return []
+    # The clip each word was heard in: that of its segment, which Whisper
+    # decoded within one clip whatever times it gave the words, so the
+    # clip its words lie most in; by its start when they lie in none.
+    heard_in = [0] * len(words)
+    for (index, start), (next_index, _) in zip(breaks, breaks[1:] + [(len(words), None)]):
+        span = (words[index][1], max(words[next_index - 1][2], words[index][1] + 1e-3))
+        clip = max(
+            range(len(clips)),
+            key=lambda k: (max(min(span[1], clips[k][1]) - max(span[0], clips[k][0]), 0), -abs(clips[k][0] - began - start)),
+        )
+        for j in range(index, next_index):
+            heard_in[j] = clip
+    breaks = {index for index, _ in breaks}
+
+    def grouped():
+        """The words of each piece, in order: [(from, to, [word indices])].
+        A hard cut lies between clips, and the words of a clip are the
+        words of the hard piece it covers. A soft cut falls in the gap
+        between two words nearest it, unless a gap within GRID_SNAP of it
+        reads more like a sentence break: Whisper's times put a word a few
+        tenths of a second off, and the first word of a sentence would
+        otherwise end the one before, cut in two."""
+        with grid.lock:
+            cuts = list(grid.cuts)
+            hard = set(grid.hard)
+            marks = dict(grid.marks)
+        result = []
+        for clip, (clip_from, clip_to) in enumerate(clips):
+            members = [j for j in range(len(words)) if heard_in[j] == clip]
+            if not members:
+                continue
+            first = bisect.bisect_right(cuts, clip_from) - 1
+            last = bisect.bisect_left(cuts, clip_to)
+            soft = [c for c in cuts[first + 1:last] if c not in hard]
+            gaps = [(words[members[k]][2] + words[members[k + 1]][1]) / 2 for k in range(len(members) - 1)]
+            texts = [_content(words[j][0]) for j in members]
+            boundaries = []  # the first member of each soft piece after the first
+            for cut in soft:
+                tail, head = marks.get(cut, ("", ""))
+
+                def marked(k):
+                    return bool(tail and "".join(texts[:k + 1]).endswith(tail)) \
+                        or bool(head and "".join(texts[k + 1:]).startswith(head))
+
+                def score(k):
+                    return (1.0 if marked(k) else 0.0) + break_score(members[k]) - abs(gaps[k] - cut)
+
+                candidates = [
+                    k for k in range(len(gaps))
+                    if abs(gaps[k] - cut) <= GRID_SNAP or (abs(gaps[k] - cut) <= GRID_MARK_REACH and marked(k))
+                ]
+                if candidates:
+                    chosen = max(candidates, key=score) + 1
+                else:
+                    chosen = bisect.bisect_right([(words[j][1] + words[j][2]) / 2 for j in members], cut)
+                boundaries.append(max(chosen, boundaries[-1] if boundaries else 0))
+            edges = [cuts[first]] + soft + [cuts[last]]
+            for piece, (a, b) in enumerate(zip(edges, edges[1:])):
+                inside = members[(boundaries[piece - 1] if piece else 0):(boundaries[piece] if piece < len(soft) else None)]
+                if inside:
+                    result.append((a, b, inside))
+        return result
+
+    def break_score(k):
+        """How much the gap after word k reads like a sentence break, in
+        seconds of distance from a cut it is worth."""
+        before, after = words[k][0].rstrip(" \u3000"), words[k + 1][0]
+        if _SENTENCE_END.search(before[-1:]):
+            return 0.5
+        score = 0.0
+        if after.startswith((" ", "\u3000")) or words[k][0].endswith((" ", "\u3000")):
+            score += 0.3  # Whisper writes a space where the speaker broke off
+        if _ends_sentence(before):
+            score += 0.15
+        if before[-1:] and after[:1] and _is_kanji(before[-1]) and _is_kanji(after[0]):
+            score -= 0.3  # two kanji in a row are one word more often than two sentences
+        return score
+
+    def cut_after(i, heard):
+        """A cut after word i, when the pieces either side can stand alone
+        and the cut falls in `within`."""
+        if not (low <= words[i][2] and words[i + 1][1] <= high) or heard_in[i] != heard_in[i + 1]:
+            return False
+        for _, _, members in grouped():
+            if i in members:
+                k = members.index(i)
+                before = "".join(words[j][0] for j in members[:k + 1])
+                after = "".join(words[j][0] for j in members[k + 1:])
+                if len(_content(before)) < SPLIT_MIN_PIECE_CHARS or len(_content(after)) < SPLIT_MIN_PIECE_CHARS:
+                    return False
+                if before.count("「") + before.count("『") > before.count("」") + before.count("』"):
+                    return False  # a sentence being quoted ends inside the one quoting it
+                return grid.cut_between(words[i], words[i + 1], heard, tail=before, head=after)
+        return False
+
+    # Where Whisper ended a sentence: heard to, in its punctuation; or
+    # suggested, by a segment of its or a word that can end one.
+    for i in range(len(words) - 1):
+        so_far = "".join(words[j][0] for j in range(i + 1)).rstrip(" \u3000")
+        if _SENTENCE_END.search(so_far[-1:]):
+            cut_after(i, heard=True)
+        elif i + 1 in breaks or _ends_sentence(so_far):
+            cut_after(i, heard=False)
+
+    pieces = grouped()
+    texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
+    pairs = None
+    if TRANSLATE_BACKEND != "nllb" and _ollama_ok and any(not _is_untranslatable(t) for t in texts):
+        pairs = translate_ollama(texts)
+    if pairs:
+        # Where the LLM ended a sentence inside a piece: a cut there.
+        chars = [j for j, (text, _, _) in enumerate(words) for ch in text if ch not in _BOUNDARY_NOISE]
+        ends = [end for _, end in _content_offsets([ja for ja, _ in pairs])][:-1]
+        for end in ends:
+            if 0 < end < len(chars) and chars[end] == chars[end - 1] + 1:
+                cut_after(chars[end - 1], heard=True)
+        pieces = grouped()
+        texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
+        # Each piece's English: that of the LLM's sentences lying within it,
+        # or its own translation where a sentence straddles two pieces.
+        spans = _content_offsets(texts)
+        sentences = _content_offsets([ja for ja, _ in pairs])
+        english = []
+        for a, b in spans:
+            inside = [en for (c, d), (_, en) in zip(sentences, pairs) if a <= c and d <= b]
+            straddling = any(c < a < d or c < b < d for c, d in sentences)
+            english.append(None if straddling or not inside else " ".join(inside))
+    else:
+        english = [None] * len(texts)
+    lines = []
+    for (a, b, members), text, en in zip(pieces, texts, english):
+        if not text:
+            continue
+        if en is None:
+            try:
+                en = translate_text(text)
+            except Exception as exc:
+                print(f"piece not translated: {exc}", flush=True)
+                en = ""
+        start, end = grid.bounds(a, b) or (words[members[0]][1], words[members[-1]][2])
+        if within is None or (a >= low - 1e-6 and b <= high + 1e-6):
+            lines.append({"ja": text, "en": en, "start": round(start, 2), "end": round(end, 2)})
+    return lines
+
+
 class PrefetchJob:
     def __init__(self, url, page, headers, duration, start=0.0):
         self.id = uuid.uuid4().hex[:12]
@@ -812,6 +1182,7 @@ class PrefetchJob:
         self.fetch_done = False
         self.lines = []
         self.text = ""
+        self.grid = CutGrid()
         self.ready = self.offset
         self.state = "running"
         self.error = None
@@ -933,17 +1304,9 @@ class PrefetchJob:
     def _transcribe_chunk(self, start, end, audio):
         """`audio` is the video from `start` to `end`."""
         t0 = time.time()
-        ja, _, lines = transcribe_and_translate(
-            audio, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:], vad=True
-        )
-        for line in lines:
-            if "start" in line:
-                line["start"] = round(line["start"] + start, 2)
-                line["end"] = round(line["end"] + start, 2)
-            else:
-                # Not placed among the words: the whole chunk is the best
-                # that can be said.
-                line["start"], line["end"] = round(start, 2), round(end, 2)
+        self.grid.add_chunk(audio, start, end)
+        lines = hear_pieces(self.grid, audio, start, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:])
+        ja = "".join(line["ja"] for line in lines)
         if self.stop_event.is_set():
             # Stopped while this was heard: its audio may be let go already.
             return
@@ -952,22 +1315,26 @@ class PrefetchJob:
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
 
     def rehear(self, start, end, vad=False):
-        """The stretch heard again from the fetched audio, with the wider
-        search and the lines before it as context, and a long line split
-        where the speaker paused. With `vad` only the speech in it is
-        decoded, as for a gap in the captions that may be music."""
-        lead, tail = 0.3, 0.3
+        """The pieces of the grid at `start`..`end` heard again from the
+        fetched audio, with the wider search, the lines before them as
+        context, and the neighbours that follow on in the audio heard with
+        them, so a sentence is heard whole; only those pieces' lines come
+        back. Only the speech of the pieces is decoded, so `vad` (once
+        asking for that, for a gap in the captions that may be music)
+        changes nothing."""
+        pieces = self.grid.pieces(start, end)
+        if not pieces:
+            return []
+        low, high = self.grid.with_neighbours(pieces)
         with self.audio_lock:
-            from_sample = int(max(start - lead - self.offset, 0) * SAMPLE_RATE)
-            audio = self.audio[from_sample:int(max(end + tail - self.offset, 0) * SAMPLE_RATE)].copy()
+            from_sample = int(max(low - self.offset, 0) * SAMPLE_RATE)
+            audio = self.audio[from_sample:int(max(high - self.offset, 0) * SAMPLE_RATE)].copy()
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
-        words = []
         t0 = time.time()
-        _, _, lines = transcribe_and_translate(audio, beam_size=10, prompt="".join(before), words=words, vad=vad)
         began = self.offset + from_sample / SAMPLE_RATE
-        for line in lines:
-            if "start" in line:
-                line["start"], line["end"] = round(line["start"] + began, 2), round(line["end"] + began, 2)
+        lines = hear_pieces(
+            self.grid, audio, began, beam_size=10, prompt="".join(before), within=(pieces[0][0], pieces[-1][1])
+        )
         print(f"prefetch {self.id}: {start:.1f}-{end:.1f}s heard again, {len(lines)} lines in {time.time() - t0:.1f}s",
               flush=True)
         return lines
