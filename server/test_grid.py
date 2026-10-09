@@ -169,13 +169,15 @@ def test_a_word_timed_early_stays_with_its_sentence():
 def test_a_pause_belongs_to_the_gap_next_to_it():
     # Speech runs 0.2-1.9 and 2.3-3.9 with a 0.4 s pause: a soft cut
     # at most. Whisper times どう, the first word after the pause, 0.3 s
-    # early, so that the pause lies under it. The sentence-ending だ
-    # before the gap claims the pause; した, also ending a sentence by
-    # its last character, must not claim it for the gap after itself.
+    # early, so that the pause lies under it, and begins a segment at it.
+    # The segment break before どう claims the pause for the gap before
+    # it; nothing about the words themselves (した ending in た) may
+    # claim it for the gap after.
     grid = grid_with([(0.2, 1.9), (2.3, 3.9)], 0.0, 5.0)
     assert grid.cuts == [0.0, 5.0]
     whisper = FakeWhisper([("大変", 0.3, 0.7), ("だ", 0.7, 0.9), ("大変", 1.0, 1.5), ("だ", 1.5, 1.8),
-                           ("どう", 1.95, 2.3), ("した", 2.3, 2.6), ("んですか", 2.6, 3.1), ("海野さん", 3.2, 3.8)])
+                           ("どう", 1.95, 2.3), ("した", 2.3, 2.6), ("んですか", 2.6, 3.1), ("海野さん", 3.2, 3.8)],
+                          breaks_at=("どう",))
     srv.run_whisper, real_whisper = whisper, srv.run_whisper
     srv.translate_ollama, real_translate = (lambda texts: [(t, "en") for t in texts]), srv.translate_ollama
     try:

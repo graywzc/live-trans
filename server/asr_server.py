@@ -825,9 +825,9 @@ def choose_boundary(audio, target):
 # is decoded on its own, so a word belongs to the piece it was heard in
 # whatever time Whisper gives it. A sentence heard to end between two
 # words, in its punctuation or by the LLM, cuts there for good, soft; one
-# that a word ending a sentence or a segment of Whisper's suggests cuts
-# when the speaker paused there too. The grid only gets finer, so clicking
-# a caption converges on the sentences and never moves a cut back.
+# that a segment of Whisper's suggests cuts when the speaker paused there
+# too. The grid only gets finer, so clicking a caption converges on the
+# sentences and never moves a cut back.
 
 # A pause this long always cuts.
 GRID_HARD_PAUSE = 0.5
@@ -1096,8 +1096,6 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
         score = 0.0
         if after.startswith((" ", "\u3000")) or words[k][0].endswith((" ", "\u3000")):
             score += 0.3  # Whisper writes a space where the speaker broke off
-        if _ends_sentence(before):
-            score += 0.15
         if before[-1:] and after[:1] and _is_kanji(before[-1]) and _is_kanji(after[0]):
             score -= 0.3  # two kanji in a row are one word more often than two sentences
         return score
@@ -1120,12 +1118,14 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
         return False
 
     # Where Whisper ended a sentence: heard to, in its punctuation; or
-    # suggested, by a segment of its or a word that can end one.
+    # suggested, by a segment of its. No guess of our own from the words
+    # themselves: a word that can end a sentence ends a clause as often,
+    # and a guess that is wrong once is a cut for good.
     for i in range(len(words) - 1):
         so_far = "".join(words[j][0] for j in range(i + 1)).rstrip(" \u3000")
         if _SENTENCE_END.search(so_far[-1:]):
             cut_after(i, heard=True)
-        elif i + 1 in breaks or _ends_sentence(so_far):
+        elif i + 1 in breaks:
             cut_after(i, heard=False)
 
     pieces = grouped()
