@@ -853,7 +853,6 @@ GRID_MARK_REACH = 1.0
 GRID_CLIP_PAD = 0.15
 
 
-
 class CutGrid:
     """The speech, pauses and cuts of a job's audio, in seconds of the
     video. `cuts` are the middles of pauses, the edges of the chunks the
@@ -910,21 +909,18 @@ class CutGrid:
 
     def cut_between(self, before, after, heard, tail="", head=""):
         """A cut between the words `before` and `after`, (text, start,
-        end): at the longest pause of GRID_SOFT_PAUSE or more centred
-        within GRID_SNAP of the gap between them, which is as close as
-        Whisper's word times place a break (the first word after a pause
-        is timed early, into it, so a pause is looked for only near the
-        gap, not anywhere under the words: under the next word's whole
-        span it would be claimed by the gap after it); without one,
-        between the words themselves when the sentence was `heard` to end
-        there, and not at all when it was only suggested. `tail` and
-        `head` are the text either side, kept as the cut's marks. Whether
-        one was made."""
-        low, high = before[2] - GRID_SNAP, after[1] + GRID_SNAP
+        end): at the longest pause of GRID_SOFT_PAUSE or more lying under
+        either word, which is as close as Whisper's word times place a
+        break: the first word after a pause is timed early, into the pause
+        and sometimes right up to the word before, so the pause lies under
+        it rather than between the two, and the last word before a pause
+        can run on into it. Without one, between the words themselves when
+        the sentence was `heard` to end there, and not at all when it was
+        only suggested. `tail` and `head` are the text either side, kept
+        as the cut's marks. Whether one was made."""
+        low, high = before[1], after[2]
         with self.lock:
-            found = max(
-                ((b - a, (a + b) / 2) for a, b in self.pauses if low <= (a + b) / 2 <= high), default=None
-            )
+            found = max(((b - a, (a + b) / 2) for a, b in self.pauses if a < high and b > low), default=None)
             if found is not None and found[0] >= GRID_SOFT_PAUSE:
                 at = found[1]
             elif heard:

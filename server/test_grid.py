@@ -188,6 +188,22 @@ def test_a_pause_belongs_to_the_gap_next_to_it():
     finally:
         srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
 
+    # As the live app saw it: どう timed from the very end of だ, 0.36 s
+    # before the pause begins, and ending inside the pause. The pause
+    # lies under どう, and is the gap's all the same.
+    grid = grid_with([(0.2, 1.94), (2.26, 3.9)], 0.0, 5.0)
+    whisper = FakeWhisper([("大変", 0.3, 0.7), ("だ", 0.7, 0.9), ("大変", 1.0, 1.5), ("だ", 1.5, 1.58),
+                           ("どう", 1.58, 2.06), ("した", 2.06, 2.48), ("んですか", 2.48, 2.64), ("海野さん", 2.84, 3.8)],
+                          breaks_at=("どう",))
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = (lambda texts: [(t, "en") for t in texts]), srv.translate_ollama
+    try:
+        lines = srv.hear_pieces(grid, silence(5.0), 0.0, beam_size=5, prompt="")
+        assert [l["ja"] for l in lines] == ["大変だ大変だ", "どうしたんですか海野さん"], lines
+        assert len(grid.cuts) == 3 and 2.05 < grid.cuts[1] < 2.15, grid.cuts
+    finally:
+        srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+
 
 def test_a_hard_cut_goes_by_the_clip_a_word_was_heard_in():
     grid = grid_with([(0.2, 2.0), (2.6, 4.0)], 0.0, 5.0)  # a 0.6 s pause: a hard cut at 2.3
