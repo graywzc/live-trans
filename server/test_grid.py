@@ -134,13 +134,13 @@ def test_llm_sentence_ends_cut_and_straddling_ones_are_translated_apart():
         srv.run_whisper, srv.translate_ollama, srv.translate_text = real_whisper, real_translate, real_text
 
 
-def test_a_word_timed_early_stays_with_its_sentence():
+def test_a_word_timed_early_is_placed_by_the_cuts_marks():
     grid = grid_with([(0.2, 2.0), (2.3, 4.0)], 0.0, 5.0)
     grid.cut_between(("ください", 1.5, 2.0), ("明", 2.3, 2.4), heard=True)
     assert len(grid.cuts) == 3 and 2.1 < grid.cuts[1] < 2.2, grid.cuts
     # Heard again, Whisper puts the first character of 明日 before the
-    # cut: the gap between two kanji is not where a sentence breaks, so
-    # the cut falls after ください.
+    # cut, and the cut has no marks to go by: it falls at the nearest gap,
+    # inside the word. Only the marks of a cut, below, place it by text.
     marked = grid_with([(0.2, 2.0), (2.3, 4.0)], 0.0, 5.0)
     marked.cut_between(("ください", 1.5, 2.0), ("明", 2.3, 2.4), heard=True, tail="言わないでください", head="明日行くよ")
     assert marked.marks[marked.cuts[1]] == ("ださい", "明日行"), marked.marks
@@ -149,7 +149,7 @@ def test_a_word_timed_early_stays_with_its_sentence():
     srv.translate_ollama, real_translate = (lambda texts: [(t, "en") for t in texts]), srv.translate_ollama
     try:
         lines = srv.hear_pieces(grid, silence(5.0), 0.0, beam_size=5, prompt="")
-        assert [l["ja"] for l in lines] == ["言わないでください", "明日行くよ"], lines
+        assert [l["ja"] for l in lines] == ["言わないでください明", "日行くよ"], lines
         # With the cut's marks, the first word of 明日 is placed by its
         # text, even timed half a second early.
         srv.run_whisper = FakeWhisper([("言わないで", 0.3, 1.4), ("ください", 1.5, 1.7), ("明", 1.72, 1.8), ("日", 2.3, 2.5), ("行くよ", 2.6, 3.5)])
@@ -162,6 +162,45 @@ def test_a_word_timed_early_stays_with_its_sentence():
         lines = srv.hear_pieces(fresh, silence(5.0), 0.0, beam_size=5, prompt="")
         assert [l["ja"] for l in lines] == ["言わないでください。", "明日行くよ"], lines
         assert fresh.marks[fresh.cuts[1]] == ("ださい", "明日行"), fresh.marks
+    finally:
+        srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+
+
+def test_a_pause_belongs_to_the_gap_next_to_it():
+    # Speech runs 0.2-1.9 and 2.3-3.9 with a 0.4 s pause: a soft cut
+    # at most. Whisper times どう, the first word after the pause, 0.3 s
+    # early, so that the pause lies under it, and begins a segment at it.
+    # The segment break before どう claims the pause for the gap before
+    # it; nothing about the words themselves (した ending in た) may
+    # claim it for the gap after.
+    grid = grid_with([(0.2, 1.9), (2.3, 3.9)], 0.0, 5.0)
+    assert grid.cuts == [0.0, 5.0]
+    whisper = FakeWhisper([("大変", 0.3, 0.7), ("だ", 0.7, 0.9), ("大変", 1.0, 1.5), ("だ", 1.5, 1.8),
+                           ("どう", 1.95, 2.3), ("した", 2.3, 2.6), ("んですか", 2.6, 3.1), ("海野さん", 3.2, 3.8)],
+                          breaks_at=("どう",))
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = (lambda texts: [(t, "en") for t in texts]), srv.translate_ollama
+    try:
+        lines = srv.hear_pieces(grid, silence(5.0), 0.0, beam_size=5, prompt="")
+        assert [l["ja"] for l in lines] == ["大変だ大変だ", "どうしたんですか海野さん"], lines
+        assert len(grid.cuts) == 3 and 2.05 < grid.cuts[1] < 2.15, grid.cuts
+        assert grid.marks[grid.cuts[1]] == ("大変だ", "どうし"), grid.marks
+    finally:
+        srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+
+    # As the live app saw it: どう timed from the very end of だ, 0.36 s
+    # before the pause begins, and ending inside the pause. The pause
+    # lies under どう, and is the gap's all the same.
+    grid = grid_with([(0.2, 1.94), (2.26, 3.9)], 0.0, 5.0)
+    whisper = FakeWhisper([("大変", 0.3, 0.7), ("だ", 0.7, 0.9), ("大変", 1.0, 1.5), ("だ", 1.5, 1.58),
+                           ("どう", 1.58, 2.06), ("した", 2.06, 2.48), ("んですか", 2.48, 2.64), ("海野さん", 2.84, 3.8)],
+                          breaks_at=("どう",))
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = (lambda texts: [(t, "en") for t in texts]), srv.translate_ollama
+    try:
+        lines = srv.hear_pieces(grid, silence(5.0), 0.0, beam_size=5, prompt="")
+        assert [l["ja"] for l in lines] == ["大変だ大変だ", "どうしたんですか海野さん"], lines
+        assert len(grid.cuts) == 3 and 2.05 < grid.cuts[1] < 2.15, grid.cuts
     finally:
         srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
 

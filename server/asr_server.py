@@ -295,20 +295,20 @@ def sentence_word_spans(sentences, words):
 # is looked at for pauses to split it at.
 SPLIT_MIN_SECONDS = 6.0
 SPLIT_MIN_CHARS = 40
-# A pause this long ends a sentence; a shorter one only after a word that
-# can end one, so a speaker hesitating mid-sentence is not cut. Pauses are
-# measured in the audio: Whisper stretches its words over the silence
-# around them, so the gaps between its word times are mostly gone.
+# A pause this long ends a sentence; a shorter one only where Whisper
+# wrote a sentence's punctuation, so a speaker hesitating mid-sentence is
+# not cut. Pauses are measured in the audio: Whisper stretches its words
+# over the silence around them, so the gaps between its word times are
+# mostly gone.
 SPLIT_PAUSE = 0.7
-SPLIT_PAUSE_AT_ENDING = 0.2
+SPLIT_PAUSE_AT_PUNCTUATION = 0.2
 # A piece shorter than this stays with its neighbour.
 SPLIT_MIN_PIECE_CHARS = 4
-_SENTENCE_ENDINGS = ("。", "？", "！", "?", "!", "ます", "です", "た", "だ", "ね", "よ", "か", "わ")
 
 
 def _ends_sentence(text):
-    text = text.rstrip(" 　、,")
-    return text.endswith(_SENTENCE_ENDINGS)
+    """Whether `text` ends in the punctuation that ends a sentence."""
+    return bool(_SENTENCE_END.search(text.rstrip(" \u3000")[-1:]))
 
 
 def silences(audio):
@@ -368,7 +368,7 @@ def pause_cuts(words, first, last, quiet):
         gap = pause_between(words, i, quiet)
         before = "".join(w[0] for w in words[piece_start:i + 1])
         after = "".join(w[0] for w in words[i + 1:last + 1])
-        if (gap >= SPLIT_PAUSE or (gap >= SPLIT_PAUSE_AT_ENDING and _ends_sentence(before))) \
+        if (gap >= SPLIT_PAUSE or (gap >= SPLIT_PAUSE_AT_PUNCTUATION and _ends_sentence(before))) \
                 and len(_content(before)) >= SPLIT_MIN_PIECE_CHARS \
                 and len(_content(after)) >= SPLIT_MIN_PIECE_CHARS:
             cuts.append(i + 1)
@@ -825,9 +825,9 @@ def choose_boundary(audio, target):
 # is decoded on its own, so a word belongs to the piece it was heard in
 # whatever time Whisper gives it. A sentence heard to end between two
 # words, in its punctuation or by the LLM, cuts there for good, soft; one
-# that a word ending a sentence or a segment of Whisper's suggests cuts
-# when the speaker paused there too. The grid only gets finer, so clicking
-# a caption converges on the sentences and never moves a cut back.
+# that a segment of Whisper's suggests cuts when the speaker paused there
+# too. The grid only gets finer, so clicking a caption converges on the
+# sentences and never moves a cut back.
 
 # A pause this long always cuts.
 GRID_HARD_PAUSE = 0.5
@@ -851,10 +851,6 @@ GRID_MARK_REACH = 1.0
 # How far into the pauses either side of a hard piece its audio is
 # decoded, so the first and last words keep their edges.
 GRID_CLIP_PAD = 0.15
-
-
-def _is_kanji(ch):
-    return "\u4e00" <= ch <= "\u9fff"
 
 
 class CutGrid:
@@ -913,19 +909,18 @@ class CutGrid:
 
     def cut_between(self, before, after, heard, tail="", head=""):
         """A cut between the words `before` and `after`, (text, start,
-        end): at the longest pause of GRID_SOFT_PAUSE or more centred
-        between the start of the one and the end of the other, which is as
-        close as Whisper's word times place a break; without one, between
-        the words themselves when the sentence was `heard` to end there,
-        and not at all when it was only suggested. `tail` and `head` are
-        the text either side, kept as the cut's marks. Whether one was
-        made."""
-        _, low, _ = before
-        _, _, high = after
+        end): at the longest pause of GRID_SOFT_PAUSE or more lying under
+        either word, which is as close as Whisper's word times place a
+        break: the first word after a pause is timed early, into the pause
+        and sometimes right up to the word before, so the pause lies under
+        it rather than between the two, and the last word before a pause
+        can run on into it. Without one, between the words themselves when
+        the sentence was `heard` to end there, and not at all when it was
+        only suggested. `tail` and `head` are the text either side, kept
+        as the cut's marks. Whether one was made."""
+        low, high = before[1], after[2]
         with self.lock:
-            found = max(
-                ((b - a, (a + b) / 2) for a, b in self.pauses if low <= (a + b) / 2 <= high), default=None
-            )
+            found = max(((b - a, (a + b) / 2) for a, b in self.pauses if a < high and b > low), default=None)
             if found is not None and found[0] >= GRID_SOFT_PAUSE:
                 at = found[1]
             elif heard:
@@ -1094,10 +1089,6 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
         score = 0.0
         if after.startswith((" ", "\u3000")) or words[k][0].endswith((" ", "\u3000")):
             score += 0.3  # Whisper writes a space where the speaker broke off
-        if _ends_sentence(before):
-            score += 0.15
-        if before[-1:] and after[:1] and _is_kanji(before[-1]) and _is_kanji(after[0]):
-            score -= 0.3  # two kanji in a row are one word more often than two sentences
         return score
 
     def cut_after(i, heard):
@@ -1118,12 +1109,14 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
         return False
 
     # Where Whisper ended a sentence: heard to, in its punctuation; or
-    # suggested, by a segment of its or a word that can end one.
+    # suggested, by a segment of its. No guess of our own from the words
+    # themselves: a word that can end a sentence ends a clause as often,
+    # and a guess that is wrong once is a cut for good.
     for i in range(len(words) - 1):
         so_far = "".join(words[j][0] for j in range(i + 1)).rstrip(" \u3000")
         if _SENTENCE_END.search(so_far[-1:]):
             cut_after(i, heard=True)
-        elif i + 1 in breaks or _ends_sentence(so_far):
+        elif i + 1 in breaks:
             cut_after(i, heard=False)
 
     pieces = grouped()
