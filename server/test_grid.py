@@ -134,13 +134,13 @@ def test_llm_sentence_ends_cut_and_straddling_ones_are_translated_apart():
         srv.run_whisper, srv.translate_ollama, srv.translate_text = real_whisper, real_translate, real_text
 
 
-def test_a_word_timed_early_stays_with_its_sentence():
+def test_a_word_timed_early_is_placed_by_the_cuts_marks():
     grid = grid_with([(0.2, 2.0), (2.3, 4.0)], 0.0, 5.0)
     grid.cut_between(("ください", 1.5, 2.0), ("明", 2.3, 2.4), heard=True)
     assert len(grid.cuts) == 3 and 2.1 < grid.cuts[1] < 2.2, grid.cuts
     # Heard again, Whisper puts the first character of 明日 before the
-    # cut: the gap between two kanji is not where a sentence breaks, so
-    # the cut falls after ください.
+    # cut, and the cut has no marks to go by: it falls at the nearest gap,
+    # inside the word. Only the marks of a cut, below, place it by text.
     marked = grid_with([(0.2, 2.0), (2.3, 4.0)], 0.0, 5.0)
     marked.cut_between(("ください", 1.5, 2.0), ("明", 2.3, 2.4), heard=True, tail="言わないでください", head="明日行くよ")
     assert marked.marks[marked.cuts[1]] == ("ださい", "明日行"), marked.marks
@@ -149,7 +149,7 @@ def test_a_word_timed_early_stays_with_its_sentence():
     srv.translate_ollama, real_translate = (lambda texts: [(t, "en") for t in texts]), srv.translate_ollama
     try:
         lines = srv.hear_pieces(grid, silence(5.0), 0.0, beam_size=5, prompt="")
-        assert [l["ja"] for l in lines] == ["言わないでください", "明日行くよ"], lines
+        assert [l["ja"] for l in lines] == ["言わないでください明", "日行くよ"], lines
         # With the cut's marks, the first word of 明日 is placed by its
         # text, even timed half a second early.
         srv.run_whisper = FakeWhisper([("言わないで", 0.3, 1.4), ("ください", 1.5, 1.7), ("明", 1.72, 1.8), ("日", 2.3, 2.5), ("行くよ", 2.6, 3.5)])

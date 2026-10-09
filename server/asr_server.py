@@ -853,9 +853,6 @@ GRID_MARK_REACH = 1.0
 GRID_CLIP_PAD = 0.15
 
 
-def _is_kanji(ch):
-    return "\u4e00" <= ch <= "\u9fff"
-
 
 class CutGrid:
     """The speech, pauses and cuts of a job's audio, in seconds of the
@@ -1096,8 +1093,6 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
         score = 0.0
         if after.startswith((" ", "\u3000")) or words[k][0].endswith((" ", "\u3000")):
             score += 0.3  # Whisper writes a space where the speaker broke off
-        if before[-1:] and after[:1] and _is_kanji(before[-1]) and _is_kanji(after[0]):
-            score -= 0.3  # two kanji in a row are one word more often than two sentences
         return score
 
     def cut_after(i, heard):
