@@ -295,20 +295,20 @@ def sentence_word_spans(sentences, words):
 # is looked at for pauses to split it at.
 SPLIT_MIN_SECONDS = 6.0
 SPLIT_MIN_CHARS = 40
-# A pause this long ends a sentence; a shorter one only after a word that
-# can end one, so a speaker hesitating mid-sentence is not cut. Pauses are
-# measured in the audio: Whisper stretches its words over the silence
-# around them, so the gaps between its word times are mostly gone.
+# A pause this long ends a sentence; a shorter one only where Whisper
+# wrote a sentence's punctuation, so a speaker hesitating mid-sentence is
+# not cut. Pauses are measured in the audio: Whisper stretches its words
+# over the silence around them, so the gaps between its word times are
+# mostly gone.
 SPLIT_PAUSE = 0.7
-SPLIT_PAUSE_AT_ENDING = 0.2
+SPLIT_PAUSE_AT_PUNCTUATION = 0.2
 # A piece shorter than this stays with its neighbour.
 SPLIT_MIN_PIECE_CHARS = 4
-_SENTENCE_ENDINGS = ("。", "？", "！", "?", "!", "ます", "です", "た", "だ", "ね", "よ", "か", "わ")
 
 
 def _ends_sentence(text):
-    text = text.rstrip(" 　、,")
-    return text.endswith(_SENTENCE_ENDINGS)
+    """Whether `text` ends in the punctuation that ends a sentence."""
+    return bool(_SENTENCE_END.search(text.rstrip(" \u3000")[-1:]))
 
 
 def silences(audio):
@@ -368,7 +368,7 @@ def pause_cuts(words, first, last, quiet):
         gap = pause_between(words, i, quiet)
         before = "".join(w[0] for w in words[piece_start:i + 1])
         after = "".join(w[0] for w in words[i + 1:last + 1])
-        if (gap >= SPLIT_PAUSE or (gap >= SPLIT_PAUSE_AT_ENDING and _ends_sentence(before))) \
+        if (gap >= SPLIT_PAUSE or (gap >= SPLIT_PAUSE_AT_PUNCTUATION and _ends_sentence(before))) \
                 and len(_content(before)) >= SPLIT_MIN_PIECE_CHARS \
                 and len(_content(after)) >= SPLIT_MIN_PIECE_CHARS:
             cuts.append(i + 1)
