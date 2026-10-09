@@ -154,6 +154,17 @@ struct ASRClient {
         _ = try Self.decode(Payload.self, from: data, statusCode: response)
     }
 
+    /// The server's log from line `since` on. A server from before it kept
+    /// one answers 404, which throws.
+    func events(since: Int) async throws -> HostEvents {
+        var components = URLComponents(url: baseURL.appending(path: "events"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "since", value: String(since))]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 5
+        let (data, response) = try await session.data(for: request)
+        return try Self.decode(HostEvents.self, from: data, statusCode: response)
+    }
+
     private struct ServerFailure: Decodable { var error: String? }
 
     private static func decode<T: Decodable>(_ type: T.Type, from data: Data, statusCode response: URLResponse) throws -> T {

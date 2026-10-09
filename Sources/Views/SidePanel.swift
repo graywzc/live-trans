@@ -1,14 +1,16 @@
 import SwiftUI
 import WebKit
 
-/// What the right-hand part of the window is showing. Jisho and the sentence
-/// analysis share it: one place to look, one divider, one width.
+/// What the right-hand part of the window is showing. Jisho, the sentence
+/// analysis and the activity behind the captions share it: one place to
+/// look, one divider, one width.
 @MainActor
 @Observable
 final class SidePanel {
     enum Tab: Hashable {
         case jisho
         case analysis
+        case activity
     }
 
     /// Open from the first frame: the window is captions and a panel, not
@@ -21,7 +23,8 @@ final class SidePanel {
         isPresented = true
     }
 
-    /// `-sidePanel jisho`, `-sidePanel analysis` or `-sidePanel closed`
+    /// `-sidePanel jisho`, `-sidePanel analysis`, `-sidePanel activity` or
+    /// `-sidePanel closed`
     /// (UserDefaults reads such arguments) picks what the panel shows at
     /// launch, or leaves the captions alone. Nothing is persisted: the next
     /// ordinary launch opens the panel on Jisho again.
@@ -29,6 +32,7 @@ final class SidePanel {
         switch defaults.string(forKey: "sidePanel") {
         case "jisho": show(.jisho)
         case "analysis": show(.analysis)
+        case "activity": show(.activity)
         case "closed": isPresented = false
         default: break
         }
@@ -52,6 +56,7 @@ struct SidePanelView: View {
                 Picker("Panel", selection: $panel.tab) {
                     Text("Jisho").tag(SidePanel.Tab.jisho)
                     Text("Analysis").tag(SidePanel.Tab.analysis)
+                    Text("Activity").tag(SidePanel.Tab.activity)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -59,6 +64,7 @@ struct SidePanelView: View {
                 switch panel.tab {
                 case .jisho: jishoControls
                 case .analysis: analysisControls
+                case .activity: ActivityControls()
                 }
                 Button {
                     panel.isPresented = false
@@ -77,6 +83,7 @@ struct SidePanelView: View {
                 WebView(webView: browser.webView)
                     .onAppear(perform: browser.loadHomeIfBlank)
             case .analysis: AnalysisView()
+            case .activity: ActivityView()
             }
         }
     }

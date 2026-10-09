@@ -28,7 +28,7 @@ final class CaptionEngine {
 
     private(set) var status: Status = .idle {
         didSet {
-            if status != oldValue { print("status: \(status)") }
+            if status != oldValue { ActivityLog.note("status: \(status)") }
         }
     }
     private(set) var captions: [Caption] = []
@@ -36,6 +36,8 @@ final class CaptionEngine {
     private(set) var inputLevel: Float = 0
     private(set) var speechThreshold: Float = 0
     private(set) var isSpeaking = false
+    /// Utterances spoken whose captions have not come back yet.
+    private(set) var awaited = 0
 
     /// Where the video is at a given time, asked as each utterance starts so
     /// its captions can take the video back to it.
@@ -138,6 +140,7 @@ final class CaptionEngine {
 
         partialText = ""
         isSpeaking = false
+        awaited = 0
         inputLevel = 0
         status = .idle
 
@@ -283,6 +286,10 @@ final class CaptionEngine {
             switch event {
             case .started(let utterance):
                 isSpeaking = true
+                ActivityLog.detail(String(
+                    format: "utterance %d begins: level %.0f over the threshold %.0f (noise floor %.0f)",
+                    utterance, vad.lastRMS, vad.threshold, vad.noiseFloor ?? 0
+                ))
                 if let videoClock {
                     let now = Date()
                     utteranceMoments[utterance] = Task {
@@ -296,14 +303,20 @@ final class CaptionEngine {
             case .final(let audio, let utterance):
                 isSpeaking = false
                 let seconds = Double(audio.count / AudioFormat.frameBytes) * AudioFormat.frameDuration
-                print(String(
+                ActivityLog.note(String(
                     format: "utterance %d: %.1f s, noise floor %.0f, threshold %.0f",
                     utterance, seconds, vad.noiseFloor ?? 0, vad.threshold
                 ))
+                ActivityLog.detail(
+                    segmenter.lastEnd == .pause
+                        ? String(format: "  cut after %.1f s without speech; sent with %.1f s of it", segmenter.config.silenceTimeout, segmenter.config.postRoll)
+                        : String(format: "  cut mid-speech at the %.0f s limit: the rest is the next utterance", segmenter.config.maxUtterance)
+                )
+                awaited += 1
                 finals?.yield((id: utterance, audio: audio))
             case .discarded(let utterance):
                 isSpeaking = false
-                print("utterance \(utterance) discarded: too brief to be speech")
+                ActivityLog.note("utterance \(utterance) discarded: too brief to be speech")
                 utteranceMoments[utterance] = nil
                 resolvedMoments[utterance] = nil
                 settle(utterance)
@@ -341,6 +354,8 @@ final class CaptionEngine {
         finalWorker = Task {
             for await final in stream {
                 await transcribeFinal(final.audio, utterance: final.id, client: client)
+                // Stopped meanwhile, the count is already back at none.
+                awaited = max(awaited - 1, 0)
                 settle(final.id)
             }
         }
@@ -354,7 +369,7 @@ final class CaptionEngine {
         if let moment, isPrefetched?(moment) == true {
             // Its captions were fetched ahead from the video's own audio,
             // which beats a cut of what the speakers played.
-            print(String(format: "utterance %d: pre-fetched captions cover it, dropped", utterance))
+            ActivityLog.note(String(format: "utterance %d: pre-fetched captions cover it, dropped", utterance))
             return
         }
         // Heard from a stretch of the video that has captions already: the
@@ -364,7 +379,15 @@ final class CaptionEngine {
         let heardAgain = moment.map { Self.isCaptioned(captions, from: $0, spoken: spoken) } ?? false
         let beamSize = heardAgain ? Self.replayBeamSize : Self.liveBeamSize
         let prompt = heardAgain ? contextPrompt(before: moment!, spoken: spoken) : nil
+        ActivityLog.detail(
+            "  utterance \(utterance) sent: "
+                + (moment.map { "said at \(CaptionRow.timestamp($0.seconds)) of the video" } ?? "no video to place it in")
+                + (heardAgain
+                    ? ", which has captions: heard with beam \(beamSize) and the captions before as context, to correct them"
+                    : ", beam \(beamSize)")
+        )
         for attempt in 1...Self.remoteRetries {
+            let sent = Date()
             do {
                 let result = try await client.transcribe(
                     pcm: audio, beamSize: beamSize, translate: true, prompt: prompt
@@ -372,12 +395,13 @@ final class CaptionEngine {
                 guard !Task.isCancelled else { return }
                 status = .listening(serverLabel)
                 if result.lines.allSatisfy(\.ja.isEmpty) {
-                    print("utterance \(utterance): the server heard no words")
+                    ActivityLog.note("utterance \(utterance): the server heard no words")
                 }
                 let lines = captionLines(result, from: moment, spoken: spoken)
-                if heardAgain {
-                    print(String(format: "utterance %d: %.1f s heard again", utterance, spoken))
-                }
+                ActivityLog.note(String(
+                    format: "utterance %d: %d lines in %.1f s%@", utterance, lines.count,
+                    Date().timeIntervalSince(sent), heardAgain ? ", heard again" : ""
+                ))
                 captions = Self.merge(lines, into: captions, prompt: prompt ?? "")
                 return
             } catch {
@@ -389,7 +413,7 @@ final class CaptionEngine {
                 if attempt < Self.remoteRetries {
                     try? await Task.sleep(nanoseconds: Self.remoteRetryDelay)
                 } else {
-                    print("utterance \(utterance) dropped after \(attempt) attempts: \(error.localizedDescription)")
+                    ActivityLog.note("utterance \(utterance) dropped after \(attempt) attempts: \(error.localizedDescription)")
                 }
             }
         }
@@ -400,6 +424,9 @@ final class CaptionEngine {
         let moments = Self.moments(of: lines, from: moment, spoken: spoken, preRoll: segmenter.config.preRoll)
         return zip(lines, moments).map { line, moment in
             print("\(line.ja)\n-> \(line.en)")
+            ActivityLog.shared.record(
+                "  line \(moment.map(CaptionRow.span(of:)) ?? "unplaced"): \(line.ja)", detail: true
+            )
             return makeCaption(japanese: line.ja, english: line.en, moment: moment)
         }
     }
@@ -516,7 +543,7 @@ final class CaptionEngine {
                 continue
             }
             if isEcho(text, of: prompt) {
-                print("heard again as its context, kept: \(group.captions.map { captions[$0].japanese }.joined())")
+                ActivityLog.note("heard again as its context, kept: \(group.captions.map { captions[$0].japanese }.joined())")
                 continue
             }
             var taken: [Int] = []
@@ -536,9 +563,9 @@ final class CaptionEngine {
                     || cover >= rehearingMinimumCover && resemblance(of: text, to: caption.japanese) >= replayMinimumResemblance {
                     taken.append(ci)
                 } else if cover >= rehearingMinimumCover {
-                    print("heard again as something else, kept: \(caption.japanese) (heard: \(text))")
+                    ActivityLog.note("heard again as something else, kept: \(caption.japanese) (heard: \(text))")
                 } else if cover > 0 {
-                    print("heard again only in part, kept: \(caption.japanese) (heard: \(text))")
+                    ActivityLog.note("heard again only in part, kept: \(caption.japanese) (heard: \(text))")
                 }
             }
             // A line belongs to the captions it replaced when it lies over
@@ -553,13 +580,13 @@ final class CaptionEngine {
                 if !taken.isEmpty, overTaken >= overAll / 2 {
                     replacement.append(line)
                 } else if overAll >= length(line) * rehearingMinimumCover {
-                    print("a fragment of a caption, dropped: \(line.japanese)")
+                    ActivityLog.note("a fragment of a caption, dropped: \(line.japanese)")
                 } else {
                     new.append(line)
                 }
             }
             if let first = taken.min(), !replacement.isEmpty {
-                print("heard again: \(taken.map { captions[$0].japanese }.joined()) -> \(replacement.map(\.japanese).joined())")
+                ActivityLog.note("heard again: \(taken.map { captions[$0].japanese }.joined()) -> \(replacement.map(\.japanese).joined())")
                 replacing[first] = replacement
                 removed.formUnion(taken)
             }

@@ -35,6 +35,11 @@ final class SidePanelTests: XCTestCase {
         analysis.applyLaunchArgument(defaults: defaults(sidePanel: "analysis"))
         XCTAssertTrue(analysis.isPresented)
         XCTAssertEqual(analysis.tab, .analysis)
+
+        let activity = SidePanel()
+        activity.applyLaunchArgument(defaults: defaults(sidePanel: "activity"))
+        XCTAssertTrue(activity.isPresented)
+        XCTAssertEqual(activity.tab, .activity)
     }
 
     func testAnUnknownValueIsIgnored() {
