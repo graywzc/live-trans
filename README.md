@@ -278,6 +278,32 @@ caption as it was. Sentence times come from where Whisper heard the words,
 so this needs a current `asr_server.py` on the GPU host; an older one still
 works, with the sentences placed by their share of the text instead.
 
+### Activity
+
+The third tab of the panel, **Activity**, shows what goes on behind the
+captions. At the top, how the Mac and the GPU host stand: whether the Mac is
+listening and how many utterances are waiting for their captions, which models
+the host has loaded, and how far a video's pre-fetch has got. Under that, one
+list in the order things happened, each line marked with the machine it is
+from: utterances cut and sent, sentences heard again and what became of them,
+the host's log (chunks transcribed and how long each took, lines split, jobs
+started and stopped). The host's lines are its log, asked for every second
+(`GET /events`), and like the log they count what was heard without quoting
+it.
+
+Between those lines, a shade dimmer, are the steps of each hearing, for
+seeing how a caption came to be cut where it is: what ended an utterance on
+the Mac (a second of silence, or the twelve-second limit); on the host, where
+a chunk of a video was ended and in which pause, the pauses found in it and
+the cuts made at the long ones, the clips Whisper was given and the segments
+it heard in each, every cut made or refused inside a clip and what asked for
+it (a sentence end Whisper wrote, a new segment of its, a sentence the LLM
+ended) and where it went (in which pause, or between two words), and the
+lines that came of it with their times. The button beside the bin hides the
+steps and shows them again. These quote what was heard, so on the host they
+are kept in memory only, never in its log, and go with the server; on the Mac
+the list is in memory too, its last five thousand lines.
+
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. Nothing of a session outlives the app: the
 captions, analyses and lookups exist only in memory, network responses and the
@@ -315,8 +341,9 @@ LiveTrans.app/Contents/MacOS/LiveTrans -demoAudioPath "$PWD/clip.wav" -autoStart
 ```
 
 The window opens with the captions and the side panel side by side;
-`-sidePanel jisho`, `-sidePanel analysis` or `-sidePanel closed` picks what
-the panel shows at launch, or starts with the captions alone.
+`-sidePanel jisho`, `-sidePanel analysis`, `-sidePanel activity` or
+`-sidePanel closed` picks what the panel shows at launch, or starts with the
+captions alone.
 
 Captions are echoed to stdout. Unit tests:
 

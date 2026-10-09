@@ -197,12 +197,16 @@ final class Prefetcher {
               let client = engine.client
         else { return }
         let from = max(moment.seconds, stretch.from), to = min(end, stretch.to)
+        ActivityLog.detail(
+            "caption clicked: \(CaptionRow.timestamp(from))–\(CaptionRow.timestamp(to)) asked of job \(stretch.job.prefix(6)) again"
+        )
         Task {
             do {
                 let lines = try await client.rehear(job: stretch.job, from: from, to: to)
+                ActivityLog.detail("  \(lines.count) lines back: " + lines.map(\.ja).joined(separator: " | "))
                 engine.add(lines, tabID: moment.tabID, url: moment.url, heardAgain: true)
             } catch {
-                print("rehear failed: \(error.localizedDescription)")
+                ActivityLog.note("rehear failed: \(error.localizedDescription)")
             }
         }
     }
@@ -228,7 +232,7 @@ final class Prefetcher {
                     let lines = try await client.rehear(job: stretch.job, from: gap.from, to: gap.to, speechOnly: true)
                     engine.add(lines, tabID: tabID, url: url, heardAgain: true)
                 } catch {
-                    print("gap rehear failed: \(error.localizedDescription)")
+                    ActivityLog.note("gap rehear failed: \(error.localizedDescription)")
                 }
             }
         }
@@ -337,7 +341,7 @@ final class Prefetcher {
             } catch {
                 // A host that cannot pause is stopped instead, and a job it
                 // no longer has is started afresh.
-                print("prefetch \(isPaused ? "pause" : "resume"): \(error.localizedDescription)")
+                ActivityLog.note("prefetch \(isPaused ? "pause" : "resume"): \(error.localizedDescription)")
                 if isPaused { await stopJob() } else if job?.id == current.id { retire() }
                 return
             }
@@ -360,15 +364,20 @@ final class Prefetcher {
                 return !finished.contains { $0.holds(start) }
             }
             if !lines.isEmpty {
+                ActivityLog.detail(
+                    "prefetch \(current.id.prefix(6)): \(lines.count) lines taken, captioned to \(CaptionRow.timestamp(status.ready))"
+                        + (lines.count < status.lines.count
+                            ? "; \(status.lines.count - lines.count) left out, an earlier job having captioned there" : "")
+                )
                 engine.add(lines, tabID: current.tabID, url: current.page, heardAgain: false)
             }
             if status.state == "failed" {
-                print("prefetch failed: \(status.error ?? "unknown")")
+                ActivityLog.note("prefetch failed: \(status.error ?? "unknown")")
                 failedPages.insert(current.page)
                 retire()
             }
         } catch {
-            print("prefetch status: \(error.localizedDescription)")
+            ActivityLog.note("prefetch status: \(error.localizedDescription)")
         }
         let hasJumped = jumped
         jumped = false
@@ -406,9 +415,9 @@ final class Prefetcher {
                 id: id, tabID: probe.tabID, page: probe.page, duration: old?.duration ?? probe.duration,
                 start: start, fetched: start, ready: start
             )
-            print("prefetch \(id) from \(Int(start))s: \(probe.mediaURL ?? probe.page)")
+            ActivityLog.note("prefetch \(id) from \(Int(start))s: \(probe.mediaURL ?? probe.page)")
         } catch {
-            print("prefetch could not start: \(error.localizedDescription)")
+            ActivityLog.note("prefetch could not start: \(error.localizedDescription)")
             failedPages.insert(probe.page)
         }
     }

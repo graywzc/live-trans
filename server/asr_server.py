@@ -52,9 +52,22 @@ POST /transcribe   body: raw PCM s16le mono 16kHz
                    with where it starts and ends in the audio (seconds)
                    when its words could be placed.
 GET /health       -> {"status": "ok", "asr": "...", "device": "cuda"}
+GET /events?since=N
+                   -> {"boot": id of this run of the server, "next": N to
+                       ask from next time, "events": [{"seq": 12,
+                       "at": seconds since 1970, "text": "..."}, ...]}
+                   the lines of the log from N on, for the app to show
+                   what the server is doing, and among them the steps of
+                   each hearing ("detail": true): the speech and pauses
+                   found, the clips Whisper was given and what it heard in
+                   each, every cut made or refused and why, the lines that
+                   came of it. Those quote what was heard, as the lines
+                   of a job do, and like them are only ever in memory:
+                   the last couple of thousand, never in the log.
 """
 
 import argparse
+import collections
 import json
 import os
 import re
@@ -128,6 +141,64 @@ _BOUNDARY_NOISE = set("。、，．,.!?！？…‥ 　\t\n")
 
 _last_request_at = time.time()
 
+# The log's last lines, kept for the app to show beside its own. A run of
+# the server numbers them from one, and names itself so that a client can
+# tell the numbering has started over.
+EVENTS_KEPT = 2000
+_boot = uuid.uuid4().hex[:8]
+_events = collections.deque(maxlen=EVENTS_KEPT)
+_events_lock = threading.Lock()
+_event_count = 0
+
+
+# Set for a request whose steps are not worth telling: the preview of an
+# utterance still being spoken, asked for every couple of seconds.
+_untold = threading.local()
+
+
+def _event(text, is_detail):
+    global _event_count
+    with _events_lock:
+        _event_count += 1
+        event = {"seq": _event_count, "at": round(time.time(), 3), "text": text}
+        if is_detail:
+            event["detail"] = True
+        _events.append(event)
+
+
+def log(text):
+    """A line for the log and for /events. Like the log, it counts what
+    was heard and never quotes it."""
+    print(text, flush=True)
+    _event(text, False)
+
+
+def detail(text):
+    """A step of a hearing, for /events alone: it may quote what was
+    heard, so it is never printed, and is gone with the server."""
+    if not getattr(_untold, "on", False):
+        _event(text, True)
+
+
+def clock(seconds):
+    """"4:05.3", a place in the video as the app shows it, to the tenth."""
+    tenths = round(max(float(seconds), 0.0) * 10)
+    return f"{tenths // 600}:{tenths % 600 / 10:04.1f}"
+
+
+def stretch(start, end):
+    return f"{clock(start)}–{clock(end)}"
+
+
+def events_since(since):
+    with _events_lock:
+        return {
+            "boot": _boot,
+            "next": _event_count,
+            "events": [event for event in _events if event["seq"] > since],
+        }
+
+
 _asr = None
 _nllb = None
 _nllb_tok = None
@@ -150,23 +221,23 @@ def load_models():
     global _asr, _nllb, _nllb_tok
     from faster_whisper import WhisperModel
 
-    print(f"loading ASR {ASR_MODEL} on {DEVICE}/{COMPUTE_TYPE} ...", flush=True)
+    log(f"loading ASR {ASR_MODEL} on {DEVICE}/{COMPUTE_TYPE} ...")
     t0 = time.time()
     _asr = WhisperModel(ASR_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
-    print(f"  ASR ready in {time.time() - t0:.1f}s", flush=True)
+    log(f"  ASR ready in {time.time() - t0:.1f}s")
 
     if TRANSLATE_BACKEND == "ollama":
         threading.Thread(target=warm_ollama, daemon=True).start()
         return
     if TRANSLATE_BACKEND != "nllb":
-        print("translation: whisper task=translate (NLLB not loaded)", flush=True)
+        log("translation: whisper task=translate (NLLB not loaded)")
         return
 
     if os.path.isdir(NLLB_DIR):
         import ctranslate2
         import transformers
 
-        print(f"loading NLLB from {NLLB_DIR} ...", flush=True)
+        log(f"loading NLLB from {NLLB_DIR} ...")
         t0 = time.time()
         _nllb_tok = transformers.AutoTokenizer.from_pretrained(
             NLLB_DIR, src_lang="jpn_Jpan"
@@ -174,9 +245,9 @@ def load_models():
         _nllb = ctranslate2.Translator(
             NLLB_DIR, device=DEVICE, compute_type=NLLB_COMPUTE_TYPE
         )
-        print(f"  NLLB ready in {time.time() - t0:.1f}s", flush=True)
+        log(f"  NLLB ready in {time.time() - t0:.1f}s")
     else:
-        print(f"  NLLB dir {NLLB_DIR} missing - translation disabled", flush=True)
+        log(f"  NLLB dir {NLLB_DIR} missing - translation disabled")
 
 
 def _is_untranslatable(text):
@@ -225,7 +296,10 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
     elif vad:
         clips = speech_clips(audio)
         if not clips:
+            detail("voice filter: no speech in the audio, nothing given to Whisper")
             return []
+        detail(f"voice filter: speech at {', '.join(stretch(a, b) for a, b in zip(clips[::2], clips[1::2]))}, "
+               "the rest left out")
     else:
         clips = "0"
     with _asr_lock:
@@ -420,10 +494,14 @@ def split_at_pauses(lines, words, quiet, translate):
         try:
             english = [translate(text) for text in texts]
         except Exception as exc:
-            print(f"split kept whole, translation failed: {exc}", flush=True)
+            log(f"split kept whole, translation failed: {exc}")
             result.append(line)
             continue
-        print(f"split at pauses: one line into {len(texts)}", flush=True)
+        log(f"split at pauses: one line into {len(texts)}")
+        detail("  where the speaker paused "
+               + ", ".join(f"{pause_between(words, i - 1, silent):.1f}s" for i in cuts)
+               + f" ({SPLIT_PAUSE}s cuts anywhere, {SPLIT_PAUSE_AT_PUNCTUATION}s after a sentence end): "
+               + " | ".join(texts))
         for text, en, a, b in zip(texts, english, bounds, bounds[1:]):
             result.append({"ja": text, "en": en,
                            "start": round(float(words[a][1]), 2), "end": round(float(words[b - 1][2]), 2)})
@@ -473,16 +551,15 @@ def _ollama_generate(text, timeout, prompt=_OLLAMA_PROMPT):
 def warm_ollama():
     """First generate pulls the model into memory; also proves reachability."""
     global _ollama_ok
-    print(f"translation: ollama {OLLAMA_MODEL} at {OLLAMA_URL}, warming ...",
-          flush=True)
+    log(f"translation: ollama {OLLAMA_MODEL} at {OLLAMA_URL}, warming ...")
     t0 = time.time()
     try:
         _ollama_generate("こんにちは", timeout=300)
-        print(f"  ollama ready in {time.time() - t0:.1f}s", flush=True)
+        log(f"  ollama ready in {time.time() - t0:.1f}s")
     except Exception as exc:
         _ollama_ok = False
-        print(f"  ollama unreachable ({exc}); "
-              "falling back to whisper task=translate", flush=True)
+        log(f"  ollama unreachable ({exc}); "
+              "falling back to whisper task=translate")
 
 
 def unload_ollama():
@@ -503,9 +580,9 @@ def unload_ollama():
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
-        print(f"unloaded ollama {OLLAMA_MODEL}", flush=True)
+        log(f"unloaded ollama {OLLAMA_MODEL}")
     except Exception as exc:
-        print(f"could not unload ollama {OLLAMA_MODEL} ({exc})", flush=True)
+        log(f"could not unload ollama {OLLAMA_MODEL} ({exc})")
 
 
 def exit_releasing_gpu():
@@ -635,9 +712,11 @@ def _split_long(pairs, words):
                 response = _ollama_generate(_for_splitting(ja), timeout=OLLAMA_TIMEOUT, prompt=prompt)
                 pieces = _parse_pairs(response, ja) or _breaks_only(response, ja)
             except Exception as exc:
-                print(f"long line not split: {exc}", flush=True)
-            print(f"long line of {size} characters: "
-                  + (f"into {len(pieces)}" if pieces else "kept whole"), flush=True)
+                log(f"long line not split: {exc}")
+            log(f"long line of {size} characters: "
+                  + (f"into {len(pieces)}" if pieces else "kept whole"))
+            if pieces:
+                detail("  the LLM, asked about it alone: " + " | ".join(ja for ja, _ in pieces))
         result.extend(pieces or [(ja, en)])
     return result
 
@@ -652,22 +731,25 @@ def translate_ollama(segments):
     segments = _at_sentence_ends(segments)
     text = "\n".join(segments)
     try:
+        t0 = time.time()
         response = _ollama_generate(
             _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_SPLIT_PROMPT
         )
         pairs = _parse_pairs(response, text)
         if pairs:
+            detail(f"LLM ({OLLAMA_MODEL}): {len(segments)} lines in, {len(pairs)} sentences out, "
+                   f"translated, in {time.time() - t0:.1f}s")
             return pairs
-        print(f"ollama split unusable ({len(text)} characters in, {len(response)} out); "
-              "translating per segment", flush=True)
+        log(f"ollama split unusable ({len(text)} characters in, {len(response)} out); "
+              "translating per segment")
         return [
             (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
             for segment in segments
         ]
     except Exception as exc:
         _ollama_ok = False
-        print(f"ollama translation failed ({exc}); "
-              "falling back to whisper task=translate", flush=True)
+        log(f"ollama translation failed ({exc}); "
+              "falling back to whisper task=translate")
         return None
 
 
@@ -691,7 +773,12 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
     where each sits in `audio`: [{"ja", "en", "start", "end"}, ...].
     `words`, a list, is filled with the words heard and their times."""
     words = [] if words is None else words
+    t0 = time.time()
     segments = run_whisper(audio, beam_size=beam_size, prompt=prompt, words=words, vad=vad)
+    detail(f"Whisper (beam {beam_size}, {len(prompt or '')} characters of context): "
+           f"{len(words)} words in {len(segments)} segments in {time.time() - t0:.1f}s")
+    for segment in segments:
+        detail(f"  segment: {segment}")
     quiet = None
     # Only a word this long can lie across a long silence.
     if any(end - start >= STRETCH_PAUSE for _, start, end in words):
@@ -721,6 +808,9 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
         # speaker paused.
         lines = split_at_pauses(lines, words, lambda: quiet if quiet is not None else silences(audio), translate_text)
         pairs = [(line["ja"], line["en"]) for line in lines]
+    for line in lines:
+        at = stretch(line["start"], line["end"]) if "start" in line else "unplaced"
+        detail(f"  line {at}: {line['ja']}")
     return ja, pairs, lines
 
 
@@ -806,9 +896,13 @@ def choose_boundary(audio, target):
         pauses.append((speech[-1]["end"] / SAMPLE_RATE, audio.size / SAMPLE_RATE))
     pauses = [(a, b) for a, b in pauses if a <= target]
     if not pauses:
+        detail(f"chunk end: no pause in {target:.0f}s of speech, cut at {target:.0f}s regardless")
         return target
     long = [(a, b) for a, b in pauses if b - a >= PREFETCH_CUT_PAUSE]
     start, end = long[-1] if long else max(pauses, key=lambda p: p[1] - p[0])
+    detail(f"chunk end: {start:.1f}s in, in a pause of {end - start:.1f}s, "
+           + (f"the last of {PREFETCH_CUT_PAUSE}s or more in {target:.0f}s" if long
+              else f"the longest there is, none being {PREFETCH_CUT_PAUSE}s"))
     return min(start + PREFETCH_CUT_LEAD, (start + end) / 2)
 
 
@@ -893,6 +987,10 @@ class CutGrid:
             for a, b in pauses:
                 if b - a >= GRID_HARD_PAUSE:
                     self._cut((a + b) / 2, hard=True)
+        long = [(a, b) for a, b in pauses if b - a >= GRID_HARD_PAUSE]
+        detail(f"pauses in {stretch(began, end)}: {len(speech)} stretches of speech, {len(pauses)} pauses of "
+               f"{GRID_PAUSE_MIN}s or more; a cut in each of the {len(long)} of {GRID_HARD_PAUSE}s or more"
+               + (": " + ", ".join(f"{clock((a + b) / 2)} ({b - a:.1f}s)" for a, b in long) if long else ""))
 
     def _cut(self, at, hard=False):
         """A cut at `at`; whether it is new."""
@@ -907,7 +1005,7 @@ class CutGrid:
             self.hard.add(at)
         return True
 
-    def cut_between(self, before, after, heard, tail="", head=""):
+    def cut_between(self, before, after, heard, tail="", head="", told=None):
         """A cut between the words `before` and `after`, (text, start,
         end): at the longest pause of GRID_SOFT_PAUSE or more lying under
         either word, which is as close as Whisper's word times place a
@@ -917,18 +1015,25 @@ class CutGrid:
         can run on into it. Without one, between the words themselves when
         the sentence was `heard` to end there, and not at all when it was
         only suggested. `tail` and `head` are the text either side, kept
-        as the cut's marks. Whether one was made."""
+        as the cut's marks. Whether one was made; `told`, a list, is
+        given where it was put or why it was not, and nothing when it was
+        there already."""
         low, high = before[1], after[2]
+        told = [] if told is None else told
         with self.lock:
             found = max(((b - a, (a + b) / 2) for a, b in self.pauses if a < high and b > low), default=None)
             if found is not None and found[0] >= GRID_SOFT_PAUSE:
                 at = found[1]
+                where = f"at {clock(at)}, in a pause of {found[0]:.2f}s"
             elif heard:
                 at = min(max((before[2] + after[1]) / 2, low + 1e-3), high - 1e-3)
+                where = f"at {clock(at)}, between the two words, there being no pause of {GRID_SOFT_PAUSE}s"
             else:
+                told.append(f"no pause of {GRID_SOFT_PAUSE}s there")
                 return False
             if not self._cut(at):
                 return False
+            told.append(where)
             self.marks[at] = (_content(tail)[-GRID_MARK_CHARS:], _content(head)[:GRID_MARK_CHARS])
             return True
 
@@ -1010,13 +1115,20 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
     low, high = within or (began, began + audio.size / SAMPLE_RATE)
     clips = grid.clips(began, began + audio.size / SAMPLE_RATE)
     words, breaks = [], []
+    detail(f"Whisper (beam {beam_size}, {len(prompt or '')} characters of context) given {len(clips)} clips, "
+           "each decoded on its own: " + ", ".join(stretch(a, b) for a, b in clips))
+    t0 = time.time()
     run_whisper(
         audio, beam_size=beam_size, prompt=prompt, words=words, breaks=breaks,
         clips=[(max(a - began, 0), b - began) for a, b in clips],
     )
     words = [(text, began + start, began + end) for text, start, end in words]
+    detail(f"Whisper heard {len(words)} words in {len(breaks)} segments in {time.time() - t0:.1f}s")
     if not words:
         return []
+    for (index, _), (next_index, _) in zip(breaks, breaks[1:] + [(len(words), None)]):
+        detail(f"  segment {stretch(words[index][1], words[next_index - 1][2])}: "
+               + "".join(word[0] for word in words[index:next_index]).strip())
     # The clip each word was heard in: that of its segment, which Whisper
     # decoded within one clip whatever times it gave the words, so the
     # clip its words lie most in; by its start when they lie in none.
@@ -1091,9 +1203,10 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
             score += 0.3  # Whisper writes a space where the speaker broke off
         return score
 
-    def cut_after(i, heard):
+    def cut_after(i, heard, why):
         """A cut after word i, when the pieces either side can stand alone
-        and the cut falls in `within`."""
+        and the cut falls in `within`. `why` is what asked for it, for the
+        telling."""
         if not (low <= words[i][2] and words[i + 1][1] <= high) or heard_in[i] != heard_in[i + 1]:
             return False
         for _, _, members in grouped():
@@ -1101,11 +1214,20 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
                 k = members.index(i)
                 before = "".join(words[j][0] for j in members[:k + 1])
                 after = "".join(words[j][0] for j in members[k + 1:])
+                here = f"…{before.strip()[-8:]} | {after.strip()[:8]}… ({why})"
                 if len(_content(before)) < SPLIT_MIN_PIECE_CHARS or len(_content(after)) < SPLIT_MIN_PIECE_CHARS:
+                    # With nothing on one side it is the piece's own edge, a cut already.
+                    if _content(before) and _content(after):
+                        detail(f"  no cut {here}: a piece of under {SPLIT_MIN_PIECE_CHARS} characters would be left")
                     return False
                 if before.count("「") + before.count("『") > before.count("」") + before.count("』"):
+                    detail(f"  no cut {here}: inside a quotation")
                     return False  # a sentence being quoted ends inside the one quoting it
-                return grid.cut_between(words[i], words[i + 1], heard, tail=before, head=after)
+                told = []
+                made = grid.cut_between(words[i], words[i + 1], heard, tail=before, head=after, told=told)
+                if told:
+                    detail(f"  {'cut' if made else 'no cut'} {here}: {told[0]}")
+                return made
         return False
 
     # Where Whisper ended a sentence: heard to, in its punctuation; or
@@ -1115,9 +1237,9 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
     for i in range(len(words) - 1):
         so_far = "".join(words[j][0] for j in range(i + 1)).rstrip(" \u3000")
         if _SENTENCE_END.search(so_far[-1:]):
-            cut_after(i, heard=True)
+            cut_after(i, heard=True, why="Whisper wrote a sentence end")
         elif i + 1 in breaks:
-            cut_after(i, heard=False)
+            cut_after(i, heard=False, why="Whisper began a new segment")
 
     pieces = grouped()
     texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
@@ -1130,7 +1252,7 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
         ends = [end for _, end in _content_offsets([ja for ja, _ in pairs])][:-1]
         for end in ends:
             if 0 < end < len(chars) and chars[end] == chars[end - 1] + 1:
-                cut_after(chars[end - 1], heard=True)
+                cut_after(chars[end - 1], heard=True, why="the LLM ended a sentence")
         pieces = grouped()
         texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
         # Each piece's English: that of the LLM's sentences lying within it,
@@ -1152,11 +1274,12 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
             try:
                 en = translate_text(text)
             except Exception as exc:
-                print(f"piece not translated: {exc}", flush=True)
+                log(f"piece not translated: {exc}")
                 en = ""
         start, end = grid.bounds(a, b) or (words[members[0]][1], words[members[-1]][2])
         if within is None or (a >= low - 1e-6 and b <= high + 1e-6):
             lines.append({"ja": text, "en": en, "start": round(start, 2), "end": round(end, 2)})
+            detail(f"  line {stretch(start, end)}, the piece {stretch(a, b)}: {text}")
     return lines
 
 
@@ -1206,7 +1329,7 @@ class PrefetchJob:
             self.state = "stopped"
 
     def fail(self, message):
-        print(f"prefetch {self.id}: {message}", flush=True)
+        log(f"prefetch {self.id}: {message}")
         self.error = message
         self.state = "failed"
         self.stop()
@@ -1236,7 +1359,7 @@ class PrefetchJob:
             *(["-ss", f"{self.offset:.3f}", "-copyts", "-seek2any", "1"] if self.offset > 0 else []), "-i", media,
             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
         ]
-        print(f"prefetch {self.id}: fetching", flush=True)
+        log(f"prefetch {self.id}: fetching")
         try:
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as exc:
@@ -1256,7 +1379,7 @@ class PrefetchJob:
         self.fetch_done = True
         if self.duration is None or self.duration <= 0:
             self.duration = self.offset + self.fetched
-        print(f"prefetch {self.id}: fetched {self.fetched:.0f}s from {self.offset:.0f}s", flush=True)
+        log(f"prefetch {self.id}: fetched {self.fetched:.0f}s from {self.offset:.0f}s")
 
     def _transcribe(self):
         position = 0.0
@@ -1266,7 +1389,7 @@ class PrefetchJob:
                 done = self.fetch_done
             if done and have <= position + 0.05:
                 self.state = "done"
-                print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
+                log(f"prefetch {self.id}: done, {len(self.lines)} lines")
                 return
             if self.paused.is_set():
                 time.sleep(0.25)
@@ -1297,6 +1420,7 @@ class PrefetchJob:
     def _transcribe_chunk(self, start, end, audio):
         """`audio` is the video from `start` to `end`."""
         t0 = time.time()
+        detail(f"prefetch {self.id}: chunk {stretch(start, end)}")
         self.grid.add_chunk(audio, start, end)
         lines = hear_pieces(self.grid, audio, start, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:])
         ja = "".join(line["ja"] for line in lines)
@@ -1305,7 +1429,7 @@ class PrefetchJob:
             return
         self.lines.extend(lines)
         self.text += ja
-        print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
+        log(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s")
 
     def rehear(self, start, end, vad=False):
         """The pieces of the grid at `start`..`end` heard again from the
@@ -1324,12 +1448,13 @@ class PrefetchJob:
             audio = self.audio[from_sample:int(max(high - self.offset, 0) * SAMPLE_RATE)].copy()
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
         t0 = time.time()
+        detail(f"prefetch {self.id}: {stretch(start, end)} asked for again: {len(pieces)} pieces, "
+               f"{stretch(pieces[0][0], pieces[-1][1])}, heard with the neighbours that follow on, {stretch(low, high)}")
         began = self.offset + from_sample / SAMPLE_RATE
         lines = hear_pieces(
             self.grid, audio, began, beam_size=10, prompt="".join(before), within=(pieces[0][0], pieces[-1][1])
         )
-        print(f"prefetch {self.id}: {start:.1f}-{end:.1f}s heard again, {len(lines)} lines in {time.time() - t0:.1f}s",
-              flush=True)
+        log(f"prefetch {self.id}: {start:.1f}-{end:.1f}s heard again, {len(lines)} lines in {time.time() - t0:.1f}s")
         return lines
 
     def status(self, since=0):
@@ -1395,6 +1520,11 @@ class Handler(BaseHTTPRequestHandler):
                 "ollama_model": OLLAMA_MODEL if _ollama_ok else None,
                 "prefetch": True,
             })
+        elif self.path.startswith("/events"):
+            from urllib.parse import parse_qs, urlparse
+
+            query = parse_qs(urlparse(self.path).query)
+            self._send(200, events_since(int(query.get("since", ["0"])[0])))
         elif self.path.startswith("/prefetch/"):
             from urllib.parse import parse_qs, urlparse
 
@@ -1436,13 +1566,14 @@ class Handler(BaseHTTPRequestHandler):
         action = pieces[3] if len(pieces) > 3 else ""
         if action == "stop":
             job.stop()
+            log(f"prefetch {job.id}: stopped at {job.ready:.0f}s")
             self._send(200, {"state": job.state})
         elif action in ("pause", "resume"):
             if action == "pause":
                 job.paused.set()
             else:
                 job.paused.clear()
-            print(f"prefetch {job.id}: {action}d", flush=True)
+            log(f"prefetch {job.id}: {action}d")
             self._send(200, {"state": job.status(len(job.lines))["state"]})
         elif action == "rehear":
             query = parse_qs(parts.query)
@@ -1479,6 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
         want_translation = query.get("translate", ["1"])[0] not in ("0", "false")
         prompt = query.get("prompt", [""])[0].strip()
         pcm = self._read_body()
+        _untold.on = not want_translation
 
         try:
             t0 = time.time()
@@ -1489,6 +1621,10 @@ class Handler(BaseHTTPRequestHandler):
             # voice filter drops it, where Whisper alone invents a line.
             ja, pairs, lines = transcribe_and_translate(audio, beam_size, prompt, want_translation, vad=True)
             elapsed = time.time() - t0
+            # A preview of an utterance still being spoken comes every
+            # second or so and asks for no translation: not worth a line.
+            if want_translation:
+                log(f"live: {duration:.1f}s, {len(lines)} lines in {elapsed:.1f}s")
             self._send(200, {
                 "ja": ja,
                 "en": " ".join(en for _, en in pairs if en),
@@ -1498,6 +1634,7 @@ class Handler(BaseHTTPRequestHandler):
                 "rtf": round(elapsed / duration, 4) if duration else None,
             })
         except Exception as exc:
+            log(f"live: failed, {type(exc).__name__}")
             self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
 
 
@@ -1513,7 +1650,7 @@ def start_idle_watchdog(timeout):
             time.sleep(5)
             idle = time.time() - _last_request_at
             if idle > timeout:
-                print(f"idle {idle:.0f}s > {timeout}s, shutting down", flush=True)
+                log(f"idle {idle:.0f}s > {timeout}s, shutting down")
                 exit_releasing_gpu()
 
     threading.Thread(target=watch, daemon=True).start()
@@ -1535,10 +1672,10 @@ def main():
     # A plain `kill` should release the LLM too, not just this process.
     signal.signal(signal.SIGTERM, lambda *_: exit_releasing_gpu())
     if args.idle_timeout > 0:
-        print(f"idle timeout: {args.idle_timeout:.0f}s", flush=True)
+        log(f"idle timeout: {args.idle_timeout:.0f}s")
         start_idle_watchdog(args.idle_timeout)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"listening on {args.host}:{args.port}", flush=True)
+    log(f"listening on {args.host}:{args.port}")
     server.serve_forever()
 
 

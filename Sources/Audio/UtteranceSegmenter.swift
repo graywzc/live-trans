@@ -26,6 +26,14 @@ struct UtteranceSegmenter {
         var minSpeech: TimeInterval = 0.3
     }
 
+    /// What ended an utterance.
+    enum End: Equatable {
+        /// Nothing was said for the silence timeout.
+        case pause
+        /// It reached the longest an utterance may be, mid-speech.
+        case limit
+    }
+
     enum Event: Equatable {
         case started(utterance: Int)
         case partial(audio: Data, utterance: Int)
@@ -39,6 +47,8 @@ struct UtteranceSegmenter {
     private var utteranceFrames: [Data] = []
     /// An utterance is open: from its first speech frame until its final.
     private(set) var isActive = false
+    /// What ended the last utterance to end.
+    private(set) var lastEnd = End.pause
     private var utteranceID = 0
     private var firstSpeechIndex = 0
     private var lastSpeechIndex = 0
@@ -79,6 +89,7 @@ struct UtteranceSegmenter {
         let paused = silentFrames >= AudioFormat.frameCount(seconds: config.silenceTimeout)
         let tooLong = utteranceFrames.count >= AudioFormat.frameCount(seconds: config.maxUtterance)
         if paused || tooLong {
+            lastEnd = paused ? .pause : .limit
             return [finish()]
         }
 
