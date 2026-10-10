@@ -27,16 +27,16 @@ struct ActivityView: View {
             .padding(.horizontal)
             .padding(.bottom, 10)
             Divider()
-            if log.shown.isEmpty {
+            if log.entries.isEmpty {
                 ContentUnavailableView(
                     "Nothing yet", systemImage: Self.symbol,
-                    description: Text("What this Mac and the GPU server do behind the captions is listed here as it happens.")
+                    description: Text("How the captions come about, on this Mac and on the GPU server, is listed here as it happens.")
                 )
             } else {
                 GeometryReader { viewport in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(log.shown) { entry in
+                            ForEach(log.entries) { entry in
                                 EntryRow(entry: entry, name: entry.machine == .mac ? macName : hostName)
                             }
                         }
@@ -137,12 +137,6 @@ struct ActivityControls: View {
 
     var body: some View {
         Spacer(minLength: 0)
-        Button {
-            log.showsDetails.toggle()
-        } label: {
-            Image(systemName: log.showsDetails ? "list.bullet.indent" : "list.bullet")
-        }
-        .help(log.showsDetails ? "Hide the steps of each hearing" : "Show the steps of each hearing")
         Button(action: log.clear) {
             Image(systemName: "trash")
         }
@@ -180,7 +174,7 @@ private struct EntryRow: View {
             MachineName(name: name)
                 .foregroundStyle(entry.machine == .mac ? Color.cyan : Color.orange)
             Text(entry.text)
-                .foregroundStyle(entry.isDetail ? Color(white: 0.72) : .white)
+                .foregroundStyle(.white)
                 .textSelection(.enabled)
         }
         .font(.caption.monospacedDigit())

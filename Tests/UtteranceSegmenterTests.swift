@@ -54,7 +54,6 @@ final class UtteranceSegmenterTests: XCTestCase {
         XCTAssertEqual(frames(in: audio), frames(0.3) + frames(1) + frames(0.3))
         XCTAssertEqual(audio.first, 1)
         XCTAssertEqual(audio.last, 3)
-        XCTAssertEqual(segmenter.lastEnd, .pause)
     }
 
     func testShortNoiseIsDiscarded() {
@@ -111,7 +110,6 @@ final class UtteranceSegmenterTests: XCTestCase {
             return XCTFail("expected a forced final, got \(String(describing: events.last))")
         }
         XCTAssertEqual(seconds(of: audio), 12.0, accuracy: 0.001)
-        XCTAssertEqual(segmenter.lastEnd, .limit)
     }
 
     func testBriefPauseDoesNotSplitUtterance() {
