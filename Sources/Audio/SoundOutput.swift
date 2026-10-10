@@ -146,11 +146,11 @@ final class SoundOutput {
         }
         if snapshot.needsConnecting(device) {
             guard BluetoothHeadphones.connect(outputUID: device.id) else {
-                ActivityLog.note("output: could not connect \(device.name)")
+                print("output: could not connect \(device.name)")
                 problem = "Couldn't connect \(device.name). Open their case or put them in, then try again."
                 return
             }
-            ActivityLog.note("output: connecting \(device.name)")
+            print("output: connecting \(device.name)")
             connecting = device
             // Core Audio does not announce a hidden device, so look for it.
             connectingWatch = Task { [weak self] in
@@ -160,7 +160,7 @@ final class SoundOutput {
                     self.refresh()
                 }
                 guard !Task.isCancelled, let self, self.connecting?.id == device.id else { return }
-                ActivityLog.note("output: \(device.name) did not appear")
+                print("output: \(device.name) did not appear")
                 self.connecting = nil
                 self.problem = "\(device.name) connected but never became a sound output. Try choosing them again."
 
@@ -168,7 +168,7 @@ final class SoundOutput {
             return
         }
         guard AudioHardware.setDefaultOutput(uid: device.id) else { return }
-        ActivityLog.note("output: chosen \(device.name)")
+        print("output: chosen \(device.name)")
         refresh()
     }
 

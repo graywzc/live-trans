@@ -237,6 +237,32 @@ def test_neighbours_that_follow_on():
     assert low == 0.0 and 4.0 < high < 6.0, (low, high)  # the first follows on; the third is 2 s off
 
 
+def test_a_caption_is_told_with_what_cut_it():
+    grid = grid_with([(0.2, 2.0), (2.8, 5.0)], 0.0, 6.0)  # a 0.8 s pause
+    whisper = FakeWhisper([("駅まで", 0.3, 1.0), ("歩いたよ。", 1.0, 1.9), ("みなさん", 2.9, 3.6), ("お元気ですか", 3.6, 4.9)])
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = (lambda texts: [(t, "en") for t in texts]), srv.translate_ollama
+    srv._events.clear()
+    try:
+        srv.hear_pieces(grid, silence(6.0), 0.0, beam_size=5, prompt="")
+        told = [event["text"] for event in srv._events]
+        assert told == [
+            "0:00.2–0:02.0  駅まで歩いたよ。\n   starts: start of the audio · ends: pause 0.8s",
+            "0:02.8–0:05.0  みなさんお元気ですか\n   starts: pause 0.8s · ends: end of the audio",
+        ], told
+        srv._events.clear()
+        srv.hear_pieces(grid, silence(6.0), 0.0, beam_size=10, prompt="", within=(2.4, 6.0))
+        assert [event["text"].split("  ")[0] for event in srv._events] == ["heard again 0:02.8–0:05.0"], list(srv._events)
+    finally:
+        srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+
+
+def test_a_cut_inside_a_clip_keeps_what_asked_for_it():
+    grid = grid_with([(10.2, 15.8)], 10.0, 16.0)
+    grid.cut_between(("晴れです。", 10.9, 11.7), ("明日は", 11.9, 12.4), heard=True, why="Whisper's sentence end")
+    assert list(grid.reasons.values()).count("Whisper's sentence end, no pause") == 1, grid.reasons
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

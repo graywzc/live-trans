@@ -66,18 +66,6 @@ final class ActivityLogTests: XCTestCase {
         XCTAssertEqual(answer, HostEvents(boot: "1a2b3c4d", next: 7, events: [.init(seq: 7, at: 1_000_000.5, text: "listening")]))
     }
 
-    func testTheStepsCanBeLeftOut() {
-        let log = ActivityLog()
-        log.record("job: 60 s, 9 lines", from: .host, at: noon)
-        log.take(HostEvents(boot: "a", next: 1, events: [
-            .init(seq: 1, at: noon.timeIntervalSince1970 + 1, text: "cut at 0:02.4", detail: true),
-        ]))
-        XCTAssertEqual(log.shown.map(\.text), ["job: 60 s, 9 lines", "cut at 0:02.4"])
-        XCTAssertEqual(log.entries.map(\.isDetail), [false, true])
-        log.showsDetails = false
-        XCTAssertEqual(log.shown.map(\.text), ["job: 60 s, 9 lines"])
-    }
-
     func testClearingEmptiesTheList() {
         let log = ActivityLog()
         log.record("one", at: noon)
@@ -133,9 +121,6 @@ final class ActivityViewTests: XCTestCase {
         log.record("status: connecting", at: start)
         log.record("loading ASR on cuda", from: .host, at: start.addingTimeInterval(1))
         log.record("utterance 0: 3.2 s, noise floor 40, threshold 120", at: start.addingTimeInterval(9))
-        log.record("Whisper (beam 5, 0 characters of context): 9 words in 2 segments in 0.6s", from: .host, at: start.addingTimeInterval(9.6), detail: true)
-        log.record("  segment: 駅まで歩いたのに", from: .host, at: start.addingTimeInterval(9.6), detail: true)
-        log.record("  cut …歩いたのに | みなさん… (Whisper began a new segment): at 0:02.4, in a pause of 0.80s", from: .host, at: start.addingTimeInterval(9.7), detail: true)
         log.record("live: 3.2s, 2 lines in 0.8s", from: .host, at: start.addingTimeInterval(10))
         log.record("utterance 0: 2 lines in 0.9 s", at: start.addingTimeInterval(10.1))
 

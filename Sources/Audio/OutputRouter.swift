@@ -57,7 +57,7 @@ final class OutputRouter {
         // that was deliberate and not ours to revert.
         if let original, let routed, AudioHardware.defaultOutputUID() == routed {
             AudioHardware.setDefaultOutput(uid: original)
-            ActivityLog.note("output: restored to \(AudioHardware.name(uid: original) ?? original)")
+            print("output: restored to \(AudioHardware.name(uid: original) ?? original)")
         }
         original = nil
         routed = nil
@@ -70,6 +70,6 @@ final class OutputRouter {
         guard AudioHardware.setDefaultOutput(uid: target) else { return }
         original = output
         routed = target
-        ActivityLog.note("output: \(AudioHardware.name(uid: output) ?? output) -> \(AudioHardware.name(uid: target) ?? target)")
+        print("output: \(AudioHardware.name(uid: output) ?? output) -> \(AudioHardware.name(uid: target) ?? target)")
     }
 }
