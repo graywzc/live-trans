@@ -306,7 +306,14 @@ so the live listener does not caption it), and the other play button plays
 it in the Chrome video, which pauses at its end. A click also puts a white
 pointer where it landed (a click on the ruler does only that), and Space
 then plays the Chrome video from there; after that Space plays and pauses
-as usual until the pointer is put somewhere again. The mode is remembered; `-pipelineMode dev` sets it for one run.
+as usual until the pointer is put somewhere again. Unlike everything else,
+dev mode keeps what it fetched and found on the host's disk
+(`~/livetrans/devcache`, or `LIVETRANS_DEV_CACHE`): the audio under a hash
+of the page, and each step's findings with the step's version, so running
+a step again on the same video, after a restart or a change to the step,
+takes the audio from there and a step that has not changed gives its
+findings at once. The crossed-out bin on the timeline's row has the host
+forget it all. Production keeps nothing. The mode is remembered; `-pipelineMode dev` sets it for one run.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. Nothing of a session outlives the app: the
@@ -315,6 +322,7 @@ Jisho panel's pages are never cached on disk, and the app empties its cache
 and cookie folders at launch and at quit. On the GPU host the fetched audio
 lives in the server's memory, the log names no video and quotes nothing heard,
 and it is emptied when the server shuts down (a crash leaves it for a look).
+The one exception is dev mode's cache, above.
 
 ## Development
 

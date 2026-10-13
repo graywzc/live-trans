@@ -32,6 +32,8 @@ struct PrefetchStatus: Decodable, Equatable {
     /// it has looked.
     var step: String?
     var analysed: Double?
+    /// Whether a dev job's audio came from the host's cache of it.
+    var cached: Bool?
 }
 
 /// What a dev job's step has found so far.
@@ -181,6 +183,17 @@ struct ASRClient {
             throw ClientError.badStatus(code)
         }
         return data
+    }
+
+    /// Empties the host's cache of videos fetched and findings made in dev
+    /// mode; how many videos it held.
+    func clearDevCache() async throws -> Int {
+        var request = URLRequest(url: baseURL.appending(path: "devcache/clear"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        let (data, response) = try await session.data(for: request)
+        struct Payload: Decodable { var cleared: Int }
+        return try Self.decode(Payload.self, from: data, statusCode: response).cleared
     }
 
     func stopPrefetch(job: String) async {
