@@ -9,7 +9,6 @@ struct ContentView: View {
     @Environment(ChromeVideo.self) private var video
     @Environment(Prefetcher.self) private var prefetch
     @Environment(DevPipeline.self) private var dev
-    @AppStorage(AppSettings.pipelineMode) private var pipelineMode = AppSettings.PipelineMode.production.rawValue
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
@@ -167,7 +166,7 @@ struct ContentView: View {
     private var footer: some View {
         VStack(spacing: 12) {
             let canCaptionAhead = engine.isRunning && engine.serverCanPrefetch && prefetchVideo
-            let isDev = pipelineMode == AppSettings.PipelineMode.dev.rawValue
+            let isDev = panel.isDev
             if canCaptionAhead || prefetch.playhead != nil {
                 HStack(spacing: 10) {
                     if canCaptionAhead && isDev {
@@ -184,7 +183,7 @@ struct ContentView: View {
                         .controlSize(.small)
                         .help(
                             dev.isPaused
-                                ? "Fetch the whole Chrome video's audio and run step \(dev.step.title) over it, for the Activity panel's timeline"
+                                ? "Fetch the whole Chrome video's audio and run step \(dev.step.title) over it, for the Dev panel's timeline"
                                 : "Hold the step; what it found stays"
                         )
                     } else if canCaptionAhead {

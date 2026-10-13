@@ -57,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.videoClock = { [video] in await video.moment(at: $0) }
         prefetcher.start()
         devPipeline.start()
+        prefetcher.isDev = { [panel] in panel.isDev }
+        devPipeline.isDev = { [panel] in panel.isDev }
+        panel.onDevChange = { [activity] in activity.isEnabled = $0 }
         activity.follow { [engine] in engine.client }
         panel.applyLaunchArgument()
     }

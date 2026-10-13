@@ -36,10 +36,30 @@ final class SidePanelTests: XCTestCase {
         XCTAssertTrue(analysis.isPresented)
         XCTAssertEqual(analysis.tab, .analysis)
 
-        let activity = SidePanel()
-        activity.applyLaunchArgument(defaults: defaults(sidePanel: "activity"))
-        XCTAssertTrue(activity.isPresented)
-        XCTAssertEqual(activity.tab, .activity)
+        let dev = SidePanel()
+        dev.applyLaunchArgument(defaults: defaults(sidePanel: "dev"))
+        XCTAssertTrue(dev.isPresented)
+        XCTAssertEqual(dev.tab, .dev)
+    }
+
+    /// Dev mode is the Dev tab being looked at, and nothing else: an
+    /// ordinary launch is production.
+    func testDevModeIsTheDevTabBeingShown() {
+        let panel = SidePanel()
+        var told: [Bool] = []
+        panel.onDevChange = { told.append($0) }
+        XCTAssertFalse(panel.isDev)
+        panel.show(.analysis)
+        XCTAssertEqual(told, [])
+        panel.show(.dev)
+        XCTAssertTrue(panel.isDev)
+        panel.isPresented = false
+        XCTAssertFalse(panel.isDev, "closed, the panel shows nothing")
+        panel.isPresented = true
+        XCTAssertTrue(panel.isDev)
+        panel.tab = .jisho
+        XCTAssertFalse(panel.isDev)
+        XCTAssertEqual(told, [true, false, true, false])
     }
 
     func testAnUnknownValueIsIgnored() {

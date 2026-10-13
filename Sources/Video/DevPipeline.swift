@@ -5,7 +5,7 @@ import Observation
 /// own, through the GPU host, over the whole of a Chrome video's audio,
 /// for looking at what the step does. The host fetches the video from its
 /// start and runs the step over everything it has, again as more arrives;
-/// what it finds goes on a timeline in the Activity panel, where a stretch
+/// what it finds goes on a timeline in the Dev panel, where a stretch
 /// can be picked out and heard from the fetched audio. No captions are
 /// made, and the live listener goes on as it is.
 @MainActor
@@ -75,6 +75,9 @@ final class DevPipeline {
     /// Pages the host could not fetch or run the step over; not tried
     /// again until the mode is switched or the app relaunched.
     private var failedPages: Set<String> = []
+
+    /// Whether the app is in dev mode: see `SidePanel.isDev`.
+    var isDev: @MainActor () -> Bool = { false }
 
     init(engine: CaptionEngine, video: ChromeVideo) {
         self.engine = engine
@@ -197,7 +200,7 @@ final class DevPipeline {
         guard !isTicking else { return }
         isTicking = true
         defer { isTicking = false }
-        guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client, AppSettings.isDevPipeline else {
+        guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client, isDev() else {
             await stopJob()
             return
         }

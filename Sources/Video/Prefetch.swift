@@ -127,6 +127,9 @@ final class Prefetcher {
     /// The captions were cleared under the job, which starts over.
     private var restartForgetting = false
 
+    /// Whether the app is in dev mode: see `SidePanel.isDev`.
+    var isDev: @MainActor () -> Bool = { false }
+
     init(engine: CaptionEngine, video: ChromeVideo) {
         self.engine = engine
         self.video = video
@@ -301,7 +304,7 @@ final class Prefetcher {
     private func manageJob() async {
         // In dev mode the pipeline is run a step at a time, by DevPipeline.
         guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client,
-              UserDefaults.standard.bool(forKey: AppSettings.prefetchVideo), !AppSettings.isDevPipeline
+              UserDefaults.standard.bool(forKey: AppSettings.prefetchVideo), !isDev()
         else {
             await stopJob()
             return

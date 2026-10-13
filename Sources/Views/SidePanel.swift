@@ -2,28 +2,47 @@ import SwiftUI
 import WebKit
 
 /// What the right-hand part of the window is showing. Jisho, the sentence
-/// analysis and the activity behind the captions share it: one place to
-/// look, one divider, one width.
+/// analysis and dev mode share it: one place to look, one divider, one
+/// width.
 @MainActor
 @Observable
 final class SidePanel {
     enum Tab: Hashable {
         case jisho
         case analysis
-        case activity
+        case dev
     }
 
     /// Open from the first frame: the window is captions and a panel, not
     /// captions that a panel joins once something has been looked up.
-    var isPresented = true
-    var tab = Tab.jisho
+    var isPresented = true {
+        didSet { devMayHaveChanged() }
+    }
+    var tab = Tab.jisho {
+        didSet { devMayHaveChanged() }
+    }
+
+    /// Dev mode is the Dev tab being looked at: one step of the pipeline
+    /// run on its own, and the list of what goes on behind it. On any
+    /// other tab, or with the panel closed, the app is in production,
+    /// making captions and keeping no account of how.
+    var isDev: Bool { isPresented && tab == .dev }
+    /// Told when dev mode is entered or left.
+    @ObservationIgnored var onDevChange: (Bool) -> Void = { _ in }
+    @ObservationIgnored private var wasDev = false
+
+    private func devMayHaveChanged() {
+        guard isDev != wasDev else { return }
+        wasDev = isDev
+        onDevChange(isDev)
+    }
 
     func show(_ tab: Tab) {
         self.tab = tab
         isPresented = true
     }
 
-    /// `-sidePanel jisho`, `-sidePanel analysis`, `-sidePanel activity` or
+    /// `-sidePanel jisho`, `-sidePanel analysis`, `-sidePanel dev` or
     /// `-sidePanel closed`
     /// (UserDefaults reads such arguments) picks what the panel shows at
     /// launch, or leaves the captions alone. Nothing is persisted: the next
@@ -32,7 +51,7 @@ final class SidePanel {
         switch defaults.string(forKey: "sidePanel") {
         case "jisho": show(.jisho)
         case "analysis": show(.analysis)
-        case "activity": show(.activity)
+        case "dev": show(.dev)
         case "closed": isPresented = false
         default: break
         }
@@ -56,7 +75,7 @@ struct SidePanelView: View {
                 Picker("Panel", selection: $panel.tab) {
                     Text("Jisho").tag(SidePanel.Tab.jisho)
                     Text("Analysis").tag(SidePanel.Tab.analysis)
-                    Text("Activity").tag(SidePanel.Tab.activity)
+                    Text("Dev").tag(SidePanel.Tab.dev)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -64,7 +83,7 @@ struct SidePanelView: View {
                 switch panel.tab {
                 case .jisho: jishoControls
                 case .analysis: analysisControls
-                case .activity: ActivityControls()
+                case .dev: ActivityControls()
                 }
                 Button {
                     panel.isPresented = false
@@ -83,7 +102,7 @@ struct SidePanelView: View {
                 WebView(webView: browser.webView)
                     .onAppear(perform: browser.loadHomeIfBlank)
             case .analysis: AnalysisView()
-            case .activity: ActivityView()
+            case .dev: ActivityView()
             }
         }
     }

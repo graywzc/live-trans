@@ -59,10 +59,11 @@ GET /events?since=N
                        ask from next time, "events": [{"seq": 12,
                        "at": seconds since 1970, "text": "..."}, ...]}
                    what the server told of its work (see `tell`) from N
-                   on, for the app to list. It may quote what was heard,
-                   as the lines of a job do, and like them is only ever
-                   in memory: the last couple of thousand, never in the
-                   log.
+                   on, for the app to list in dev mode. Only a dev step
+                   tells anything: making captions tells nothing. It may
+                   quote what was heard, as the lines of a job do, and
+                   like them is only ever in memory: the last couple of
+                   thousand, never in the log.
 """
 
 import argparse
@@ -154,7 +155,8 @@ _event_count = 0
 
 def tell(text):
     """A line for /events alone: it may quote what was heard, so it is
-    never printed, and is gone with the server."""
+    never printed, and is gone with the server. For dev mode's work only:
+    the production pipeline keeps no account of what it does."""
     global _event_count
     with _events_lock:
         _event_count += 1
@@ -1229,13 +1231,14 @@ def _content_offsets(texts):
     return offsets
 
 
-def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
+def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False):
     """`audio`, the video from `began` on, heard by its hard pieces, and
     its words put into the pieces of `grid`: the lines [{"ja", "en",
     "start", "end"}] of the pieces with words in them, those partly in
     `within` (seconds of the video) when given. Where a sentence ends
     inside a piece in `within`, a cut is made (see CutGrid). A piece's
-    times are its speech's."""
+    times are its speech's. `told`, for a dev step, lists each line with
+    what cut it (see `tell`)."""
     import bisect
 
     low, high = within or (began, began + audio.size / SAMPLE_RATE)
@@ -1388,8 +1391,9 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
         start, end = grid.bounds(a, b) or (words[members[0]][1], words[members[-1]][2])
         if within is None or (a >= low - 1e-6 and b <= high + 1e-6):
             lines.append({"ja": text, "en": en, "start": round(start, 2), "end": round(end, 2)})
-            tell(f"{'heard again ' if within else ''}{clock(start)}–{clock(end)}  {text}\n"
-                 f"   starts: {grid.reasons.get(a) or '?'} · ends: {grid.reasons.get(b) or '?'}")
+            if told:
+                tell(f"{'heard again ' if within else ''}{clock(start)}–{clock(end)}  {text}\n"
+                     f"   starts: {grid.reasons.get(a) or '?'} · ends: {grid.reasons.get(b) or '?'}")
     return lines
 
 
