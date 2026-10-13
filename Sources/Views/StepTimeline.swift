@@ -6,7 +6,9 @@ import SwiftUI
 /// bars, the stretch picked out, and where the video is. Scrolls sideways;
 /// pinch, or the slider, to zoom. Click a bar to pick it out, or the gap
 /// between two, or drag across the band for any stretch; the stretch can
-/// then be heard from the fetched audio, or played in the Chrome video.
+/// then be heard from the fetched audio, or played in the Chrome video. A
+/// click also puts the pointer there (on the ruler, only that), and Space
+/// then plays the video from it.
 struct StepTimeline: View {
     @Environment(DevPipeline.self) private var dev
     @Environment(Prefetcher.self) private var prefetch
@@ -47,8 +49,9 @@ struct StepTimeline: View {
             TimelineCanvas(
                 total: max(dev.job?.duration ?? playhead?.duration ?? 0, dev.job?.fetched ?? 0, 60),
                 fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech,
-                playhead: onJob ? prefetch.position : nil, selection: dev.selection, scale: scale,
+                playhead: onJob ? prefetch.position : nil, selection: dev.selection, cursor: dev.cursor, scale: scale,
                 onSelect: { dev.selection = $0 },
+                onPlace: { dev.place(cursor: $0) },
                 onZoom: { zoom = min(max(zoom + log($0), log(Self.minimumScale)), log(Self.maximumScale)) }
             )
         }
@@ -141,8 +144,11 @@ struct TimelineCanvas: NSViewRepresentable {
     var speech: [ClosedRange<Double>]
     var playhead: Double?
     var selection: ClosedRange<Double>?
+    var cursor: Double?
     var scale: Double
     var onSelect: (ClosedRange<Double>?) -> Void
+    /// Called with where a click put the pointer.
+    var onPlace: (Double) -> Void = { _ in }
     /// Called with the factor pinched by.
     var onZoom: (Double) -> Void
 
@@ -173,8 +179,10 @@ struct TimelineCanvas: NSViewRepresentable {
         canvas.speech = speech
         canvas.playhead = playhead
         canvas.selection = selection
+        canvas.cursor = cursor
         canvas.scale = scale
         canvas.onSelect = onSelect
+        canvas.onPlace = onPlace
         canvas.onZoom = onZoom
         let width = max(TimelineGeometry.x(for: total, scale: scale), scroll.contentSize.width)
         if canvas.frame.width != width || canvas.frame.height != scroll.contentSize.height {
@@ -204,13 +212,15 @@ struct TimelineCanvas: NSViewRepresentable {
         var speech: [ClosedRange<Double>] = []
         var playhead: Double?
         var selection: ClosedRange<Double>?
+        var cursor: Double?
         var scale = 20.0
         var onSelect: (ClosedRange<Double>?) -> Void = { _ in }
+        var onPlace: (Double) -> Void = { _ in }
         var onZoom: (Double) -> Void = { _ in }
 
         /// Where the mouse went down, in the view, and the stretch dragged
         /// out from there so far.
-        private var pressed: CGFloat?
+        private var pressed: CGPoint?
         private var dragging: ClosedRange<Double>?
 
         override var isFlipped: Bool { true }
@@ -255,6 +265,17 @@ struct TimelineCanvas: NSViewRepresentable {
                 path.stroke()
             }
             drawRuler(in: dirtyRect)
+            if let cursor {
+                let x = TimelineGeometry.x(for: cursor, scale: scale)
+                NSColor.white.setFill()
+                NSRect(x: x - 0.5, y: 0, width: 1, height: bounds.height).intersection(dirtyRect).fill()
+                let mark = NSBezierPath()
+                mark.move(to: NSPoint(x: x - 4, y: 0))
+                mark.line(to: NSPoint(x: x + 4, y: 0))
+                mark.line(to: NSPoint(x: x, y: 6))
+                mark.close()
+                mark.fill()
+            }
             if let playhead {
                 let x = TimelineGeometry.x(for: playhead, scale: scale)
                 NSColor.systemOrange.setFill()
@@ -282,16 +303,16 @@ struct TimelineCanvas: NSViewRepresentable {
         }
 
         override func mouseDown(with event: NSEvent) {
-            pressed = convert(event.locationInWindow, from: nil).x
+            pressed = convert(event.locationInWindow, from: nil)
             dragging = nil
         }
 
         override func mouseDragged(with event: NSEvent) {
             guard let pressed else { return }
             let x = convert(event.locationInWindow, from: nil).x
-            guard abs(x - pressed) >= Self.clickSlop || dragging != nil else { return }
+            guard abs(x - pressed.x) >= Self.clickSlop || dragging != nil else { return }
             dragging = TimelineGeometry.dragged(
-                from: TimelineGeometry.seconds(at: pressed, scale: scale),
+                from: TimelineGeometry.seconds(at: pressed.x, scale: scale),
                 to: TimelineGeometry.seconds(at: x, scale: scale), fetched: fetched
             )
             autoscroll(with: event)
@@ -301,15 +322,19 @@ struct TimelineCanvas: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             guard let pressed else { return }
             let x = convert(event.locationInWindow, from: nil).x
-            let picked: ClosedRange<Double>?
-            if abs(x - pressed) < Self.clickSlop && dragging == nil {
-                picked = TimelineGeometry.pick(at: TimelineGeometry.seconds(at: x, scale: scale), in: speech, fetched: fetched)
-            } else {
-                picked = dragging
-            }
             self.pressed = nil
+            if abs(x - pressed.x) < Self.clickSlop && dragging == nil {
+                // A click: the pointer goes there; in the band, the stretch
+                // under it is picked out too.
+                let seconds = TimelineGeometry.seconds(at: x, scale: scale)
+                onPlace(min(seconds, max(total, 0)))
+                if pressed.y >= Self.rulerHeight {
+                    onSelect(TimelineGeometry.pick(at: seconds, in: speech, fetched: fetched))
+                }
+            } else {
+                onSelect(dragging)
+            }
             dragging = nil
-            onSelect(picked)
             needsDisplay = true
         }
 
