@@ -46,14 +46,19 @@ struct StepTimeline: View {
             }
             .font(.caption.monospacedDigit())
             .buttonStyle(.borderless)
-            TimelineCanvas(
-                total: max(dev.job?.duration ?? playhead?.duration ?? 0, dev.job?.fetched ?? 0, 60),
-                fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech,
-                playhead: onJob ? prefetch.position : nil, selection: dev.selection, cursor: dev.cursor, scale: scale,
-                onSelect: { dev.selection = $0 },
-                onPlace: { dev.place(cursor: $0) },
-                onZoom: { zoom = min(max(zoom + log($0), log(Self.minimumScale)), log(Self.maximumScale)) }
-            )
+            // Redrawn many times a second while the video plays, so the
+            // orange line moves rather than steps.
+            let playing = onJob && playhead?.playing == true
+            TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !playing)) { _ in
+                TimelineCanvas(
+                    total: max(dev.job?.duration ?? playhead?.duration ?? 0, dev.job?.fetched ?? 0, 60),
+                    fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech,
+                    playhead: onJob ? prefetch.position : nil, selection: dev.selection, cursor: dev.cursor, scale: scale,
+                    onSelect: { dev.selection = $0 },
+                    onPlace: { dev.place(cursor: $0) },
+                    onZoom: { zoom = min(max(zoom + log($0), log(Self.minimumScale)), log(Self.maximumScale)) }
+                )
+            }
         }
     }
 
@@ -173,6 +178,9 @@ struct TimelineCanvas: NSViewRepresentable {
         // Zoomed, the middle of what is shown stays in the middle.
         let visible = scroll.contentView.bounds
         let middle = TimelineGeometry.seconds(at: visible.midX, scale: context.coordinator.scale)
+        var redrawAll = canvas.total != total || canvas.fetched != fetched || canvas.analysed != analysed
+            || canvas.speech != speech || canvas.selection != selection || canvas.cursor != cursor || canvas.scale != scale
+        let wasAt = canvas.playhead
         canvas.total = total
         canvas.fetched = fetched
         canvas.analysed = analysed
@@ -187,14 +195,30 @@ struct TimelineCanvas: NSViewRepresentable {
         let width = max(TimelineGeometry.x(for: total, scale: scale), scroll.contentSize.width)
         if canvas.frame.width != width || canvas.frame.height != scroll.contentSize.height {
             canvas.frame = NSRect(x: 0, y: 0, width: width, height: scroll.contentSize.height)
+            redrawAll = true
         }
         if scale != context.coordinator.scale {
             context.coordinator.scale = scale
             let x = TimelineGeometry.x(for: middle, scale: scale) - visible.width / 2
             scroll.contentView.scroll(to: NSPoint(x: min(max(x, 0), max(width - visible.width, 0)), y: 0))
             scroll.reflectScrolledClipView(scroll.contentView)
+            redrawAll = true
         }
-        canvas.needsDisplay = true
+        if redrawAll {
+            canvas.needsDisplay = true
+        } else if wasAt != playhead {
+            // Only the line moved: just its old and new places are drawn
+            // again, many times a second.
+            canvas.invalidatePlayhead(at: wasAt)
+            canvas.invalidatePlayhead(at: playhead)
+            // Run off the right of what is shown, the view turns the page.
+            if let wasAt, let playhead, visible.contains(NSPoint(x: TimelineGeometry.x(for: wasAt, scale: scale), y: visible.midY)),
+               TimelineGeometry.x(for: playhead, scale: scale) >= visible.maxX {
+                let x = TimelineGeometry.x(for: playhead, scale: scale) - visible.width / 10
+                scroll.contentView.scroll(to: NSPoint(x: min(max(x, 0), max(width - visible.width, 0)), y: 0))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
     }
 
     final class Coordinator {
@@ -230,6 +254,13 @@ struct TimelineCanvas: NSViewRepresentable {
         /// The band the audio and speech are drawn in, under the ruler.
         var band: NSRect {
             NSRect(x: 0, y: Self.rulerHeight + 4, width: bounds.width, height: max(bounds.height - Self.rulerHeight - 8, 4))
+        }
+
+        /// Marks the strip the playhead's line takes at `seconds` for drawing.
+        func invalidatePlayhead(at seconds: Double?) {
+            guard let seconds else { return }
+            let x = TimelineGeometry.x(for: seconds, scale: scale)
+            setNeedsDisplay(NSRect(x: x - 2, y: 0, width: 4, height: bounds.height))
         }
 
         private func rect(_ range: ClosedRange<Double>, in area: NSRect) -> NSRect {
