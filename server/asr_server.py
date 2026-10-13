@@ -798,6 +798,14 @@ PREFETCH_SCAN_STEP = 1.0
 # carries over; Whisper reads at most ~224 tokens of prompt.
 PREFETCH_PROMPT_CHARS = 120
 PREFETCH_MAX_JOBS = 8
+# The steps of captioning ahead a job can be asked to run on its own, over
+# the whole of its audio, for looking at what the step does: "speech" is
+# the first, Silero finding where the speech is. More to come.
+DEV_STEPS = ("speech",)
+# A step job looks at the audio again once this much more has arrived.
+DEV_SCAN_STEP = 2.0
+# How much of a job's audio one request may ask for, in seconds.
+DEV_AUDIO_LIMIT = 120.0
 PREFETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -1261,8 +1269,13 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None):
 
 
 class PrefetchJob:
-    def __init__(self, url, page, headers, duration, start=0.0):
+    def __init__(self, url, page, headers, duration, start=0.0, step=None):
+        if step is not None and step not in DEV_STEPS:
+            raise ValueError(f"no such step: {step}")
         self.id = uuid.uuid4().hex[:12]
+        # One of DEV_STEPS to run on its own over all the audio, or None
+        # for the whole pipeline in batches, as the captions are made.
+        self.step = step
         self.url = url
         self.page = page
         self.headers = {**PREFETCH_HEADERS, **(headers or {})}
@@ -1277,6 +1290,10 @@ class PrefetchJob:
         self.text = ""
         self.grid = CutGrid()
         self.ready = self.offset
+        # The speech step's findings: where the speech is, in seconds of
+        # the video, and up to where in it Silero has looked.
+        self.speech = []
+        self.analysed = self.offset
         self.state = "running"
         self.error = None
         self.stop_event = threading.Event()
@@ -1284,7 +1301,7 @@ class PrefetchJob:
         self.process = None
         self.started = time.time()
         threading.Thread(target=self._fetch, daemon=True).start()
-        threading.Thread(target=self._transcribe, daemon=True).start()
+        threading.Thread(target=self._analyse if step else self._transcribe, daemon=True).start()
 
     @property
     def fetched(self):
@@ -1301,7 +1318,8 @@ class PrefetchJob:
         can still be heard again; the audio past that is let go."""
         self.stop()
         with self.audio_lock:
-            self.audio = self.audio[:int(max(self.ready - self.offset, 0) * SAMPLE_RATE)].copy()
+            kept = max(self.ready, self.analysed) - self.offset
+            self.audio = self.audio[:int(max(kept, 0) * SAMPLE_RATE)].copy()
         if self.state == "running":
             self.state = "stopped"
 
@@ -1400,6 +1418,66 @@ class PrefetchJob:
             looked = -1.0
             self.ready = self.offset + boundary
 
+    def _analyse(self):
+        """The job's step run over the whole of its audio, from the start,
+        and again as more arrives, so what it finds is seen whole rather
+        than batch by batch: `speech`, Silero's stretches, as the
+        transcription would have them."""
+        looked = -1.0
+        while not self.stop_event.is_set() and self.state == "running":
+            with self.audio_lock:
+                have = self.fetched
+                done = self.fetch_done
+            if self.paused.is_set():
+                time.sleep(0.25)
+                continue
+            if looked >= 0 and have <= looked + 0.05:
+                if done:
+                    self.state = "done"
+                    print(f"prefetch {self.id}: {self.step} step done, {len(self.speech)} stretches", flush=True)
+                    tell(f"{self.step}: {len(self.speech)} stretches of speech in {clock(self.offset)}–"
+                         f"{clock(self.analysed)}, the whole of the audio")
+                    return
+                time.sleep(0.25)
+                continue
+            if not done and have - max(looked, 0) < DEV_SCAN_STEP:
+                time.sleep(0.25)
+                continue
+            with self.audio_lock:
+                audio = self.audio.copy()
+            t0 = time.time()
+            try:
+                found = speech_stretches(audio) if audio.size else []
+            except Exception as exc:
+                self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
+                return
+            self.speech = [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in found]
+            self.analysed = self.offset + audio.size / SAMPLE_RATE
+            looked = have
+            # Looking again takes longer the more there is; let the fetch
+            # get ahead rather than look all the time.
+            time.sleep(min(3 * (time.time() - t0), 10))
+
+    def wav(self, start, end):
+        """The fetched audio from `start` to `end` of the video, as a WAV
+        file, 16 kHz mono; at most DEV_AUDIO_LIMIT seconds of it. Empty
+        when the stretch holds none of the audio."""
+        import io
+        import wave
+
+        start = max(float(start), self.offset)
+        end = min(float(end), start + DEV_AUDIO_LIMIT)
+        with self.audio_lock:
+            samples = self.audio[int((start - self.offset) * SAMPLE_RATE):int(max(end - self.offset, 0) * SAMPLE_RATE)]
+            pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
+        out = io.BytesIO()
+        with wave.open(out, "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(SAMPLE_RATE)
+            f.writeframes(pcm)
+        return out.getvalue()
+
     def _transcribe_batch(self, start, end, audio, speech, reason):
         """`audio` is the video from `start` to `end`, `speech` where the
         speech is in it (in seconds of the video), and `reason` what ended
@@ -1455,10 +1533,17 @@ class PrefetchJob:
             "ready": round(self.ready, 2),
             "count": len(self.lines),
             "lines": self.lines[since:],
+            "step": self.step,
+            "analysed": round(self.analysed, 2),
         }
 
+    def findings(self):
+        """What the step has found so far: the stretches of speech, and up
+        to where it has looked."""
+        return {"step": self.step, "analysed": round(self.analysed, 2), "speech": [list(s) for s in self.speech]}
 
-def start_prefetch(url, page, headers, duration, start=0.0):
+
+def start_prefetch(url, page, headers, duration, start=0.0, step=None):
     with _jobs_lock:
         for job in _jobs.values():
             if job.page == page and job.state == "running":
@@ -1467,7 +1552,7 @@ def start_prefetch(url, page, headers, duration, start=0.0):
             oldest = min(_jobs.values(), key=lambda j: j.started)
             oldest.stop()
             del _jobs[oldest.id]
-        job = PrefetchJob(url, page, headers, duration, start)
+        job = PrefetchJob(url, page, headers, duration, start, step=step)
         _jobs[job.id] = job
         return job
 
@@ -1482,6 +1567,13 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_bytes(self, body, content_type):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1512,12 +1604,26 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import parse_qs, urlparse
 
             parts = urlparse(self.path)
-            job = _jobs.get(parts.path.split("/")[2])
+            pieces = parts.path.split("/")
+            job = _jobs.get(pieces[2])
             if job is None:
                 self._send(404, {"error": "no such job"})
                 return
-            since = int(parse_qs(parts.query).get("since", ["0"])[0])
-            self._send(200, job.status(since))
+            query = parse_qs(parts.query)
+            action = pieces[3] if len(pieces) > 3 else ""
+            if action == "speech":
+                self._send(200, job.findings())
+            elif action == "audio":
+                try:
+                    start, end = float(query["from"][0]), float(query["to"][0])
+                except (KeyError, ValueError) as exc:
+                    self._send(400, {"error": f"from and to are needed: {exc}"})
+                    return
+                self._send_bytes(job.wav(start, end), "audio/wav")
+            elif action:
+                self._send(404, {"error": "not found"})
+            else:
+                self._send(200, job.status(int(query.get("since", ["0"])[0])))
         else:
             self._send(404, {"error": "not found"})
 
@@ -1536,6 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = start_prefetch(
                     request.get("url") or "", request.get("page") or "",
                     request.get("headers") or {}, request.get("duration"), request.get("start") or 0,
+                    step=request.get("step") or None,
                 )
             except Exception as exc:
                 self._send(400, {"error": f"{type(exc).__name__}: {exc}"})

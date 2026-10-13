@@ -13,6 +13,12 @@ struct ActivityView: View {
     @Environment(ActivityLog.self) private var log
     @Environment(CaptionEngine.self) private var engine
     @Environment(Prefetcher.self) private var prefetch
+    @Environment(DevPipeline.self) private var dev
+    @AppStorage(AppSettings.pipelineMode) private var mode = AppSettings.PipelineMode.production.rawValue
+    @AppStorage(AppSettings.activityTimelineHeight) private var timelineHeight = 180.0
+
+    static let minimumTimelineHeight = 80.0
+    static let maximumTimelineHeight = 600.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,13 +26,22 @@ struct ActivityView: View {
                 StatusRow(name: macName, color: Self.macColor(engine.status), text: macStatus)
                 StatusRow(
                     name: hostName, color: Self.hostColor(engine.status),
-                    text: Self.hostStatus(engine.status, job: prefetch.job)
+                    text: Self.hostStatus(engine.status, job: prefetch.job, step: dev.job)
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal)
             .padding(.bottom, 10)
             Divider()
+            if mode == AppSettings.PipelineMode.dev.rawValue {
+                StepTimeline()
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .frame(height: timelineHeight)
+                RowSplitHandle { delta in
+                    timelineHeight = min(max(timelineHeight + delta, Self.minimumTimelineHeight), Self.maximumTimelineHeight)
+                }
+            }
             if log.entries.isEmpty {
                 ContentUnavailableView(
                     "Nothing yet", systemImage: Self.symbol,
@@ -83,15 +98,28 @@ struct ActivityView: View {
         }
     }
 
-    static func hostStatus(_ status: CaptionEngine.Status, job: Prefetcher.Job?) -> String {
+    static func hostStatus(_ status: CaptionEngine.Status, job: Prefetcher.Job?, step: DevPipeline.Job? = nil) -> String {
         switch status {
         case .idle, .failed: return "Not in use"
         case .connecting: return "Starting"
         case .reconnecting: return "Not answering, being restarted"
         case .listening(let models):
-            guard let job else { return models }
-            return models + "\n" + jobStatus(job)
+            if let job { return models + "\n" + jobStatus(job) }
+            if let step { return models + "\n" + stepStatus(step) }
+            return models
         }
+    }
+
+    /// "Step 1 · Speech (Silero) running · fetched to 6:52 · looked to 6:20 of 24:00"
+    static func stepStatus(_ job: DevPipeline.Job) -> String {
+        var looked = "looked to \(CaptionRow.timestamp(job.analysed))"
+        if let duration = job.duration, duration > 0 {
+            looked += " of \(CaptionRow.timestamp(duration))"
+        }
+        return [
+            "Step \(job.step.title) \(job.paused ? "paused" : job.state)",
+            "fetched to \(CaptionRow.timestamp(job.fetched))", looked,
+        ].joined(separator: " · ")
     }
 
     /// "Job 1a2b3c running · fetched to 6:52 · captioned to 6:20 of 24:00"
@@ -131,11 +159,20 @@ struct ActivityView: View {
     }()
 }
 
-/// The clear button, by the tab picker.
+/// The pipeline's mode and the clear button, by the tab picker.
 struct ActivityControls: View {
     @Environment(ActivityLog.self) private var log
+    @AppStorage(AppSettings.pipelineMode) private var mode = AppSettings.PipelineMode.production.rawValue
 
     var body: some View {
+        Picker("Pipeline", selection: $mode) {
+            Text("Production").tag(AppSettings.PipelineMode.production.rawValue)
+            Text("Dev").tag(AppSettings.PipelineMode.dev.rawValue)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .help("Production makes captions; Dev runs one step of the pipeline over the whole video and shows what it found")
         Spacer(minLength: 0)
         Button(action: log.clear) {
             Image(systemName: "trash")

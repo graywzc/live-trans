@@ -289,6 +289,22 @@ from; the host's are asked for every second (`GET /events`). Only what is
 worth reading goes in it, so it is short. It may quote what was heard, and is
 in memory only on both machines, never in the host's log.
 
+By the tab picker, **Production | Dev** chooses what the pipeline does with a
+Chrome video. Production is captioning ahead as above. Dev runs one step of
+it on its own over the whole video, for looking at what the step does: press
+**Run step** under the captions and the host fetches the video's audio from
+its start and runs the step over everything it has, again as more arrives,
+making no captions (the live listener goes on as it is). The first step,
+Silero finding the speech, is shown on a timeline above the list: a ruler,
+the audio fetched as a grey band, the speech as green bars, an orange line
+where the video is. Scroll it sideways; pinch, or the slider, to zoom; drag
+the divider under it for more room. Click a bar to pick it out, or the gap
+between two, or drag across the band for any stretch, and its times, length
+and the pauses either side are shown. The play button hears the stretch
+from the fetched audio on what you are listening on (not through BlackHole,
+so the live listener does not caption it), and the arrow moves the Chrome
+video to it. The mode is remembered; `-pipelineMode dev` sets it for one run.
+
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. Nothing of a session outlives the app: the
 captions, analyses and lookups exist only in memory, network responses and the

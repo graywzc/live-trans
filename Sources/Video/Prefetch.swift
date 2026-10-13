@@ -299,8 +299,9 @@ final class Prefetcher {
     }
 
     private func manageJob() async {
+        // In dev mode the pipeline is run a step at a time, by DevPipeline.
         guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client,
-              UserDefaults.standard.bool(forKey: AppSettings.prefetchVideo)
+              UserDefaults.standard.bool(forKey: AppSettings.prefetchVideo), !AppSettings.isDevPipeline
         else {
             await stopJob()
             return

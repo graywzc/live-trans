@@ -48,6 +48,12 @@ enum AppSettings {
     static let analysisModel = "analysisModel"
     static let demoAudioPath = "demoAudioPath"
     static let autoStart = "autoStart"
+    /// "production", the pipeline making captions, or "dev", one step of
+    /// it run on its own over the whole video for looking at what it does.
+    static let pipelineMode = "pipelineMode"
+    /// The step dev mode runs, by `DevPipeline.Step`.
+    static let pipelineStep = "pipelineStep"
+    static let activityTimelineHeight = "activityTimelineHeight"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -66,6 +72,9 @@ enum AppSettings {
             sidePanelWidth: 440.0,
             analysisURL: "",
             analysisModel: "",
+            pipelineMode: PipelineMode.production.rawValue,
+            pipelineStep: "speech",
+            activityTimelineHeight: 180.0,
         ])
     }
 
@@ -78,6 +87,16 @@ enum AppSettings {
             remotePython: defaults.string(forKey: remotePython) ?? "",
             idleTimeout: defaults.integer(forKey: idleTimeout)
         )
+    }
+
+    enum PipelineMode: String {
+        case production
+        case dev
+    }
+
+    /// Whether the pipeline is in dev mode: a step at a time, no captions.
+    static var isDevPipeline: Bool {
+        UserDefaults.standard.string(forKey: pipelineMode) == PipelineMode.dev.rawValue
     }
 
     /// Nil until an LLM server has been entered in Settings.

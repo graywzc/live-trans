@@ -8,6 +8,8 @@ struct ContentView: View {
     @Environment(SidePanel.self) private var panel
     @Environment(ChromeVideo.self) private var video
     @Environment(Prefetcher.self) private var prefetch
+    @Environment(DevPipeline.self) private var dev
+    @AppStorage(AppSettings.pipelineMode) private var pipelineMode = AppSettings.PipelineMode.production.rawValue
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
@@ -165,9 +167,27 @@ struct ContentView: View {
     private var footer: some View {
         VStack(spacing: 12) {
             let canCaptionAhead = engine.isRunning && engine.serverCanPrefetch && prefetchVideo
+            let isDev = pipelineMode == AppSettings.PipelineMode.dev.rawValue
             if canCaptionAhead || prefetch.playhead != nil {
                 HStack(spacing: 10) {
-                    if canCaptionAhead {
+                    if canCaptionAhead && isDev {
+                        // Dev mode: the step, run over the whole video.
+                        Button {
+                            dev.toggle()
+                        } label: {
+                            Label(
+                                dev.isPaused ? "Run step" : "Pause",
+                                systemImage: dev.isPaused ? "play.fill" : "pause.fill"
+                            )
+                            .frame(minWidth: 104)
+                        }
+                        .controlSize(.small)
+                        .help(
+                            dev.isPaused
+                                ? "Fetch the whole Chrome video's audio and run step \(dev.step.title) over it, for the Activity panel's timeline"
+                                : "Hold the step; what it found stays"
+                        )
+                    } else if canCaptionAhead {
                         Button {
                             prefetch.toggle()
                         } label: {
@@ -186,9 +206,9 @@ struct ContentView: View {
                     }
                     if let playhead = prefetch.playhead {
                         VideoBar(
-                            duration: prefetch.job?.duration ?? playhead.duration,
+                            duration: prefetch.job?.duration ?? dev.job?.duration ?? playhead.duration,
                             playhead: prefetch.position,
-                            captioned: prefetch.captioned, fetched: prefetch.fetchedAhead,
+                            captioned: prefetch.captioned, fetched: prefetch.fetchedAhead ?? dev.fetched(on: playhead),
                             isPaused: prefetch.isPaused,
                             onSeek: { prefetch.scrub(to: $0) }
                         )
