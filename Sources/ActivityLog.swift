@@ -23,7 +23,9 @@ struct HostEvents: Decodable, Equatable {
 /// (`tell`), and what the server tells of its own, asked for every second
 /// while there is a server. Only what is worth reading is told: the list
 /// is for understanding how the captions come about, not a log. Like
-/// everything else of a session it is in memory only.
+/// everything else of a session it is in memory only, and it is dev
+/// mode's alone: in production nothing is listed and the server is not
+/// asked.
 @MainActor
 @Observable
 final class ActivityLog {
@@ -45,6 +47,13 @@ final class ActivityLog {
     static let pollInterval: TimeInterval = 1
 
     private(set) var entries: [Entry] = []
+    /// Whether lines are taken: in dev mode only. What was listed is let
+    /// go when it ends.
+    var isEnabled = false {
+        didSet {
+            if !isEnabled { entries = [] }
+        }
+    }
 
     private var nextID = 0
     private var boot: String?
@@ -65,6 +74,7 @@ final class ActivityLog {
     /// Puts the line where its time is: the server's lines arrive up to a
     /// second after the Mac's of the same moment.
     func record(_ text: String, from machine: Machine = .mac, at: Date = Date()) {
+        guard isEnabled else { return }
         let index = entries.lastIndex { $0.at <= at }.map { $0 + 1 } ?? 0
         entries.insert(Entry(id: nextID, at: at, machine: machine, text: text), at: index)
         nextID += 1
@@ -77,6 +87,7 @@ final class ActivityLog {
     /// started since the last answer was counted from the wrong place, and
     /// is asked for again from the top.
     func take(_ answer: HostEvents) {
+        guard isEnabled else { return }
         if answer.boot != boot, since > 0 {
             boot = answer.boot
             since = 0
@@ -94,12 +105,12 @@ final class ActivityLog {
     }
 
     /// Asks the server for its lines for as long as the app runs, whenever
-    /// `client` has one to ask.
+    /// lines are taken and `client` has one to ask.
     func follow(_ client: @escaping @MainActor () -> ASRClient?) {
         poll?.cancel()
         poll = Task { [weak self] in
             while !Task.isCancelled {
-                if let self, let client = client(), let answer = try? await client.events(since: self.since) {
+                if let self, self.isEnabled, let client = client(), let answer = try? await client.events(since: self.since) {
                     self.take(answer)
                 }
                 try? await Task.sleep(for: .seconds(Self.pollInterval))

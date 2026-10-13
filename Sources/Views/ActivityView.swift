@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// What is going on behind the captions: how this Mac and the GPU server
-/// stand now, and under that what each has done, newest at the bottom.
+/// The Dev tab: how this Mac and the GPU server stand now, the timeline
+/// of the step being run, and under that what each machine has done,
+/// newest at the bottom. Looking at it is what puts the app in dev mode.
 struct ActivityView: View {
     static let symbol = "waveform.path.ecg"
 
@@ -14,7 +15,6 @@ struct ActivityView: View {
     @Environment(CaptionEngine.self) private var engine
     @Environment(Prefetcher.self) private var prefetch
     @Environment(DevPipeline.self) private var dev
-    @AppStorage(AppSettings.pipelineMode) private var mode = AppSettings.PipelineMode.production.rawValue
     @AppStorage(AppSettings.activityTimelineHeight) private var timelineHeight = 180.0
 
     static let minimumTimelineHeight = 80.0
@@ -33,19 +33,17 @@ struct ActivityView: View {
             .padding(.horizontal)
             .padding(.bottom, 10)
             Divider()
-            if mode == AppSettings.PipelineMode.dev.rawValue {
-                StepTimeline()
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .frame(height: timelineHeight)
-                RowSplitHandle { delta in
-                    timelineHeight = min(max(timelineHeight + delta, Self.minimumTimelineHeight), Self.maximumTimelineHeight)
-                }
+            StepTimeline()
+                .padding(.horizontal)
+                .padding(.top, 8)
+                .frame(height: timelineHeight)
+            RowSplitHandle { delta in
+                timelineHeight = min(max(timelineHeight + delta, Self.minimumTimelineHeight), Self.maximumTimelineHeight)
             }
             if log.entries.isEmpty {
                 ContentUnavailableView(
                     "Nothing yet", systemImage: Self.symbol,
-                    description: Text("How the captions come about, on this Mac and on the GPU server, is listed here as it happens.")
+                    description: Text("What a step does, on this Mac and on the GPU server, is listed here as it happens.")
                 )
             } else {
                 GeometryReader { viewport in
@@ -162,17 +160,8 @@ struct ActivityView: View {
 /// The pipeline's mode and the clear button, by the tab picker.
 struct ActivityControls: View {
     @Environment(ActivityLog.self) private var log
-    @AppStorage(AppSettings.pipelineMode) private var mode = AppSettings.PipelineMode.production.rawValue
 
     var body: some View {
-        Picker("Pipeline", selection: $mode) {
-            Text("Production").tag(AppSettings.PipelineMode.production.rawValue)
-            Text("Dev").tag(AppSettings.PipelineMode.dev.rawValue)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .fixedSize()
-        .help("Production makes captions; Dev runs one step of the pipeline over the whole video and shows what it found")
         Spacer(minLength: 0)
         Button(action: log.clear) {
             Image(systemName: "trash")

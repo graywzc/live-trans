@@ -15,6 +15,7 @@ final class ActivityLogTests: XCTestCase {
 
     func testALineGoesWhereItsTimeIs() {
         let log = ActivityLog()
+        log.isEnabled = true
         log.record("first", at: noon)
         log.record("third", at: noon.addingTimeInterval(2))
         // The server's line of a second ago, arriving after the Mac's of now.
@@ -26,6 +27,7 @@ final class ActivityLogTests: XCTestCase {
 
     func testLinesOfTheSameMomentKeepTheirOrder() {
         let log = ActivityLog()
+        log.isEnabled = true
         log.record("one", at: noon)
         log.record("two", at: noon)
         XCTAssertEqual(log.entries.map(\.text), ["one", "two"])
@@ -33,6 +35,7 @@ final class ActivityLogTests: XCTestCase {
 
     func testTheOldestLinesAreLetGo() {
         let log = ActivityLog()
+        log.isEnabled = true
         for n in 0..<(ActivityLog.kept + 5) {
             log.record("line \(n)", at: noon.addingTimeInterval(Double(n)))
         }
@@ -42,6 +45,7 @@ final class ActivityLogTests: XCTestCase {
 
     func testTheServersLinesAreTakenFromWhereItLeftOff() {
         let log = ActivityLog()
+        log.isEnabled = true
         log.take(answer(boot: "a", next: 2, [(1, 0, "loading"), (2, 1, "listening")]))
         XCTAssertEqual(log.since, 2)
         log.take(answer(boot: "a", next: 3, [(3, 2, "job started")]))
@@ -51,6 +55,7 @@ final class ActivityLogTests: XCTestCase {
 
     func testARestartedServerIsAskedFromTheTop() {
         let log = ActivityLog()
+        log.isEnabled = true
         log.take(answer(boot: "a", next: 40, [(40, 0, "idle, shutting down")]))
         // Started again, it has two lines, and none past the fortieth.
         log.take(answer(boot: "b", next: 2, []))
@@ -66,8 +71,28 @@ final class ActivityLogTests: XCTestCase {
         XCTAssertEqual(answer, HostEvents(boot: "1a2b3c4d", next: 7, events: [.init(seq: 7, at: 1_000_000.5, text: "listening")]))
     }
 
+    /// Production keeps no account of how the captions come about.
+    func testNothingIsListedOutsideDevMode() {
+        let log = ActivityLog()
+        log.record("one", at: noon)
+        log.take(answer(boot: "a", next: 2, [(1, 0, "loading"), (2, 1, "listening")]))
+        XCTAssertTrue(log.entries.isEmpty)
+        XCTAssertEqual(log.since, 0, "the server's lines are not counted as read")
+    }
+
+    func testLeavingDevModeLetsTheListGo() {
+        let log = ActivityLog()
+        log.isEnabled = true
+        log.record("one", at: noon)
+        log.isEnabled = false
+        XCTAssertTrue(log.entries.isEmpty)
+        log.isEnabled = true
+        XCTAssertTrue(log.entries.isEmpty)
+    }
+
     func testClearingEmptiesTheList() {
         let log = ActivityLog()
+        log.isEnabled = true
         log.record("one", at: noon)
         log.clear()
         XCTAssertTrue(log.entries.isEmpty)
@@ -115,8 +140,9 @@ final class ActivityViewTests: XCTestCase {
     /// The tab in the real window, with lines from both machines in it.
     func testTheTabListsBothMachines() throws {
         let panel = SidePanel()
-        panel.show(.activity)
+        panel.show(.dev)
         let log = ActivityLog()
+        log.isEnabled = true
         let start = Date(timeIntervalSince1970: 1_000_000)
         log.record("status: connecting", at: start)
         log.record("loading ASR on cuda", from: .host, at: start.addingTimeInterval(1))
@@ -150,22 +176,15 @@ final class ActivityViewTests: XCTestCase {
         XCTAssertEqual(picker.segmentCount, 3)
         XCTAssertEqual(picker.selectedSegment, 2)
 
-        snapshot(view, "activity-tab")
+        snapshot(view, "dev-tab")
     }
 
-    /// In dev mode the tab has the mode picker on Dev, the step's timeline
-    /// above the list, and the host's status telling of the step.
-    func testInDevModeTheTabShowsTheStepsTimeline() throws {
-        let defaults = UserDefaults.standard
-        let before = defaults.string(forKey: AppSettings.pipelineMode)
-        defaults.set(AppSettings.PipelineMode.dev.rawValue, forKey: AppSettings.pipelineMode)
-        addTeardownBlock {
-            if let before { defaults.set(before, forKey: AppSettings.pipelineMode) } else {
-                defaults.removeObject(forKey: AppSettings.pipelineMode)
-            }
-        }
+    /// The tab has the step's timeline above the list, the host's status
+    /// telling of the step, and no switch of its own: being on it is dev
+    /// mode.
+    func testTheTabShowsTheStepsTimeline() throws {
         let panel = SidePanel()
-        panel.show(.activity)
+        panel.show(.dev)
         let engine = CaptionEngine()
         let video = ChromeVideo()
         let dev = DevPipeline(engine: engine, video: video)
@@ -198,11 +217,9 @@ final class ActivityViewTests: XCTestCase {
         XCTAssertGreaterThan(canvas.frame.width, 0)
         XCTAssertEqual(canvas.speech.count, 5)
         XCTAssertEqual(canvas.selection, 4.0...5.5)
-        let pickers = views(NSSegmentedControl.self, in: view)
-        let mode = try XCTUnwrap(pickers.first { $0.segmentCount == 2 }, "no mode picker")
-        XCTAssertEqual(mode.selectedSegment, 1, "on Dev")
+        XCTAssertEqual(views(NSSegmentedControl.self, in: view).map(\.segmentCount), [3], "the tab picker alone")
         XCTAssertNotNil(views(RowSplitHandle.HandleView.self, in: view).first, "a divider under the timeline")
-        snapshot(view, "activity-tab-dev")
+        snapshot(view, "dev-tab-timeline")
     }
 
     private func snapshot(_ view: NSView, _ name: String) {

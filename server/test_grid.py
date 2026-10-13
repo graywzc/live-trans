@@ -245,13 +245,15 @@ def test_a_caption_is_told_with_what_cut_it():
     srv._events.clear()
     try:
         srv.hear_pieces(grid, silence(6.0), 0.0, beam_size=5, prompt="")
+        assert not srv._events, "making captions tells nothing"
+        srv.hear_pieces(grid, silence(6.0), 0.0, beam_size=5, prompt="", told=True)
         told = [event["text"] for event in srv._events]
         assert told == [
             "0:00.2–0:02.0  駅まで歩いたよ。\n   starts: start of the audio · ends: pause 0.8s",
             "0:02.8–0:05.0  みなさんお元気ですか\n   starts: pause 0.8s · ends: end of the audio",
         ], told
         srv._events.clear()
-        srv.hear_pieces(grid, silence(6.0), 0.0, beam_size=10, prompt="", within=(2.4, 6.0))
+        srv.hear_pieces(grid, silence(6.0), 0.0, beam_size=10, prompt="", within=(2.4, 6.0), told=True)
         assert [event["text"].split("  ")[0] for event in srv._events] == ["heard again 0:02.8–0:05.0"], list(srv._events)
     finally:
         srv.run_whisper, srv.translate_ollama = real_whisper, real_translate

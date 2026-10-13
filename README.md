@@ -285,20 +285,25 @@ caption as it was. Sentence times come from where Whisper heard the words,
 so this needs a current `asr_server.py` on the GPU host; an older one still
 works, with the sentences placed by their share of the text instead.
 
-### Activity
+### Dev
 
-The third tab of the panel, **Activity**, is for seeing how the captions come
-about. At the top, how the Mac and the GPU host stand: whether the Mac is
-listening and how many utterances are waiting for their captions, which models
-the host has loaded, and how far a video's pre-fetch has got. Under that, one
+The third tab of the panel, **Dev**, is dev mode: the app is in it for as
+long as that tab is being shown, and in production, captioning ahead as
+above, on any other tab or with the panel closed. An ordinary launch is
+production. In production nothing is listed or kept of how the captions
+come about, on the Mac or on the host.
+
+At the top of the tab, how the Mac and the GPU host stand: whether the Mac
+is listening and how many utterances are waiting for their captions, which
+models the host has loaded, and how far a step has got. At the bottom, one
 list in the order things happened, each line marked with the machine it is
-from; the host's are asked for every second (`GET /events`). Only what is
-worth reading goes in it, so it is short. It may quote what was heard, and is
-in memory only on both machines, never in the host's log.
+from; the host's are asked for every second (`GET /events`) while the tab is
+shown. Only what is worth reading goes in it, so it is short. It may quote
+what was heard, and is in memory only on both machines, never in the host's
+log; leaving the tab empties it.
 
-By the tab picker, **Production | Dev** chooses what the pipeline does with a
-Chrome video. Production is captioning ahead as above. Dev runs one step of
-it on its own over the whole video, for looking at what the step does: press
+Dev mode runs one step of captioning ahead
+on its own over the whole video, for looking at what the step does: press
 **Run step** under the captions and the host fetches the video's audio from
 its start and runs the step over everything it has, again as more arrives,
 making no captions (the live listener goes on as it is). The first step,
@@ -320,7 +325,8 @@ of the page, and each step's findings with the step's version, so running
 a step again on the same video, after a restart or a change to the step,
 takes the audio from there and a step that has not changed gives its
 findings at once. The crossed-out bin on the timeline's row has the host
-forget it all. Production keeps nothing. The mode is remembered; `-pipelineMode dev` sets it for one run.
+forget it all. Production keeps nothing. `-sidePanel dev` starts the app in dev
+mode for one run.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. Nothing of a session outlives the app: the
@@ -360,7 +366,7 @@ LiveTrans.app/Contents/MacOS/LiveTrans -demoAudioPath "$PWD/clip.wav" -autoStart
 ```
 
 The window opens with the captions and the side panel side by side;
-`-sidePanel jisho`, `-sidePanel analysis`, `-sidePanel activity` or
+`-sidePanel jisho`, `-sidePanel analysis`, `-sidePanel dev` or
 `-sidePanel closed` picks what the panel shows at launch, or starts with the
 captions alone.
 
