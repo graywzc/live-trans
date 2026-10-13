@@ -302,8 +302,8 @@ the divider under it for more room. Click a bar to pick it out, or the gap
 between two, or drag across the band for any stretch, and its times, length
 and the pauses either side are shown. The play button hears the stretch
 from the fetched audio on what you are listening on (not through BlackHole,
-so the live listener does not caption it), and the arrow moves the Chrome
-video to it. The mode is remembered; `-pipelineMode dev` sets it for one run.
+so the live listener does not caption it), and the other play button plays
+it in the Chrome video, which pauses at its end. The mode is remembered; `-pipelineMode dev` sets it for one run.
 
 Settings also has furigana on/off, text size, and **Keep window on top** for
 floating the captions over a video. Nothing of a session outlives the app: the

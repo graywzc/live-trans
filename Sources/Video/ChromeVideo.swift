@@ -21,8 +21,11 @@ final class ChromeVideo {
     enum Command: Equatable {
         case toggle
         case skip(seconds: Double)
-        /// Plays from a sentence, in the tab it was heard in.
-        case seek(VideoMoment)
+        /// Plays from a sentence, in the tab it was heard in, a little
+        /// before it and past its end so no word is clipped; `exact` plays
+        /// the stretch itself and no more, for a stretch of audio rather
+        /// than a sentence.
+        case seek(VideoMoment, exact: Bool = false)
         /// To this many seconds in, playing on if it was playing.
         case scrub(to: Double)
     }
@@ -58,7 +61,7 @@ final class ChromeVideo {
         // A click while Chrome is still answering would race the first one.
         guard !inFlight, chromeIsRunning() else { return false }
         inFlight = true
-        let target = if case .seek(let moment) = command { moment.tabID } else { pinned?.id }
+        let target = if case .seek(let moment, _) = command { moment.tabID } else { pinned?.id }
         let source = ChromeScript.source(for: command, pinned: target, preferring: linked?.id)
         queue.async {
             let outcome = ChromeScript.run(source)
@@ -359,14 +362,14 @@ enum ChromeScript {
             "if (v.paused) { v.play(); } else { v.pause(); }"
         case .skip(let seconds):
             "v.currentTime = Math.min(Math.max(v.currentTime + (\(seconds)), 0), v.duration || Infinity);"
-        case .seek(let moment):
+        case .seek(let moment, let exact):
             // Paused before the jump and played once it has landed: a video
             // that keeps playing through a seek lets out a moment of sound
             // from where it was, which the captions would hear as a
             // sentence of its own.
             "if (location.href !== \(javaScriptString(moment.url))) return 'moved'; "
-                + "const from = Math.max(\(moment.seconds - seekLead), 0); "
-                + (moment.end.map { "\(stopScript(at: $0 + seekTail)) " } ?? "")
+                + "const from = Math.max(\(moment.seconds - (exact ? 0 : seekLead)), 0); "
+                + (moment.end.map { "\(stopScript(at: $0 + (exact ? 0 : seekTail))) " } ?? "")
                 + "v.pause(); v.currentTime = from; "
                 + "const resume = () => { if (v.paused) v.play(); }; "
                 + "if (v.seeking) { v.addEventListener('seeked', resume, { once: true }); } else { resume(); } "

@@ -6,7 +6,7 @@ import SwiftUI
 /// bars, the stretch picked out, and where the video is. Scrolls sideways;
 /// pinch, or the slider, to zoom. Click a bar to pick it out, or the gap
 /// between two, or drag across the band for any stretch; the stretch can
-/// then be heard from the fetched audio, or the video moved to it.
+/// then be heard from the fetched audio, or played in the Chrome video.
 struct StepTimeline: View {
     @Environment(DevPipeline.self) private var dev
     @Environment(Prefetcher.self) private var prefetch
@@ -28,13 +28,11 @@ struct StepTimeline: View {
                 }
                 .disabled(dev.selection == nil || dev.job == nil)
                 .help(dev.player.isPlaying ? "Stop" : "Hear the stretch from the fetched audio, on what you are listening on")
-                Button {
-                    if let selection = dev.selection { prefetch.scrub(to: selection.lowerBound) }
-                } label: {
-                    Image(systemName: "arrow.right.to.line")
+                Button(action: dev.playSelectionInChrome) {
+                    Image(systemName: "play.rectangle")
                 }
                 .disabled(dev.selection == nil || !onJob)
-                .help("Move the Chrome video to the start of the stretch")
+                .help("Play the stretch in the Chrome video, which pauses at its end")
                 Text(Self.summary(selection: dev.selection, speech: dev.speech, job: dev.job))
                     .foregroundStyle(dev.selection == nil ? Color.gray : Color.white)
                     .lineLimit(1)

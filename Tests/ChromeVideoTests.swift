@@ -94,6 +94,19 @@ final class ChromeVideoTests: XCTestCase {
         XCTAssertFalse(ChromeScript.action(for: .seek(moment)).contains("timeupdate"))
     }
 
+    /// A sentence is played from a little before it to a little past its
+    /// end; a stretch of audio, exactly.
+    func testAnExactSeekPlaysTheStretchItself() {
+        var moment = VideoMoment(tabID: 1, url: "https://example.tv/v", seconds: 12.5)
+        moment.end = 14.0
+        let sentence = ChromeScript.action(for: .seek(moment))
+        XCTAssertTrue(sentence.contains("Math.max(12.0, 0)"))
+        XCTAssertTrue(sentence.contains("v.currentTime >= 14.3"))
+        let exact = ChromeScript.action(for: .seek(moment, exact: true))
+        XCTAssertTrue(exact.contains("Math.max(12.5, 0)"))
+        XCTAssertTrue(exact.contains("v.currentTime >= 14.0"))
+    }
+
     /// A player in a frame of the page's own site is found, and the playlist
     /// is the one that frame loaded. Another site's frame is passed over.
     func testFindsAVideoInsideAFrame() throws {
