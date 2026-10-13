@@ -134,6 +134,16 @@ final class DevPipeline {
         self.speech = speech
     }
 
+    /// Plays the selected stretch in the Chrome video, which pauses at its
+    /// end: the stretch itself, with no lead or tail.
+    func playSelectionInChrome() {
+        guard let selection, let job else { return }
+        var moment = VideoMoment(tabID: job.tabID, url: job.page, seconds: selection.lowerBound)
+        moment.end = selection.upperBound
+        guard video.send(.seek(moment, exact: true)) else { return }
+        ActivityLog.tell("Playing \(Self.clock(selection.lowerBound))–\(Self.clock(selection.upperBound)) in Chrome")
+    }
+
     private func tick() async {
         guard !isTicking else { return }
         isTicking = true
