@@ -95,6 +95,12 @@ def wav_file(samples):
     return f"http://127.0.0.1:{port}/{name}"
 
 
+def fresh_cache():
+    """A cache of its own for the test, empty."""
+    srv.DEV_CACHE_DIR = tempfile.mkdtemp()
+    return srv.DEV_CACHE_DIR
+
+
 def wait_for(job, state, seconds=30):
     deadline = time.time() + seconds
     while job.state != state and time.time() < deadline:
@@ -103,6 +109,7 @@ def wait_for(job, state, seconds=30):
 
 
 def test_the_speech_step_finds_the_speech_in_the_whole_audio(monkeypatch=None):
+    fresh_cache()
     original = srv.speech_stretches
     srv.speech_stretches = loud_stretches
     try:
@@ -132,6 +139,7 @@ def test_the_speech_step_finds_the_speech_in_the_whole_audio(monkeypatch=None):
 
 
 def test_a_step_job_begins_where_it_was_told_to():
+    fresh_cache()
     original = srv.speech_stretches
     srv.speech_stretches = loud_stretches
     try:
@@ -155,6 +163,7 @@ def test_only_a_known_step_runs():
 
 
 def test_at_most_a_couple_of_minutes_of_audio_come_at_once():
+    fresh_cache()
     original = srv.speech_stretches
     srv.speech_stretches = lambda audio: []
     try:
@@ -165,6 +174,41 @@ def test_at_most_a_couple_of_minutes_of_audio_come_at_once():
         srv.speech_stretches = original
     with wave.open(io.BytesIO(job.wav(0.0, 130.0))) as f:
         assert f.getnframes() == int(srv.DEV_AUDIO_LIMIT * srv.SAMPLE_RATE)
+
+
+def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
+    cache = fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = loud_stretches
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        first = srv.PrefetchJob(url, "https://example.com/v", {}, 7.0, step="speech")
+        wait_for(first, "done")
+        assert not first.cached and first.speech == [(1.0, 2.0)]
+        assert sorted(os.listdir(os.path.join(cache, os.listdir(cache)[0]))) == ["audio.json", "audio.s16", "speech.json"]
+        # The same page again, from a link that no longer serves: the audio
+        # and the step's findings come from the cache, with no fetch.
+        srv.speech_stretches = lambda audio: (_ for _ in ()).throw(AssertionError("the step ran again"))
+        again = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 7.0, step="speech")
+        wait_for(again, "done", seconds=5)
+        assert again.cached and again.speech == [(1.0, 2.0)] and abs(again.analysed - 3.0) < 0.05, again.speech
+        assert again.status()["cached"] is True and again.duration == 7.0
+        # The step's code changed: it runs again, over the cached audio.
+        srv.STEP_VERSIONS["speech"] = "silero-whole-test"
+        srv.speech_stretches = lambda audio: [(0.5, 2.5)]
+        changed = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 7.0, step="speech")
+        wait_for(changed, "done", seconds=5)
+        assert changed.cached and changed.speech == [(0.5, 2.5)], changed.speech
+        # A production job keeps nothing and takes nothing.
+        production = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 7.0)
+        wait_for(production, "failed", seconds=10)
+        assert not production.cached
+    finally:
+        srv.speech_stretches = original
+        srv.STEP_VERSIONS["speech"] = "silero-whole-1"
+    assert srv.clear_dev_cache() == 1
+    assert os.listdir(cache) == []
+    assert srv.clear_dev_cache() == 0
 
 
 if __name__ == "__main__":

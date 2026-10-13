@@ -38,6 +38,8 @@ final class DevPipeline {
         var state = "running"
         /// Whether the host was told to hold the step.
         var paused = false
+        /// The audio came from the host's cache rather than a fetch.
+        var cached = false
     }
 
     static let probeInterval: TimeInterval = 3
@@ -109,6 +111,20 @@ final class DevPipeline {
     func isOnJob(_ playhead: VideoMoment?) -> Bool {
         guard let job, let playhead else { return false }
         return playhead.tabID == job.tabID && playhead.url == job.page
+    }
+
+    /// Has the host forget the videos and findings dev mode kept, and says
+    /// how many there were.
+    func forgetCache() {
+        guard let client = engine.client else { return }
+        Task {
+            do {
+                let count = try await client.clearDevCache()
+                ActivityLog.tell(count == 0 ? "The host had nothing cached" : "The host forgot \(count) cached video\(count == 1 ? "" : "s")")
+            } catch {
+                ActivityLog.tell("Could not clear the host's cache: \(error.localizedDescription)")
+            }
+        }
     }
 
     /// Puts the pointer at `seconds` of the video, for Space to play from.
@@ -209,6 +225,10 @@ final class DevPipeline {
             updated.fetched = max(status.fetched, 0)
             updated.duration = status.duration ?? updated.duration
             updated.state = status.state
+            if status.cached == true, !updated.cached {
+                updated.cached = true
+                ActivityLog.tell("The host had the video's audio from before: no fetch")
+            }
             let analysed = status.analysed ?? 0
             if analysed > updated.analysed || status.state == "done" && analysed != updated.analysed {
                 let findings = try await client.stepFindings(job: current.id)

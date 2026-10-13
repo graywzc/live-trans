@@ -40,6 +40,10 @@ struct StepTimeline: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
+                Button(action: dev.forgetCache) {
+                    Image(systemName: "trash.slash")
+                }
+                .help("Have the host forget the videos it fetched and the findings it kept for dev mode")
                 Slider(value: $zoom, in: log(Self.minimumScale)...log(Self.maximumScale))
                     .frame(width: 72)
                     .help("Zoom")

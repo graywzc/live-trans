@@ -67,9 +67,11 @@ GET /events?since=N
 
 import argparse
 import collections
+import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -806,6 +808,69 @@ DEV_STEPS = ("speech",)
 DEV_SCAN_STEP = 2.0
 # How much of a job's audio one request may ask for, in seconds.
 DEV_AUDIO_LIMIT = 120.0
+# Dev mode keeps what a step job fetched and found, on disk, so that
+# running the step again on the same video, after a restart of the app or
+# the server or a change to the step, does not fetch the video again: the
+# audio under a hash of the page (the page itself is not kept), and each
+# step's findings with the version of the step that found them, so a
+# changed step is run again over the cached audio. Production jobs keep
+# nothing. POST /devcache/clear empties it.
+DEV_CACHE_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEV_CACHE", "~/livetrans/devcache"))
+# Bumped with a step's code, so findings cached by the old code are not
+# taken for the new one's.
+STEP_VERSIONS = {"speech": "silero-whole-1"}
+
+
+class DevCache:
+    """What dev mode keeps of one video: see DEV_CACHE_DIR."""
+
+    def __init__(self, page, url):
+        self.dir = os.path.join(DEV_CACHE_DIR, hashlib.sha256((page or url).encode("utf-8")).hexdigest()[:16])
+
+    def load_audio(self):
+        """The whole audio kept for the video, from its start, and the
+        video's length, or None."""
+        try:
+            with open(os.path.join(self.dir, "audio.json"), encoding="utf-8") as f:
+                about = json.load(f)
+            audio = np.fromfile(os.path.join(self.dir, "audio.s16"), dtype="<i2").astype(np.float32) / 32768
+        except (OSError, ValueError):
+            return None
+        if abs(audio.size / SAMPLE_RATE - about.get("seconds", -1)) > 1:
+            return None
+        return audio, about.get("duration")
+
+    def save_audio(self, audio, duration):
+        os.makedirs(self.dir, exist_ok=True)
+        (np.clip(audio, -1, 1) * 32767).astype("<i2").tofile(os.path.join(self.dir, "audio.s16.part"))
+        os.replace(os.path.join(self.dir, "audio.s16.part"), os.path.join(self.dir, "audio.s16"))
+        with open(os.path.join(self.dir, "audio.json"), "w", encoding="utf-8") as f:
+            json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration}, f)
+
+    def load_findings(self, step):
+        """What `step`, at its current version, found over the audio, or None."""
+        try:
+            with open(os.path.join(self.dir, f"{step}.json"), encoding="utf-8") as f:
+                found = json.load(f)
+        except (OSError, ValueError):
+            return None
+        return found if found.get("version") == STEP_VERSIONS.get(step) else None
+
+    def save_findings(self, step, findings):
+        os.makedirs(self.dir, exist_ok=True)
+        with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
+            json.dump({**findings, "version": STEP_VERSIONS.get(step)}, f)
+
+
+def clear_dev_cache():
+    """Forgets every video dev mode kept; how many there were."""
+    try:
+        kept = [d for d in os.listdir(DEV_CACHE_DIR) if os.path.isdir(os.path.join(DEV_CACHE_DIR, d))]
+    except OSError:
+        return 0
+    for d in kept:
+        shutil.rmtree(os.path.join(DEV_CACHE_DIR, d), ignore_errors=True)
+    return len(kept)
 PREFETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -1294,6 +1359,10 @@ class PrefetchJob:
         # the video, and up to where in it Silero has looked.
         self.speech = []
         self.analysed = self.offset
+        # Dev mode's keeping of the video, for a step job from the start;
+        # `cached`, whether the audio came from it rather than a fetch.
+        self.cache = DevCache(page, url) if step and self.offset == 0 else None
+        self.cached = False
         self.state = "running"
         self.error = None
         self.stop_event = threading.Event()
@@ -1330,6 +1399,16 @@ class PrefetchJob:
         self.stop()
 
     def _fetch(self):
+        if self.cache and (kept := self.cache.load_audio()):
+            audio, duration = kept
+            with self.audio_lock:
+                self.audio = audio
+            self.cached = True
+            self.fetch_done = True
+            if self.duration is None or self.duration <= 0:
+                self.duration = duration or self.fetched
+            print(f"prefetch {self.id}: {self.fetched:.0f}s of audio from the cache", flush=True)
+            return
         try:
             media, error = resolve_media_url(self.url, self.page)
         except Exception as exc:
@@ -1375,6 +1454,13 @@ class PrefetchJob:
         if self.duration is None or self.duration <= 0:
             self.duration = self.offset + self.fetched
         print(f"prefetch {self.id}: fetched {self.fetched:.0f}s from {self.offset:.0f}s", flush=True)
+        if self.cache and not self.stop_event.is_set() and self.fetched >= 1:
+            try:
+                with self.audio_lock:
+                    audio = self.audio.copy()
+                self.cache.save_audio(audio, self.duration)
+            except OSError as exc:
+                print(f"prefetch {self.id}: not cached: {exc}", flush=True)
 
     def _transcribe(self):
         position = 0.0
@@ -1431,12 +1517,26 @@ class PrefetchJob:
             if self.paused.is_set():
                 time.sleep(0.25)
                 continue
+            if done and self.cached and looked < 0 and (kept := self.cache.load_findings(self.step)):
+                # Found over this very audio by this very step before.
+                self.speech = [tuple(s) for s in kept.get("speech", [])]
+                self.analysed = float(kept.get("analysed", self.offset))
+                self.state = "done"
+                print(f"prefetch {self.id}: {self.step} step from the cache, {len(self.speech)} stretches", flush=True)
+                tell(f"{self.step}: {len(self.speech)} stretches of speech in {clock(self.offset)}–"
+                     f"{clock(self.analysed)}, from the cache")
+                return
             if looked >= 0 and have <= looked + 0.05:
                 if done:
                     self.state = "done"
                     print(f"prefetch {self.id}: {self.step} step done, {len(self.speech)} stretches", flush=True)
                     tell(f"{self.step}: {len(self.speech)} stretches of speech in {clock(self.offset)}–"
                          f"{clock(self.analysed)}, the whole of the audio")
+                    if self.cache:
+                        try:
+                            self.cache.save_findings(self.step, self.findings())
+                        except OSError as exc:
+                            print(f"prefetch {self.id}: findings not cached: {exc}", flush=True)
                     return
                 time.sleep(0.25)
                 continue
@@ -1535,6 +1635,7 @@ class PrefetchJob:
             "lines": self.lines[since:],
             "step": self.step,
             "analysed": round(self.analysed, 2),
+            "cached": self.cached,
         }
 
     def findings(self):
@@ -1687,6 +1788,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/prefetch"):
             self._do_prefetch()
+            return
+        if self.path.startswith("/devcache/clear"):
+            self._send(200, {"cleared": clear_dev_cache()})
             return
         if not self.path.startswith("/transcribe"):
             self._send(404, {"error": "not found"})
