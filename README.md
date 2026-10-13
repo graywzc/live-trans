@@ -84,10 +84,17 @@ On the GPU machine, once:
 ```
 mkdir -p ~/livetrans && cd ~/livetrans
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/asr_server.py
+curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/silero_vad.onnx
 python3 -m venv ~/venvs/livetrans
 ~/venvs/livetrans/bin/pip install faster-whisper ctranslate2 numpy
 ollama pull qwen3.5:9b
 ```
+
+`silero_vad.onnx` is Silero VAD v6.2, the authors' own file (MIT, see
+`server/silero_vad.LICENSE`), which the server runs in place of the model
+faster-whisper bundles: that one is a re-export of the v6.0 weights, whose
+memory goes dull after half a minute of music or silence and then misses the
+first seconds of speech. `LIVETRANS_SILERO_MODEL` points at another file.
 
 To caption videos ahead from their own audio, the host also needs `ffmpeg`,
 and `yt-dlp` with a JavaScript runtime for sites like YouTube:

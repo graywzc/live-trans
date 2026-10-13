@@ -205,7 +205,7 @@ def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
         assert not production.cached
     finally:
         srv.speech_stretches = original
-        srv.STEP_VERSIONS["speech"] = "silero-whole-1"
+        srv.STEP_VERSIONS["speech"] = "silero-6.2-whole-1"
     assert srv.clear_dev_cache() == 1
     assert os.listdir(cache) == []
     assert srv.clear_dev_cache() == 0
