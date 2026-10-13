@@ -133,6 +133,7 @@ final class ActivityViewTests: XCTestCase {
             .environment(panel)
             .environment(video)
             .environment(Prefetcher(engine: engine, video: video))
+            .environment(DevPipeline(engine: engine, video: video))
             .environment(log)
         let window = TestScreen.window(width: 960, height: 520)
         window.contentView = NSHostingView(rootView: root)
@@ -149,10 +150,65 @@ final class ActivityViewTests: XCTestCase {
         XCTAssertEqual(picker.segmentCount, 3)
         XCTAssertEqual(picker.selectedSegment, 2)
 
-        if let dir = ProcessInfo.processInfo.environment["SNAPSHOT_DIR"],
-           let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-            view.cacheDisplay(in: view.bounds, to: rep)
-            try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/activity-tab.png"))
+        snapshot(view, "activity-tab")
+    }
+
+    /// In dev mode the tab has the mode picker on Dev, the step's timeline
+    /// above the list, and the host's status telling of the step.
+    func testInDevModeTheTabShowsTheStepsTimeline() throws {
+        let defaults = UserDefaults.standard
+        let before = defaults.string(forKey: AppSettings.pipelineMode)
+        defaults.set(AppSettings.PipelineMode.dev.rawValue, forKey: AppSettings.pipelineMode)
+        addTeardownBlock {
+            if let before { defaults.set(before, forKey: AppSettings.pipelineMode) } else {
+                defaults.removeObject(forKey: AppSettings.pipelineMode)
+            }
         }
+        let panel = SidePanel()
+        panel.show(.activity)
+        let engine = CaptionEngine()
+        let video = ChromeVideo()
+        let dev = DevPipeline(engine: engine, video: video)
+        var job = DevPipeline.Job(id: "abcdef", tabID: 1, page: "https://example.com/v", step: .speech, duration: 90)
+        job.fetched = 40
+        job.analysed = 38
+        dev.show(job: job, speech: [1.0...3.0, 4.0...5.5, 8.0...8.4, 12.0...20.0, 30.0...37.0])
+        dev.selection = 4.0...5.5
+        let root = ContentView()
+            .environment(engine)
+            .environment(JishoBrowser())
+            .environment(SentenceAnalyzer(makeClient: { nil }))
+            .environment(panel)
+            .environment(video)
+            .environment(Prefetcher(engine: engine, video: video))
+            .environment(dev)
+            .environment(ActivityLog())
+        let window = TestScreen.window(width: 960, height: 520)
+        window.contentView = NSHostingView(rootView: root)
+        window.orderFrontRegardless()
+        defer { window.close() }
+
+        let view = try XCTUnwrap(window.contentView)
+        func views<Found: NSView>(_ type: Found.Type, in v: NSView) -> [Found] {
+            ((v as? Found).map { [$0] } ?? []) + v.subviews.flatMap { views(type, in: $0) }
+        }
+        let canvas = try XCTUnwrap(
+            TestScreen.wait { views(TimelineCanvas.CanvasView.self, in: view).first }, "no timeline in the tab"
+        )
+        XCTAssertGreaterThan(canvas.frame.width, 0)
+        XCTAssertEqual(canvas.speech.count, 5)
+        XCTAssertEqual(canvas.selection, 4.0...5.5)
+        let pickers = views(NSSegmentedControl.self, in: view)
+        let mode = try XCTUnwrap(pickers.first { $0.segmentCount == 2 }, "no mode picker")
+        XCTAssertEqual(mode.selectedSegment, 1, "on Dev")
+        XCTAssertNotNil(views(RowSplitHandle.HandleView.self, in: view).first, "a divider under the timeline")
+        snapshot(view, "activity-tab-dev")
+    }
+
+    private func snapshot(_ view: NSView, _ name: String) {
+        guard let dir = ProcessInfo.processInfo.environment["SNAPSHOT_DIR"],
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
     }
 }

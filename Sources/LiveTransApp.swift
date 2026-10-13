@@ -20,6 +20,7 @@ struct LiveTransApp: App {
                 .environment(delegate.panel)
                 .environment(delegate.video)
                 .environment(delegate.prefetcher)
+                .environment(delegate.devPipeline)
                 .environment(delegate.activity)
                 .task {
                     if UserDefaults.standard.bool(forKey: AppSettings.autoStart) {
@@ -44,15 +45,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let video = ChromeVideo()
     let activity = ActivityLog.shared
     let prefetcher: Prefetcher
+    let devPipeline: DevPipeline
 
     override init() {
         // Left by a copy that did not quit cleanly, or by one from before
         // nothing was kept.
         SessionTraces.erase()
         prefetcher = Prefetcher(engine: engine, video: video)
+        devPipeline = DevPipeline(engine: engine, video: video)
         super.init()
         engine.videoClock = { [video] in await video.moment(at: $0) }
         prefetcher.start()
+        devPipeline.start()
         activity.follow { [engine] in engine.client }
         panel.applyLaunchArgument()
     }

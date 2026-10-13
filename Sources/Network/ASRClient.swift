@@ -28,6 +28,22 @@ struct PrefetchStatus: Decodable, Equatable {
     var ready: Double
     var count: Int
     var lines: [CaptionPair]
+    /// The step a dev job runs on its own, and up to where in the video
+    /// it has looked.
+    var step: String?
+    var analysed: Double?
+}
+
+/// What a dev job's step has found so far.
+struct StepFindings: Decodable, Equatable {
+    var step: String?
+    var analysed: Double
+    /// Where the speech is, as [start, end] pairs in seconds of the video.
+    var speech: [[Double]]
+
+    var stretches: [ClosedRange<Double>] {
+        speech.compactMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
+    }
 }
 
 struct CaptionPair: Decodable, Equatable {
@@ -90,9 +106,11 @@ struct ASRClient {
     }
 
     /// Start fetching a video's audio from `start` seconds in, ahead of the
-    /// viewer. Returns the job.
+    /// viewer. Returns the job. With `step`, the job runs that step of the
+    /// pipeline alone over the whole of the audio, making no captions.
     func startPrefetch(
-        url: String?, page: String, headers: [String: String], duration: Double?, start: Double = 0
+        url: String?, page: String, headers: [String: String], duration: Double?, start: Double = 0,
+        step: String? = nil
     ) async throws -> String {
         var request = URLRequest(url: baseURL.appending(path: "prefetch"))
         request.httpMethod = "POST"
@@ -100,6 +118,7 @@ struct ASRClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         var body: [String: Any] = ["url": url ?? "", "page": page, "headers": headers, "start": start]
         if let duration { body["duration"] = duration }
+        if let step { body["step"] = step }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)
         struct Payload: Decodable { var job: String?; var error: String? }
@@ -134,6 +153,34 @@ struct ASRClient {
         let (data, response) = try await session.data(for: request)
         struct Payload: Decodable { var lines: [CaptionPair] }
         return try Self.decode(Payload.self, from: data, statusCode: response).lines
+    }
+
+    /// What a dev job's step has found so far.
+    func stepFindings(job: String) async throws -> StepFindings {
+        var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/speech"))
+        request.timeoutInterval = 20
+        let (data, response) = try await session.data(for: request)
+        return try Self.decode(StepFindings.self, from: data, statusCode: response)
+    }
+
+    /// The job's fetched audio from `start` to `end` of the video, as a WAV
+    /// file; the server gives at most a couple of minutes at once.
+    func prefetchAudio(job: String, from start: Double, to end: Double) async throws -> Data {
+        var components = URLComponents(url: baseURL.appending(path: "prefetch/\(job)/audio"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "from", value: String(start)), URLQueryItem(name: "to", value: String(end)),
+        ]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200 else {
+            if let message = (try? JSONDecoder().decode(ServerFailure.self, from: data))?.error {
+                throw ClientError.server(message)
+            }
+            throw ClientError.badStatus(code)
+        }
+        return data
     }
 
     func stopPrefetch(job: String) async {
