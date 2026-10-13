@@ -50,6 +50,12 @@ final class DevPipeline {
     private(set) var isPaused = true
     /// The stretch of the video picked out on the timeline.
     var selection: ClosedRange<Double>?
+    /// Where the pointer was put on the timeline by a click, for playing
+    /// from there.
+    private(set) var cursor: Double?
+    /// The pointer has been put somewhere since Space was last pressed, so
+    /// the next press plays from there rather than pausing or resuming.
+    private var cursorArmed = false
     let player = ClipPlayer()
 
     var step: Step {
@@ -105,6 +111,28 @@ final class DevPipeline {
         return playhead.tabID == job.tabID && playhead.url == job.page
     }
 
+    /// Puts the pointer at `seconds` of the video, for Space to play from.
+    func place(cursor seconds: Double) {
+        cursor = max(seconds, 0)
+        cursorArmed = true
+    }
+
+    /// Space: plays the Chrome video from the pointer when it has been put
+    /// somewhere since the last press, and says so; otherwise nothing, and
+    /// Space does what it always does. Without a video to play, the fetched
+    /// audio is heard from there instead, for as much as the host gives.
+    func playFromCursor() -> Bool {
+        guard cursorArmed, let cursor, let job else { return false }
+        cursorArmed = false
+        let moment = VideoMoment(tabID: job.tabID, url: job.page, seconds: cursor)
+        if video.send(.seek(moment, exact: true)) {
+            ActivityLog.tell("Playing the video from \(Self.clock(cursor))")
+        } else {
+            hear(cursor...min(cursor + 120, job.fetched))
+        }
+        return true
+    }
+
     /// Plays the selected stretch from the fetched audio, on the device
     /// being listened on, or stops it.
     func hearSelection() {
@@ -112,8 +140,13 @@ final class DevPipeline {
             player.stop()
             return
         }
-        guard let selection, let job, let client = engine.client else { return }
-        let from = max(selection.lowerBound, 0), to = min(selection.upperBound, max(job.fetched, from))
+        guard let selection else { return }
+        hear(selection)
+    }
+
+    private func hear(_ stretch: ClosedRange<Double>) {
+        guard let job, let client = engine.client else { return }
+        let from = max(stretch.lowerBound, 0), to = min(stretch.upperBound, max(job.fetched, from))
         guard to > from else { return }
         ActivityLog.tell("Hearing \(Self.clock(from))–\(Self.clock(to)) from the fetched audio")
         let player = player
@@ -206,6 +239,8 @@ final class DevPipeline {
             job = Job(id: id, tabID: probe.tabID, page: probe.page, step: step, duration: probe.duration)
             speech = []
             selection = nil
+            cursor = nil
+            cursorArmed = false
             let length = probe.duration.map { ", \(Self.clock($0)) long" } ?? ""
             ActivityLog.tell("Step \(step.title): fetching the whole video\(length), from its start")
             print("step \(step.rawValue) \(id): \(probe.mediaURL ?? probe.page)")

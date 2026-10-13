@@ -8,12 +8,14 @@ import XCTest
 final class StepTimelineTests: XCTestCase {
     private var window: NSWindow!
     private var picked: [ClosedRange<Double>?] = []
+    private var placed: [Double] = []
 
     private static let size = CGSize(width: 480, height: 120)
     private static let speech: [ClosedRange<Double>] = [1.0...3.0, 4.0...5.5, 8.0...8.4]
 
     override func setUp() async throws {
         picked = []
+        placed = []
         window = TestScreen.window(size: Self.size)
     }
 
@@ -109,7 +111,8 @@ final class StepTimelineTests: XCTestCase {
     private func show(scale: Double = 20, selection: ClosedRange<Double>? = nil) {
         let canvas = TimelineCanvas(
             total: 20, fetched: 10, analysed: 10, speech: Self.speech, playhead: 2.5, selection: selection,
-            scale: scale, onSelect: { [unowned self] in picked.append($0) }, onZoom: { _ in }
+            scale: scale, onSelect: { [unowned self] in picked.append($0) },
+            onPlace: { [unowned self] in placed.append($0) }, onZoom: { _ in }
         )
         window.contentView = NSHostingView(
             rootView: canvas.frame(width: Self.size.width, height: Self.size.height).background(Color.black)
@@ -134,6 +137,32 @@ final class StepTimelineTests: XCTestCase {
         show()
         drag(from: CGPoint(x: 70, y: bandY), to: CGPoint(x: 70, y: bandY))
         XCTAssertEqual(picked, [3.0...4.0])
+    }
+
+    func testAClickPutsThePointerThereAndOnTheRulerOnlyThat() {
+        show()
+        drag(from: CGPoint(x: 70, y: bandY), to: CGPoint(x: 70, y: bandY))
+        XCTAssertEqual(placed, [3.5])
+        XCTAssertEqual(picked.count, 1)
+        drag(from: CGPoint(x: 100, y: 8), to: CGPoint(x: 100, y: 8))
+        XCTAssertEqual(placed, [3.5, 5.0])
+        XCTAssertEqual(picked.count, 1, "a click on the ruler picks nothing out")
+        drag(from: CGPoint(x: 40, y: bandY), to: CGPoint(x: 120, y: bandY))
+        XCTAssertEqual(placed, [3.5, 5.0], "a drag does not move the pointer")
+    }
+
+    func testSpacePlaysFromThePointerOnceItHasBeenPut() {
+        let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())
+        XCTAssertFalse(dev.playFromCursor(), "nothing to play from")
+        var job = DevPipeline.Job(id: "a", tabID: 1, page: "https://example.com/v", step: .speech, duration: 60)
+        job.fetched = 30
+        dev.show(job: job, speech: Self.speech)
+        dev.place(cursor: 3.5)
+        XCTAssertEqual(dev.cursor, 3.5)
+        XCTAssertTrue(dev.playFromCursor(), "the first Space after a click plays from there")
+        XCTAssertFalse(dev.playFromCursor(), "the next is Space as usual")
+        dev.place(cursor: 7)
+        XCTAssertTrue(dev.playFromCursor())
     }
 
     func testDraggingAcrossTheBandPicksTheStretchDraggedOut() {

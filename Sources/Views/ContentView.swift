@@ -251,6 +251,7 @@ struct ContentView: View {
 /// Play/pause and 5-second skips for the video in Chrome.
 private struct VideoControls: View {
     @Environment(ChromeVideo.self) private var video
+    @Environment(DevPipeline.self) private var dev
 
     var body: some View {
         HStack(spacing: 12) {
@@ -275,7 +276,9 @@ private struct VideoControls: View {
             }
             .help("Forward 5 seconds in the Chrome video")
         }
-        .background(SpaceKey { video.send(.toggle) })
+        // Space plays from the pointer on the dev timeline once it has been
+        // put somewhere, else plays or pauses.
+        .background(SpaceKey { if !dev.playFromCursor() { video.send(.toggle) } })
         // Keeps the picker's label on the tab the buttons would control,
         // which changes while LiveTrans is in the background.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
