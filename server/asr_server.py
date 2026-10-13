@@ -294,6 +294,64 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
         return texts
 
 
+# Silero VAD, the authors' own v6.2 ONNX file (MIT, silero_vad.LICENSE),
+# in place of the one faster_whisper bundles: that is a re-export of the
+# v6.0 weights, whose memory goes dull after half a minute or so of music
+# or silence and then misses the first seconds of speech; v6.2 does not.
+SILERO_MODEL = os.getenv(
+    "LIVETRANS_SILERO_MODEL", os.path.join(os.path.dirname(os.path.abspath(__file__)), "silero_vad.onnx")
+)
+
+
+class OfficialSilero:
+    """The official model run as its authors' wrapper runs it: 512-sample
+    windows, each with the 64 samples before it as context, the (2, 1, 128)
+    state carried from window to window and started from zero at the first
+    window of each array given, never reset within one. Stands in for
+    faster_whisper's model object: called with the padded audio, gives one
+    speech probability per window."""
+
+    def __init__(self, path):
+        self.path = path
+        self.session = None
+        self.lock = threading.Lock()
+
+    def __call__(self, audio, **kwargs):
+        import onnxruntime
+
+        if self.session is None:
+            with self.lock:
+                if self.session is None:
+                    self.session = onnxruntime.InferenceSession(self.path, providers=["CPUExecutionProvider"])
+        windows = audio.shape[0] // 512
+        probs = np.zeros(windows, dtype=np.float32)
+        state = np.zeros((2, 1, 128), dtype=np.float32)
+        context = np.zeros((1, 64), dtype=np.float32)
+        rate = np.array(SAMPLE_RATE, dtype=np.int64)
+        for k in range(windows):
+            x = np.concatenate([context, audio[k * 512:(k + 1) * 512][None, :]], axis=1).astype(np.float32)
+            out, state = self.session.run(None, {"input": x, "state": state, "sr": rate})
+            probs[k] = out.reshape(-1)[0]
+            context = x[:, -64:]
+        return probs
+
+
+_silero = OfficialSilero(SILERO_MODEL)
+
+
+def _use_official_silero():
+    """Points faster_whisper's speech-timestamp code at the official model,
+    once; its post-processing (thresholds, pauses, padding) is kept."""
+    import faster_whisper.vad as fw_vad
+
+    if fw_vad.get_vad_model is not _official_silero_model:
+        fw_vad.get_vad_model = _official_silero_model
+
+
+def _official_silero_model():
+    return _silero
+
+
 def speech_clips(audio):
     """Where the speech is in `audio`, as [start, end, start, end, ...] in
     seconds, for Whisper's `clip_timestamps`; empty when there is none.
@@ -301,6 +359,7 @@ def speech_clips(audio):
     shorter than two seconds stays inside a clip."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
+    _use_official_silero()
     clips = []
     for chunk in get_speech_timestamps(audio, VadOptions()):
         clips += [chunk["start"] / SAMPLE_RATE, chunk["end"] / SAMPLE_RATE]
@@ -818,7 +877,7 @@ DEV_AUDIO_LIMIT = 120.0
 DEV_CACHE_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEV_CACHE", "~/livetrans/devcache"))
 # Bumped with a step's code, so findings cached by the old code are not
 # taken for the new one's.
-STEP_VERSIONS = {"speech": "silero-whole-1"}
+STEP_VERSIONS = {"speech": "silero-6.2-whole-1"}
 
 
 class DevCache:
@@ -924,6 +983,7 @@ def speech_stretches(audio):
     as it is, unpadded (its padding would take most of a second off each)."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
+    _use_official_silero()
     found = get_speech_timestamps(
         audio, VadOptions(min_silence_duration_ms=int(GRID_PAUSE_MIN * 1000), speech_pad_ms=0)
     )
