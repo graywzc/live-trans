@@ -40,6 +40,24 @@ struct StepTimeline: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
+                // Where the pointer and the video are, to the hundredth;
+                // the video's ticks on while it plays.
+                if let cursor = dev.cursor {
+                    Text("▼ \(Self.readout(cursor))")
+                        .help("Where the pointer is")
+                }
+                if onJob {
+                    TimelineView(.animation(minimumInterval: 1.0 / 20, paused: playhead?.playing != true)) { _ in
+                        if let position = prefetch.position {
+                            HStack(spacing: 3) {
+                                Text("●").foregroundStyle(Color.orange)
+                                Text(Self.readout(position))
+                            }
+                            .help("Where the video is")
+                        }
+                    }
+                    .fixedSize()
+                }
                 Button(action: dev.forgetCache) {
                     Image(systemName: "trash.slash")
                 }
@@ -64,6 +82,16 @@ struct StepTimeline: View {
                 )
             }
         }
+    }
+
+    /// A moment to the hundredth of a second: "2:37.42", "1:02:37.42".
+    static func readout(_ seconds: Double) -> String {
+        let hundredths = Int((max(seconds, 0) * 100).rounded())
+        let hours = hundredths / 360_000, minutes = hundredths / 6000 % 60
+        let rest = Double(hundredths % 6000) / 100
+        return hours > 0
+            ? String(format: "%d:%02d:%05.2f", hours, minutes, rest)
+            : String(format: "%d:%05.2f", minutes, rest)
     }
 
     /// What the control row says: of the stretch picked out, else of the
