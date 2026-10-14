@@ -94,6 +94,14 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertTrue(StepTimeline.summary(selection: nil, speech: Self.speech, job: job).contains("in all"))
     }
 
+    func testTheReadoutsGoToTheHundredth() {
+        XCTAssertEqual(StepTimeline.readout(157.424), "2:37.42")
+        XCTAssertEqual(StepTimeline.readout(4.006), "0:04.01")
+        XCTAssertEqual(StepTimeline.readout(59.999), "1:00.00")
+        XCTAssertEqual(StepTimeline.readout(3757.4), "1:02:37.40")
+        XCTAssertEqual(StepTimeline.readout(-1), "0:00.00")
+    }
+
     func testTheHostStatusTellsOfTheStep() {
         var job = DevPipeline.Job(id: "abcdef", tabID: 1, page: "p", step: .speech, duration: 1440)
         job.fetched = 412
