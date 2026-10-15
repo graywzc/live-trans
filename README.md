@@ -85,6 +85,8 @@ On the GPU machine, once:
 mkdir -p ~/livetrans && cd ~/livetrans
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/asr_server.py
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/silero_vad.onnx
+curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_vad.onnx
+curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_cmvn.ark
 python3 -m venv ~/venvs/livetrans
 ~/venvs/livetrans/bin/pip install faster-whisper ctranslate2 numpy
 ollama pull qwen3.5:9b
@@ -95,6 +97,13 @@ ollama pull qwen3.5:9b
 faster-whisper bundles: that one is a re-export of the v6.0 weights, whose
 memory goes dull after half a minute of music or silence and then misses the
 first seconds of speech. `LIVETRANS_SILERO_MODEL` points at another file.
+
+`fireredvad_vad.onnx` and `fireredvad_cmvn.ark` are FireRedVAD's
+non-streaming model and its feature normalisation, the authors' own files
+(Apache-2.0, see `server/fireredvad.LICENSE`). Only the dev step
+"Speech (FireRedVAD)" uses them, to compare with Silero; without them that
+step fails and nothing else changes. `LIVETRANS_FIRERED_MODEL` points at
+another model file, with `fireredvad_cmvn.ark` beside it.
 
 To caption videos ahead from their own audio, the host also needs `ffmpeg`,
 and `yt-dlp` with a JavaScript runtime for sites like YouTube:

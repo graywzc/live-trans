@@ -341,6 +341,108 @@ class OfficialSilero:
 _silero = OfficialSilero(SILERO_MODEL)
 
 
+# FireRedVAD's non-streaming model, the authors' ONNX file and the feature
+# normalisation it was trained with (Apache-2.0, fireredvad.LICENSE), tried
+# in dev mode against Silero. Its layers each see a bounded stretch of the
+# audio around a frame, nothing carried from further back, so what it says
+# of a moment does not hang on where its reading began, as Silero's does
+# after a loud bed; and it was trained with music as not speech.
+FIRERED_MODEL = os.getenv(
+    "LIVETRANS_FIRERED_MODEL", os.path.join(os.path.dirname(os.path.abspath(__file__)), "fireredvad_vad.onnx")
+)
+FIRERED_CMVN = os.path.join(os.path.dirname(FIRERED_MODEL), "fireredvad_cmvn.ark")
+# The model reads at most this many 10 ms frames at once, as its authors
+# run it.
+FIRERED_CHUNK = 30000
+
+
+def kaldi_fbank(samples):
+    """80-bin log mel filterbank of `samples` (on the int16 scale), one row
+    per 10 ms, as Kaldi computes it with FireRedVAD's options: 25 ms frames
+    with the edges snipped, no dither, the mean taken out, pre-emphasis
+    0.97, the Povey window, a 512-point power spectrum, bins from 20 Hz to
+    8 kHz on Kaldi's mel scale, the log floored at float32's epsilon."""
+    count = 1 + (samples.size - 400) // 160 if samples.size >= 400 else 0
+    if count <= 0:
+        return np.zeros((0, 80), np.float32)
+    window = (0.5 - 0.5 * np.cos(2 * np.pi * np.arange(400) / 399)) ** 0.85
+    mel = lambda f: 1127.0 * np.log(1.0 + f / 700.0)
+    low, high = mel(20.0), mel(8000.0)
+    delta = (high - low) / 81
+    bin_mel = mel(np.arange(256) * SAMPLE_RATE / 512)
+    banks = np.zeros((80, 257))
+    for b in range(80):
+        left, centre, right = low + b * delta, low + (b + 1) * delta, low + (b + 2) * delta
+        rising = (bin_mel > left) & (bin_mel <= centre)
+        falling = (bin_mel > centre) & (bin_mel < right)
+        banks[b, :256][rising] = (bin_mel[rising] - left) / (centre - left)
+        banks[b, :256][falling] = (right - bin_mel[falling]) / (right - centre)
+    out = np.empty((count, 80), np.float32)
+    for first in range(0, count, 20000):
+        rows = np.arange(first, min(first + 20000, count))
+        frames = samples[(rows * 160)[:, None] + np.arange(400)].astype(np.float64)
+        frames -= frames.mean(axis=1, keepdims=True)
+        frames[:, 1:] -= 0.97 * frames[:, :-1].copy()
+        frames[:, 0] -= 0.97 * frames[:, 0]
+        power = np.abs(np.fft.rfft(frames * window, 512)) ** 2
+        out[rows] = np.log(np.maximum(power @ banks.T, np.finfo(np.float32).eps))
+    return out
+
+
+def read_kaldi_cmvn(path):
+    """The means and inverse standard deviations in a Kaldi binary CMVN
+    stats file: two rows of sums and sums of squares, with the count last."""
+    data = open(path, "rb").read()
+    at = data.index(b"\0B") + 2
+    kind = data[at:at + 3]
+    rows = int.from_bytes(data[at + 4:at + 8], "little")
+    cols = int.from_bytes(data[at + 9:at + 13], "little")
+    stats = np.frombuffer(data, dtype="<f8" if kind == b"DM " else "<f4", count=rows * cols, offset=at + 13)
+    stats = stats.reshape(rows, cols).astype(np.float64)
+    count = stats[0, -1]
+    mean = stats[0, :-1] / count
+    variance = np.maximum(stats[1, :-1] / count - mean * mean, 1e-20)
+    return mean, 1.0 / np.sqrt(variance)
+
+
+class FireRedVad:
+    """FireRedVAD standing in for Silero in faster_whisper's speech-timestamp
+    code: called with the padded audio, gives one speech probability per
+    512-sample window, read off the model's 10 ms frames at the middle of
+    each window."""
+
+    def __init__(self, path, cmvn):
+        self.path = path
+        self.cmvn = cmvn
+        self.session = None
+        self.lock = threading.Lock()
+
+    def __call__(self, audio, **kwargs):
+        import onnxruntime
+
+        if self.session is None:
+            with self.lock:
+                if self.session is None:
+                    self.mean, self.istd = read_kaldi_cmvn(self.cmvn)
+                    self.session = onnxruntime.InferenceSession(self.path, providers=["CPUExecutionProvider"])
+        windows = audio.shape[0] // 512
+        feats = ((kaldi_fbank(audio * 32768.0) - self.mean) * self.istd).astype(np.float32)
+        if not len(feats):
+            return np.zeros(windows, dtype=np.float32)
+        frames = np.concatenate([
+            self.session.run(None, {"feat": feats[None, k:k + FIRERED_CHUNK]})[0][0, :, 0]
+            for k in range(0, len(feats), FIRERED_CHUNK)
+        ])
+        centres = (np.arange(len(frames)) * 160 + 200) / SAMPLE_RATE
+        return np.interp(np.arange(windows) * 512 / SAMPLE_RATE + 0.016, centres, frames).astype(np.float32)
+
+
+_firered = FireRedVad(FIRERED_MODEL, FIRERED_CMVN)
+# The model faster_whisper's code scores with on this thread, when not
+# Silero: set for the length of one call.
+_speech_model_here = threading.local()
+
+
 def _use_official_silero():
     """Points faster_whisper's speech-timestamp code at the official model,
     once; its post-processing (thresholds, pauses, padding) is kept."""
@@ -351,7 +453,7 @@ def _use_official_silero():
 
 
 def _official_silero_model():
-    return _silero
+    return getattr(_speech_model_here, "model", None) or _silero
 
 
 def speech_clips(audio):
@@ -863,8 +965,9 @@ PREFETCH_PROMPT_CHARS = 120
 PREFETCH_MAX_JOBS = 8
 # The steps of captioning ahead a job can be asked to run on its own, over
 # the whole of its audio, for looking at what the step does: "speech" is
-# the first, Silero finding where the speech is. More to come.
-DEV_STEPS = ("speech",)
+# the first, Silero finding where the speech is, and "speech-firered" the
+# same step with FireRedVAD in Silero's place. More to come.
+DEV_STEPS = ("speech", "speech-firered")
 # A step job looks at the audio again once this much more has arrived.
 DEV_SCAN_STEP = 2.0
 # How much of a job's audio one request may ask for, in seconds.
@@ -879,7 +982,7 @@ DEV_AUDIO_LIMIT = 120.0
 DEV_CACHE_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEV_CACHE", "~/livetrans/devcache"))
 # Bumped with a step's code, so findings cached by the old code are not
 # taken for the new one's.
-STEP_VERSIONS = {"speech": "silero-6.2-whole-1"}
+STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-whole-1"}
 
 
 class DevCache:
@@ -979,16 +1082,21 @@ def resolve_media_url(url, page):
 PREFETCH_CUT_LEAD = 0.3
 
 
-def speech_stretches(audio):
+def speech_stretches(audio, model=None):
     """Where the speech is in `audio`, as [(start, end), ...] in seconds:
-    Silero's, with every pause of GRID_PAUSE_MIN or more kept and measured
-    as it is, unpadded (its padding would take most of a second off each)."""
+    Silero's, or `model`'s in its place, with every pause of GRID_PAUSE_MIN
+    or more kept and measured as it is, unpadded (its padding would take
+    most of a second off each)."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
     _use_official_silero()
-    found = get_speech_timestamps(
-        audio, VadOptions(min_silence_duration_ms=int(GRID_PAUSE_MIN * 1000), speech_pad_ms=0)
-    )
+    _speech_model_here.model = model
+    try:
+        found = get_speech_timestamps(
+            audio, VadOptions(min_silence_duration_ms=int(GRID_PAUSE_MIN * 1000), speech_pad_ms=0)
+        )
+    finally:
+        _speech_model_here.model = None
     return [(s["start"] / SAMPLE_RATE, s["end"] / SAMPLE_RATE) for s in found]
 
 
@@ -1420,7 +1528,7 @@ class PrefetchJob:
         self.grid = CutGrid()
         self.ready = self.offset
         # The speech step's findings: where the speech is, in seconds of
-        # the video, and up to where in it Silero has looked.
+        # the video, and up to where in it Silero (or FireRedVAD) has looked.
         self.speech = []
         self.analysed = self.offset
         # Dev mode's keeping of the video, for a step job from the start;
@@ -1572,7 +1680,7 @@ class PrefetchJob:
         """The job's step run over the whole of its audio, from the start,
         and again as more arrives, so what it finds is seen whole rather
         than batch by batch: `speech`, Silero's stretches, as the
-        transcription would have them."""
+        transcription would have them; `speech-firered`, FireRedVAD's."""
         looked = -1.0
         while not self.stop_event.is_set() and self.state == "running":
             with self.audio_lock:
@@ -1611,7 +1719,12 @@ class PrefetchJob:
                 audio = self.audio.copy()
             t0 = time.time()
             try:
-                found = speech_stretches(audio) if audio.size else []
+                if not audio.size:
+                    found = []
+                elif self.step == "speech-firered":
+                    found = speech_stretches(audio, model=_firered)
+                else:
+                    found = speech_stretches(audio)
             except Exception as exc:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return

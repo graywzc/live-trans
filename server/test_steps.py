@@ -211,6 +211,34 @@ def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
     assert srv.clear_dev_cache() == 0
 
 
+def test_the_firered_step_finds_the_speech_with_firered_and_keeps_it_apart():
+    cache = fresh_cache()
+    original = srv.speech_stretches
+    models = []
+
+    def found(audio, model=None):
+        models.append(model)
+        return loud_stretches(audio)
+
+    srv.speech_stretches = found
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        silero = srv.PrefetchJob(url, "https://example.com/w", {}, 3.0, step="speech")
+        wait_for(silero, "done")
+        firered = srv.PrefetchJob(url + ".gone", "https://example.com/w", {}, 3.0, step="speech-firered")
+        wait_for(firered, "done", seconds=10)
+    finally:
+        srv.speech_stretches = original
+    # The Silero job asked for Silero, the other for FireRedVAD, which ran
+    # over the audio the first one kept: its own findings, not the cached ones.
+    assert models and models[0] is None and models[-1] is srv._firered, models
+    assert firered.cached and firered.speech == [(1.0, 2.0)], firered.speech
+    assert firered.findings()["step"] == "speech-firered"
+    kept = sorted(os.listdir(os.path.join(cache, os.listdir(cache)[0])))
+    assert kept == ["audio.json", "audio.s16", "speech-firered.json", "speech.json"], kept
+    srv.clear_dev_cache()
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

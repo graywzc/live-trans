@@ -15,12 +15,15 @@ final class DevPipeline {
     enum Step: String, CaseIterable, Identifiable {
         /// Silero finding where the speech is.
         case speech
+        /// The same, with FireRedVAD in Silero's place.
+        case speechFireRed = "speech-firered"
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .speech: "1 · Speech (Silero)"
+            case .speechFireRed: "1 · Speech (FireRedVAD)"
             }
         }
     }
@@ -60,9 +63,16 @@ final class DevPipeline {
     private var cursorArmed = false
     let player = ClipPlayer()
 
-    var step: Step {
-        get { Step(rawValue: UserDefaults.standard.string(forKey: AppSettings.pipelineStep) ?? "") ?? .speech }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: AppSettings.pipelineStep) }
+    /// The step run, kept across launches. Choosing another while a job
+    /// runs stops that job, and the chosen step starts over the same video,
+    /// from the audio the host kept of it.
+    var step = Step(rawValue: UserDefaults.standard.string(forKey: AppSettings.pipelineStep) ?? "") ?? .speech {
+        didSet {
+            guard step != oldValue else { return }
+            UserDefaults.standard.set(step.rawValue, forKey: AppSettings.pipelineStep)
+            lastProbe = .distantPast
+            Task { await tick() }
+        }
     }
 
     var isActive: Bool { job != nil }
@@ -211,6 +221,14 @@ final class DevPipeline {
                 return
             }
             await startJob(for: probe, client: client)
+            return
+        }
+        if current.step != step {
+            // Another step was chosen: this job goes, and the next tick
+            // starts the chosen one.
+            await stopJob()
+            speech = []
+            selection = nil
             return
         }
         if current.paused != isPaused {

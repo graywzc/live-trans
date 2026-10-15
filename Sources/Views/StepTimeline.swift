@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// The video's audio as a step of the pipeline saw it: a ruler, the audio
-/// fetched as a grey band, the stretches of speech Silero found as green
-/// bars, the stretch picked out, and where the video is. Scrolls sideways;
+/// fetched as a grey band, the stretches of speech the step found (Silero's
+/// or FireRedVAD's, by the picker) as green bars, the stretch picked out, and where the video is. Scrolls sideways;
 /// pinch, or the slider, to zoom. Click a bar to pick it out, or the gap
 /// between two, or drag across the band for any stretch; the stretch can
 /// then be heard from the fetched audio, or played in the Chrome video. A
@@ -25,6 +25,13 @@ struct StepTimeline: View {
         let onJob = dev.isOnJob(playhead)
         VStack(spacing: 6) {
             HStack(spacing: 10) {
+                Picker("Step", selection: $dev.step) {
+                    ForEach(DevPipeline.Step.allCases) { Text($0.title).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+                .help("The step to run; another one runs over the same video, from the audio the host kept")
                 Button(action: dev.hearSelection) {
                     Image(systemName: dev.player.isPlaying ? "stop.fill" : "play.fill")
                 }

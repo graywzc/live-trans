@@ -159,6 +159,19 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertEqual(placed, [3.5, 5.0], "a drag does not move the pointer")
     }
 
+    func testTheStepsAreTheHostsAndTheChoiceIsKept() {
+        // The names the host's DEV_STEPS knows them by.
+        XCTAssertEqual(DevPipeline.Step.allCases.map(\.rawValue), ["speech", "speech-firered"])
+        let kept = UserDefaults.standard.string(forKey: AppSettings.pipelineStep)
+        defer { UserDefaults.standard.set(kept, forKey: AppSettings.pipelineStep) }
+        let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())
+        dev.step = .speechFireRed
+        XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.pipelineStep), "speech-firered")
+        XCTAssertEqual(DevPipeline(engine: CaptionEngine(), video: ChromeVideo()).step, .speechFireRed)
+        dev.step = .speech
+        XCTAssertEqual(DevPipeline(engine: CaptionEngine(), video: ChromeVideo()).step, .speech)
+    }
+
     func testSpacePlaysFromThePointerOnceItHasBeenPut() {
         let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())
         XCTAssertFalse(dev.playFromCursor(), "nothing to play from")
