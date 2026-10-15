@@ -9,7 +9,8 @@ import SwiftUI
 /// between two, or drag across the band for any stretch; the stretch can
 /// then be heard from the fetched audio, or played in the Chrome video. A
 /// click also puts the pointer there (on the ruler, only that), and Space
-/// then plays the video from it.
+/// then plays the video from it. The pointer is the one line on the
+/// timeline: where it was put, until Space, and then where the video is.
 struct StepTimeline: View {
     @Environment(DevPipeline.self) private var dev
     @Environment(Prefetcher.self) private var prefetch
@@ -48,24 +49,19 @@ struct StepTimeline: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
-                // Where the pointer and the video are, to the hundredth;
-                // the video's ticks on while it plays.
-                if let cursor = dev.cursor {
-                    Text("▼ \(Self.readout(cursor))")
-                        .help("Where the pointer is")
-                }
-                if onJob {
-                    TimelineView(.animation(minimumInterval: 1.0 / 20, paused: playhead?.playing != true)) { _ in
-                        if let position = prefetch.position {
-                            HStack(spacing: 3) {
-                                Text("●").foregroundStyle(Color.orange)
-                                Text(Self.readout(position))
-                            }
-                            .help("Where the video is")
-                        }
+                // Where the pointer is, to the hundredth; it ticks on with
+                // the video while the pointer goes with it.
+                TimelineView(.animation(minimumInterval: 1.0 / 20, paused: playhead?.playing != true)) { context in
+                    let line = Self.pointer(
+                        placed: dev.cursorArmed, cursor: dev.cursor, video: onJob ? prefetch.position : nil,
+                        playedFrom: dev.playedFrom, now: context.date
+                    )
+                    if let at = line.playhead ?? line.cursor {
+                        Text("▼ \(Self.readout(at))")
+                            .help("Where the pointer is: where you clicked until Space plays from there, then where the video is")
                     }
-                    .fixedSize()
                 }
+                .fixedSize()
                 Button(action: dev.forgetCache) {
                     Image(systemName: "trash.slash")
                 }
@@ -79,11 +75,15 @@ struct StepTimeline: View {
             // Redrawn many times a second while the video plays, so the
             // orange line moves rather than steps.
             let playing = onJob && playhead?.playing == true
-            TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !playing)) { _ in
+            TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !playing)) { context in
+                let line = Self.pointer(
+                    placed: dev.cursorArmed, cursor: dev.cursor, video: onJob ? prefetch.position : nil,
+                    playedFrom: dev.playedFrom, now: context.date
+                )
                 TimelineCanvas(
                     total: max(dev.job?.duration ?? playhead?.duration ?? 0, dev.job?.fetched ?? 0, 60),
                     fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech, events: dev.events,
-                    playhead: onJob ? prefetch.position : nil, selection: dev.selection, cursor: dev.cursor, scale: scale,
+                    playhead: line.playhead, selection: dev.selection, cursor: line.cursor, scale: scale,
                     onSelect: { dev.selection = $0 },
                     onPlace: { dev.place(cursor: $0) },
                     onZoom: { zoom = min(max(zoom + log($0), log(Self.minimumScale)), log(Self.maximumScale)) }
@@ -91,6 +91,28 @@ struct StepTimeline: View {
             }
         }
     }
+
+    /// Where the one line on the timeline is, and whether it goes with the
+    /// video (`playhead`, drawn moving) or stays where it was put
+    /// (`cursor`): put somewhere and not yet played from, it stays; just
+    /// played from, it stays there until the video says it has got there,
+    /// for up to `seekWait`; else it is where the video is, when the video
+    /// is the job's; else where it was last put.
+    static func pointer(
+        placed: Bool, cursor: Double?, video: Double?,
+        playedFrom: (seconds: Double, at: Date)? = nil, now: Date = Date()
+    ) -> (playhead: Double?, cursor: Double?) {
+        if placed, let cursor { return (nil, cursor) }
+        if let playedFrom, now.timeIntervalSince(playedFrom.at) < seekWait,
+           video.map({ abs($0 - playedFrom.seconds) > 0.5 }) ?? true {
+            return (nil, playedFrom.seconds)
+        }
+        if let video { return (video, nil) }
+        return (nil, cursor)
+    }
+
+    /// How long the pointer waits for the video to get where Space sent it.
+    static let seekWait: TimeInterval = 2
 
     /// A moment to the hundredth of a second: "2:37.42", "1:02:37.42".
     static func readout(_ seconds: Double) -> String {
@@ -336,7 +358,7 @@ struct TimelineCanvas: NSViewRepresentable {
         func invalidatePlayhead(at seconds: Double?) {
             guard let seconds else { return }
             let x = TimelineGeometry.x(for: seconds, scale: scale)
-            setNeedsDisplay(NSRect(x: x - 2, y: 0, width: 4, height: bounds.height))
+            setNeedsDisplay(NSRect(x: x - 5, y: 0, width: 10, height: bounds.height))
         }
 
         private func rect(_ range: ClosedRange<Double>, in area: NSRect) -> NSRect {
@@ -385,21 +407,20 @@ struct TimelineCanvas: NSViewRepresentable {
                 path.stroke()
             }
             drawRuler(in: dirtyRect)
-            if let cursor {
-                let x = TimelineGeometry.x(for: cursor, scale: scale)
+            // The pointer, put there or going with the video: one look.
+            if let at = playhead ?? cursor {
+                let x = TimelineGeometry.x(for: at, scale: scale)
                 NSColor.white.setFill()
-                NSRect(x: x - 0.5, y: 0, width: 1, height: bounds.height).intersection(dirtyRect).fill()
+                // On whole pixels, so the line is sharp rather than two grey halves.
+                let pixels = window?.backingScaleFactor ?? 2
+                let left = ((x - 0.5) * pixels).rounded() / pixels
+                NSRect(x: left, y: 0, width: 1, height: bounds.height).intersection(dirtyRect).fill()
                 let mark = NSBezierPath()
                 mark.move(to: NSPoint(x: x - 4, y: 0))
                 mark.line(to: NSPoint(x: x + 4, y: 0))
                 mark.line(to: NSPoint(x: x, y: 6))
                 mark.close()
                 mark.fill()
-            }
-            if let playhead {
-                let x = TimelineGeometry.x(for: playhead, scale: scale)
-                NSColor.systemOrange.setFill()
-                NSRect(x: x - 1, y: 0, width: 2, height: bounds.height).intersection(dirtyRect).fill()
             }
         }
 

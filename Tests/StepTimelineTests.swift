@@ -237,10 +237,28 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertFalse(isLit(CGRect(x: 82, y: bandY - 5, width: 14, height: 10), hue: .blue))
     }
 
+    func testThePointerStaysWhereItWasPutThenGoesWithTheVideo() {
+        let now = Date()
+        // Put somewhere: it stays there, wherever the video is.
+        XCTAssertTrue(StepTimeline.pointer(placed: true, cursor: 30, video: 8) == (nil, 30))
+        // Played from there: it waits for the video to get there...
+        let played = (seconds: 30.0, at: now)
+        XCTAssertTrue(StepTimeline.pointer(placed: false, cursor: 30, video: 8, playedFrom: played, now: now.addingTimeInterval(0.3)) == (nil, 30))
+        // ...then goes with it.
+        XCTAssertTrue(StepTimeline.pointer(placed: false, cursor: 30, video: 30.2, playedFrom: played, now: now.addingTimeInterval(0.6)) == (30.2, nil))
+        // Not for ever, should the seek not take.
+        XCTAssertTrue(StepTimeline.pointer(placed: false, cursor: 30, video: 8, playedFrom: played, now: now.addingTimeInterval(3)) == (8, nil))
+        // Another video in front: where it was last put.
+        XCTAssertTrue(StepTimeline.pointer(placed: false, cursor: 30, video: nil) == (nil, 30))
+        XCTAssertTrue(StepTimeline.pointer(placed: false, cursor: nil, video: nil) == (nil, nil))
+    }
+
     func testThePlayheadIsDrawnWhereTheVideoIs() {
         show()
-        XCTAssertTrue(isLit(CGRect(x: 48, y: 4, width: 4, height: 10), hue: .orange), "a line at 2.5 s, over the ruler too")
-        XCTAssertFalse(isLit(CGRect(x: 60, y: 4, width: 4, height: 8), hue: .orange))
+        XCTAssertTrue(isLit(CGRect(x: 46, y: 0, width: 8, height: 6), hue: .white), "the pointer's mark at 2.5 s")
+        XCTAssertTrue(isLit(CGRect(x: 49, y: 30, width: 2, height: 10), hue: .white), "and its line down the band")
+        XCTAssertFalse(isLit(CGRect(x: 40, y: 0, width: 80, height: 120), hue: .orange), "no second, orange line")
+        XCTAssertFalse(isLit(CGRect(x: 60, y: 0, width: 8, height: 6), hue: .white))
     }
 
     private enum Hue {
@@ -248,6 +266,7 @@ final class StepTimelineTests: XCTestCase {
         case green
         case purple
         case blue
+        case white
     }
 
     /// Whether anything of `hue` is drawn in `rect`, from the window's top left.
@@ -267,6 +286,8 @@ final class StepTimelineTests: XCTestCase {
                 case .purple where color.blueComponent > 0.6 && color.redComponent > 0.4 && color.greenComponent < 0.5:
                     return true
                 case .blue where color.blueComponent > 0.7 && color.redComponent < 0.3:
+                    return true
+                case .white where color.redComponent > 0.9 && color.greenComponent > 0.9 && color.blueComponent > 0.9:
                     return true
                 default:
                     continue

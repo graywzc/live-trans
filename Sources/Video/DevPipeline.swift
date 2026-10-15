@@ -71,8 +71,14 @@ final class DevPipeline {
     /// from there.
     private(set) var cursor: Double?
     /// The pointer has been put somewhere since Space was last pressed, so
-    /// the next press plays from there rather than pausing or resuming.
-    private var cursorArmed = false
+    /// the next press plays from there rather than pausing or resuming;
+    /// until then the pointer stays where it was put, and after it goes
+    /// with the video.
+    private(set) var cursorArmed = false
+    /// Where Space last sent the video, and when: until the video says it
+    /// is there, the pointer stays put rather than going back to where the
+    /// video was.
+    private(set) var playedFrom: (seconds: Double, at: Date)?
     let player = ClipPlayer()
 
     /// The step run, kept across launches. Choosing another while a job
@@ -167,6 +173,7 @@ final class DevPipeline {
         cursorArmed = false
         let moment = VideoMoment(tabID: job.tabID, url: job.page, seconds: cursor)
         if video.send(.seek(moment, exact: true)) {
+            playedFrom = (cursor, Date())
             ActivityLog.tell("Playing the video from \(Self.clock(cursor))")
         } else {
             hear(cursor...min(cursor + 120, job.fetched))
