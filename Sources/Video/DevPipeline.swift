@@ -45,12 +45,24 @@ final class DevPipeline {
         var cached = false
     }
 
+    /// What FireRedVAD's event model hears besides speech, drawn over the
+    /// stretches of speech to tell a song or a score from talk.
+    struct SoundEvents: Equatable {
+        var singing: [ClosedRange<Double>] = []
+        /// Music with neither singing nor speech in it.
+        var music: [ClosedRange<Double>] = []
+
+        var isEmpty: Bool { singing.isEmpty && music.isEmpty }
+    }
+
     static let probeInterval: TimeInterval = 3
     static let pollInterval: TimeInterval = 1
 
     private(set) var job: Job?
     /// Where the speech is, as the step found it.
     private(set) var speech: [ClosedRange<Double>] = []
+    /// What else the step heard, when it is FireRedVAD's.
+    private(set) var events = SoundEvents()
     /// Off at launch, like captioning ahead.
     private(set) var isPaused = true
     /// The stretch of the video picked out on the timeline.
@@ -191,9 +203,10 @@ final class DevPipeline {
 
     /// A job and its findings put in place without a host, for tests and
     /// previews.
-    func show(job: Job, speech: [ClosedRange<Double>]) {
+    func show(job: Job, speech: [ClosedRange<Double>], events: SoundEvents = SoundEvents()) {
         self.job = job
         self.speech = speech
+        self.events = events
     }
 
     /// Plays the selected stretch in the Chrome video, which pauses at its
@@ -228,6 +241,7 @@ final class DevPipeline {
             // starts the chosen one.
             await stopJob()
             speech = []
+            events = SoundEvents()
             selection = nil
             return
         }
@@ -255,6 +269,7 @@ final class DevPipeline {
                 let findings = try await client.stepFindings(job: current.id)
                 guard job?.id == current.id else { return }
                 speech = findings.stretches
+                events = findings.soundEvents
                 updated.analysed = findings.analysed
             }
             job = updated
@@ -279,6 +294,7 @@ final class DevPipeline {
             )
             job = Job(id: id, tabID: probe.tabID, page: probe.page, step: step, duration: probe.duration)
             speech = []
+            events = SoundEvents()
             selection = nil
             cursor = nil
             cursorArmed = false

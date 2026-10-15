@@ -50,6 +50,8 @@ def test_the_firered_files_are_the_authors_own():
     assert digest.startswith("a226e68e69554875"), digest
     digest = hashlib.sha256(open(os.path.join(HERE, "fireredvad_cmvn.ark"), "rb").read()).hexdigest()
     assert digest.startswith("c87f6f13edf0f0ec"), digest
+    digest = hashlib.sha256(open(os.path.join(HERE, "fireredvad_aed.onnx"), "rb").read()).hexdigest()
+    assert digest.startswith("4ec27ccd86b16c38"), digest
 
 
 def test_the_feature_normalisation_has_a_mean_and_spread_per_bin():
@@ -93,6 +95,22 @@ def test_the_finder_scores_with_firered_for_one_call_then_silero_again():
     assert fw_vad.get_vad_model() is srv._silero
     assert srv.speech_stretches(np.zeros(srv.SAMPLE_RATE * 2, dtype=np.float32), model=srv._firered) == []
     assert fw_vad.get_vad_model() is srv._silero
+
+
+def test_event_runs_close_short_gaps_and_drop_short_runs():
+    on = np.zeros(300, dtype=bool)
+    on[10:60] = True    # 0.10-0.615 s
+    on[80:120] = True   # 0.2 s after: bridged, to 1.215 s
+    on[200:210] = True  # 0.115 s long: dropped
+    assert srv.event_runs(on) == [(0.1, 1.215)]
+    assert srv.event_runs(np.zeros(5, dtype=bool)) == []
+    assert srv.event_runs(np.ones(100, dtype=bool)) == [(0.0, 1.015)]
+
+
+def test_the_event_model_hears_nothing_in_silence():
+    assert srv._firered_events.frames(np.zeros(srv.SAMPLE_RATE * 2, dtype=np.float32)).shape[1] == 3
+    assert srv.sound_events(np.zeros(srv.SAMPLE_RATE * 2, dtype=np.float32)) == {"singing": [], "music": []}
+    assert srv.sound_events(np.zeros(100, dtype=np.float32)) == {"singing": [], "music": []}
 
 
 def test_firered_scores_a_minute_in_well_under_a_second():

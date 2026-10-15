@@ -87,6 +87,7 @@ curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/asr_se
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/silero_vad.onnx
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_vad.onnx
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_cmvn.ark
+curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_aed.onnx
 python3 -m venv ~/venvs/livetrans
 ~/venvs/livetrans/bin/pip install faster-whisper ctranslate2 numpy
 ollama pull qwen3.5:9b
@@ -98,10 +99,12 @@ faster-whisper bundles: that one is a re-export of the v6.0 weights, whose
 memory goes dull after half a minute of music or silence and then misses the
 first seconds of speech. `LIVETRANS_SILERO_MODEL` points at another file.
 
-`fireredvad_vad.onnx` and `fireredvad_cmvn.ark` are FireRedVAD's
-non-streaming model and its feature normalisation, the authors' own files
-(Apache-2.0, see `server/fireredvad.LICENSE`). Only the dev step
-"Speech (FireRedVAD)" uses them, to compare with Silero; without them that
+`fireredvad_vad.onnx`, `fireredvad_aed.onnx` and `fireredvad_cmvn.ark` are
+FireRedVAD's non-streaming speech model, its speech/singing/music event
+model and their feature normalisation, the authors' own files (Apache-2.0,
+see `server/fireredvad.LICENSE`). Only the dev step "Speech (FireRedVAD)"
+uses them, to compare with Silero, drawing what the event model hears as
+singing or as music alone over the stretches of speech; without them that
 step fails and nothing else changes. `LIVETRANS_FIRERED_MODEL` points at
 another model file, with `fireredvad_cmvn.ark` beside it.
 

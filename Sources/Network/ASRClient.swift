@@ -42,9 +42,18 @@ struct StepFindings: Decodable, Equatable {
     var analysed: Double
     /// Where the speech is, as [start, end] pairs in seconds of the video.
     var speech: [[Double]]
+    /// FireRedVAD's step only: where it hears singing, and music with
+    /// neither singing nor speech, by kind ("singing", "music"), as pairs.
+    var events: [String: [[Double]]]?
 
-    var stretches: [ClosedRange<Double>] {
-        speech.compactMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
+    var stretches: [ClosedRange<Double>] { Self.ranges(speech) }
+
+    var soundEvents: DevPipeline.SoundEvents {
+        DevPipeline.SoundEvents(singing: Self.ranges(events?["singing"] ?? []), music: Self.ranges(events?["music"] ?? []))
+    }
+
+    private static func ranges(_ pairs: [[Double]]) -> [ClosedRange<Double>] {
+        pairs.compactMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
     }
 }
 

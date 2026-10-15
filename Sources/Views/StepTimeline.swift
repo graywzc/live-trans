@@ -3,7 +3,8 @@ import SwiftUI
 
 /// The video's audio as a step of the pipeline saw it: a ruler, the audio
 /// fetched as a grey band, the stretches of speech the step found (Silero's
-/// or FireRedVAD's, by the picker) as green bars, the stretch picked out, and where the video is. Scrolls sideways;
+/// or FireRedVAD's, by the picker) as green bars, with what FireRedVAD hears
+/// as singing purple and as music alone blue over them, the stretch picked out, and where the video is. Scrolls sideways;
 /// pinch, or the slider, to zoom. Click a bar to pick it out, or the gap
 /// between two, or drag across the band for any stretch; the stretch can
 /// then be heard from the fetched audio, or played in the Chrome video. A
@@ -42,7 +43,7 @@ struct StepTimeline: View {
                 }
                 .disabled(dev.selection == nil || !onJob)
                 .help("Play the stretch in the Chrome video, which pauses at its end")
-                Text(Self.summary(selection: dev.selection, speech: dev.speech, job: dev.job))
+                Text(Self.summary(selection: dev.selection, speech: dev.speech, job: dev.job, events: dev.events))
                     .foregroundStyle(dev.selection == nil ? Color.gray : Color.white)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -81,7 +82,7 @@ struct StepTimeline: View {
             TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !playing)) { _ in
                 TimelineCanvas(
                     total: max(dev.job?.duration ?? playhead?.duration ?? 0, dev.job?.fetched ?? 0, 60),
-                    fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech,
+                    fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech, events: dev.events,
                     playhead: onJob ? prefetch.position : nil, selection: dev.selection, cursor: dev.cursor, scale: scale,
                     onSelect: { dev.selection = $0 },
                     onPlace: { dev.place(cursor: $0) },
@@ -103,12 +104,16 @@ struct StepTimeline: View {
 
     /// What the control row says: of the stretch picked out, else of the
     /// step so far, else how to begin.
-    static func summary(selection: ClosedRange<Double>?, speech: [ClosedRange<Double>], job: DevPipeline.Job?) -> String {
+    static func summary(
+        selection: ClosedRange<Double>?, speech: [ClosedRange<Double>], job: DevPipeline.Job?,
+        events: DevPipeline.SoundEvents = DevPipeline.SoundEvents()
+    ) -> String {
         guard let job else { return "Press Run step under the captions to fetch the Chrome video" }
         guard let selection else {
             let count = speech.count == 1 ? "1 stretch" : "\(speech.count) stretches"
             let state = job.state == "running" && !job.paused ? "so far" : job.state == "done" ? "in all" : job.state
-            return "\(count) of speech in \(DevPipeline.clock(job.analysed)) \(state) · click a bar, or drag across the band"
+            let key = events.isEmpty ? "" : " · purple: singing, blue: music"
+            return "\(count) of speech in \(DevPipeline.clock(job.analysed)) \(state)\(key) · click a bar, or drag across the band"
         }
         let length = String(format: "%.1f s", selection.upperBound - selection.lowerBound)
         var text = "\(DevPipeline.clock(selection.lowerBound))–\(DevPipeline.clock(selection.upperBound)) · \(length)"
@@ -121,6 +126,10 @@ struct StepTimeline: View {
             text += " · across speech and pauses"
         } else {
             text += " · no speech"
+        }
+        for (name, kind) in [("singing", events.singing), ("music", events.music)] {
+            let share = TimelineGeometry.share(of: selection, in: kind)
+            if share >= 0.05 { text += " · \(Int((share * 100).rounded()))% \(name)" }
         }
         return text
     }
@@ -165,6 +174,24 @@ enum TimelineGeometry {
 
     /// The pauses either side of `stretch`: to the stretch before it and to
     /// the one after, in seconds, nil where there is none.
+    /// How much of `stretch` the `ranges` cover, from 0 to 1.
+    static func share(of stretch: ClosedRange<Double>, in ranges: [ClosedRange<Double>]) -> Double {
+        let length = stretch.upperBound - stretch.lowerBound
+        guard length > 0 else { return 0 }
+        let covered = ranges.reduce(0.0) { $0 + max(min($1.upperBound, stretch.upperBound) - max($1.lowerBound, stretch.lowerBound), 0) }
+        return min(covered / length, 1)
+    }
+
+    /// Where the `ranges` and the stretches of `speech` overlap.
+    static func overlaps(of ranges: [ClosedRange<Double>], with speech: [ClosedRange<Double>]) -> [ClosedRange<Double>] {
+        ranges.flatMap { range in
+            speech.compactMap { stretch -> ClosedRange<Double>? in
+                let from = max(range.lowerBound, stretch.lowerBound), to = min(range.upperBound, stretch.upperBound)
+                return from < to ? from...to : nil
+            }
+        }
+    }
+
     static func pauses(around stretch: ClosedRange<Double>, in speech: [ClosedRange<Double>]) -> (before: Double?, after: Double?) {
         let before = speech.filter { $0.upperBound <= stretch.lowerBound + 1e-6 && $0 != stretch }.map(\.upperBound).max()
         let after = speech.filter { $0.lowerBound >= stretch.upperBound - 1e-6 && $0 != stretch }.map(\.lowerBound).min()
@@ -186,6 +213,7 @@ struct TimelineCanvas: NSViewRepresentable {
     var fetched: Double
     var analysed: Double
     var speech: [ClosedRange<Double>]
+    var events = DevPipeline.SoundEvents()
     var playhead: Double?
     var selection: ClosedRange<Double>?
     var cursor: Double?
@@ -218,12 +246,13 @@ struct TimelineCanvas: NSViewRepresentable {
         let visible = scroll.contentView.bounds
         let middle = TimelineGeometry.seconds(at: visible.midX, scale: context.coordinator.scale)
         var redrawAll = canvas.total != total || canvas.fetched != fetched || canvas.analysed != analysed
-            || canvas.speech != speech || canvas.selection != selection || canvas.cursor != cursor || canvas.scale != scale
+            || canvas.speech != speech || canvas.events != events || canvas.selection != selection || canvas.cursor != cursor || canvas.scale != scale
         let wasAt = canvas.playhead
         canvas.total = total
         canvas.fetched = fetched
         canvas.analysed = analysed
         canvas.speech = speech
+        canvas.events = events
         canvas.playhead = playhead
         canvas.selection = selection
         canvas.cursor = cursor
@@ -272,7 +301,15 @@ struct TimelineCanvas: NSViewRepresentable {
         var total = 60.0
         var fetched = 0.0
         var analysed = 0.0
-        var speech: [ClosedRange<Double>] = []
+        var speech: [ClosedRange<Double>] = [] {
+            didSet { heard = nil }
+        }
+        var events = DevPipeline.SoundEvents() {
+            didSet { heard = nil }
+        }
+        /// The parts of the stretches of speech heard as singing and as
+        /// music, worked out once for each change of either.
+        private var heard: (singing: [ClosedRange<Double>], music: [ClosedRange<Double>])?
         var playhead: Double?
         var selection: ClosedRange<Double>?
         var cursor: Double?
@@ -324,6 +361,19 @@ struct TimelineCanvas: NSViewRepresentable {
             NSColor.systemGreen.withAlphaComponent(0.75).setFill()
             for stretch in speech where stretch.overlaps(shown) {
                 rect(stretch, in: band.insetBy(dx: 0, dy: 2)).fill()
+            }
+            if !events.isEmpty {
+                let heard = heard ?? (
+                    TimelineGeometry.overlaps(of: events.singing, with: speech),
+                    TimelineGeometry.overlaps(of: events.music, with: speech)
+                )
+                self.heard = heard
+                for (color, parts) in [(NSColor.systemPurple, heard.singing), (NSColor.systemBlue, heard.music)] {
+                    color.withAlphaComponent(0.9).setFill()
+                    for part in parts where part.overlaps(shown) {
+                        rect(part, in: band.insetBy(dx: 0, dy: 2)).fill()
+                    }
+                }
             }
             if let picked = dragging ?? selection {
                 let area = rect(picked, in: band)

@@ -409,7 +409,8 @@ class FireRedVad:
     """FireRedVAD standing in for Silero in faster_whisper's speech-timestamp
     code: called with the padded audio, gives one speech probability per
     512-sample window, read off the model's 10 ms frames at the middle of
-    each window."""
+    each window. `frames` gives the model's own output, a row per 10 ms
+    frame (for the event model: speech, singing, music)."""
 
     def __init__(self, path, cmvn):
         self.path = path
@@ -417,7 +418,7 @@ class FireRedVad:
         self.session = None
         self.lock = threading.Lock()
 
-    def __call__(self, audio, **kwargs):
+    def frames(self, audio):
         import onnxruntime
 
         if self.session is None:
@@ -425,19 +426,60 @@ class FireRedVad:
                 if self.session is None:
                     self.mean, self.istd = read_kaldi_cmvn(self.cmvn)
                     self.session = onnxruntime.InferenceSession(self.path, providers=["CPUExecutionProvider"])
-        windows = audio.shape[0] // 512
         feats = ((kaldi_fbank(audio * 32768.0) - self.mean) * self.istd).astype(np.float32)
         if not len(feats):
-            return np.zeros(windows, dtype=np.float32)
-        frames = np.concatenate([
-            self.session.run(None, {"feat": feats[None, k:k + FIRERED_CHUNK]})[0][0, :, 0]
+            return np.zeros((0, 1), dtype=np.float32)
+        return np.concatenate([
+            self.session.run(None, {"feat": feats[None, k:k + FIRERED_CHUNK]})[0][0]
             for k in range(0, len(feats), FIRERED_CHUNK)
         ])
+
+    def __call__(self, audio, **kwargs):
+        windows = audio.shape[0] // 512
+        frames = self.frames(audio)[:, 0]
+        if not len(frames):
+            return np.zeros(windows, dtype=np.float32)
         centres = (np.arange(len(frames)) * 160 + 200) / SAMPLE_RATE
         return np.interp(np.arange(windows) * 512 / SAMPLE_RATE + 0.016, centres, frames).astype(np.float32)
 
 
+# FireRedVAD's event model, beside it: per 10 ms, how likely speech,
+# singing and music are, each on its own. Shown on the dev timeline over
+# what the speech model found, to tell a song or a score from talk.
+FIRERED_EVENTS_MODEL = os.path.join(os.path.dirname(FIRERED_MODEL), "fireredvad_aed.onnx")
+# Shorter runs of an event are not told, and shorter gaps in one are
+# bridged.
+EVENT_MIN = 0.3
+
+
+def event_runs(on, min_length=EVENT_MIN, bridge=EVENT_MIN):
+    """Where `on`, one flag per 10 ms frame, holds, as [(start, end), ...]
+    in seconds: gaps shorter than `bridge` closed, runs shorter than
+    `min_length` dropped. A frame spans 25 ms from its start."""
+    edges = np.flatnonzero(np.diff(np.r_[0, np.asarray(on, dtype=np.int8), 0]))
+    runs = []
+    for a, b in zip(edges[::2], edges[1::2]):
+        start, end = a * 0.01, (b - 1) * 0.01 + 0.025
+        if runs and start - runs[-1][1] < bridge:
+            runs[-1] = (runs[-1][0], end)
+        else:
+            runs.append((start, end))
+    return [(round(a, 3), round(b, 3)) for a, b in runs if b - a >= min_length]
+
+
+def sound_events(audio):
+    """Where FireRedVAD's event model hears singing, and music with neither
+    singing nor speech, in `audio`: {"singing": [(start, end), ...],
+    "music": [...]}, in seconds."""
+    probs = _firered_events.frames(audio)
+    if probs.shape[1] < 3:
+        return {"singing": [], "music": []}
+    speech, singing, music = probs[:, 0] > 0.5, probs[:, 1] > 0.5, probs[:, 2] > 0.5
+    return {"singing": event_runs(singing), "music": event_runs(music & ~singing & ~speech)}
+
+
 _firered = FireRedVad(FIRERED_MODEL, FIRERED_CMVN)
+_firered_events = FireRedVad(FIRERED_EVENTS_MODEL, FIRERED_CMVN)
 # The model faster_whisper's code scores with on this thread, when not
 # Silero: set for the length of one call.
 _speech_model_here = threading.local()
@@ -982,7 +1024,7 @@ DEV_AUDIO_LIMIT = 120.0
 DEV_CACHE_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEV_CACHE", "~/livetrans/devcache"))
 # Bumped with a step's code, so findings cached by the old code are not
 # taken for the new one's.
-STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-whole-1"}
+STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-whole-2"}
 
 
 class DevCache:
@@ -1531,6 +1573,9 @@ class PrefetchJob:
         # the video, and up to where in it Silero (or FireRedVAD) has looked.
         self.speech = []
         self.analysed = self.offset
+        # The FireRedVAD step's sound events, by kind ("singing", "music"):
+        # where they are, in seconds of the video.
+        self.events = {}
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
         self.cache = DevCache(page, url) if step and self.offset == 0 else None
@@ -1692,6 +1737,7 @@ class PrefetchJob:
             if done and self.cached and looked < 0 and (kept := self.cache.load_findings(self.step)):
                 # Found over this very audio by this very step before.
                 self.speech = [tuple(s) for s in kept.get("speech", [])]
+                self.events = {k: [tuple(s) for s in v] for k, v in kept.get("events", {}).items()}
                 self.analysed = float(kept.get("analysed", self.offset))
                 self.state = "done"
                 print(f"prefetch {self.id}: {self.step} step from the cache, {len(self.speech)} stretches", flush=True)
@@ -1723,12 +1769,18 @@ class PrefetchJob:
                     found = []
                 elif self.step == "speech-firered":
                     found = speech_stretches(audio, model=_firered)
+                    events = sound_events(audio)
                 else:
                     found = speech_stretches(audio)
             except Exception as exc:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return
             self.speech = [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in found]
+            if self.step == "speech-firered" and audio.size:
+                self.events = {
+                    kind: [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in runs]
+                    for kind, runs in events.items()
+                }
             self.analysed = self.offset + audio.size / SAMPLE_RATE
             looked = have
             # Looking again takes longer the more there is; let the fetch
@@ -1816,9 +1868,12 @@ class PrefetchJob:
         }
 
     def findings(self):
-        """What the step has found so far: the stretches of speech, and up
-        to where it has looked."""
-        return {"step": self.step, "analysed": round(self.analysed, 2), "speech": [list(s) for s in self.speech]}
+        """What the step has found so far: the stretches of speech, up to
+        where it has looked, and for FireRedVAD the sound events it heard."""
+        found = {"step": self.step, "analysed": round(self.analysed, 2), "speech": [list(s) for s in self.speech]}
+        if self.events:
+            found["events"] = {kind: [list(s) for s in runs] for kind, runs in self.events.items()}
+        return found
 
 
 def start_prefetch(url, page, headers, duration, start=0.0, step=None):

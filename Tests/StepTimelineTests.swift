@@ -116,9 +116,11 @@ final class StepTimelineTests: XCTestCase {
 
     /// The canvas fills the window at 20 points per second, so a second
     /// is 20 points from the left edge.
-    private func show(scale: Double = 20, selection: ClosedRange<Double>? = nil) {
+    private func show(
+        scale: Double = 20, selection: ClosedRange<Double>? = nil, events: DevPipeline.SoundEvents = DevPipeline.SoundEvents()
+    ) {
         let canvas = TimelineCanvas(
-            total: 20, fetched: 10, analysed: 10, speech: Self.speech, playhead: 2.5, selection: selection,
+            total: 20, fetched: 10, analysed: 10, speech: Self.speech, events: events, playhead: 2.5, selection: selection,
             scale: scale, onSelect: { [unowned self] in picked.append($0) },
             onPlace: { [unowned self] in placed.append($0) }, onZoom: { _ in }
         )
@@ -157,6 +159,28 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertEqual(picked.count, 1, "a click on the ruler picks nothing out")
         drag(from: CGPoint(x: 40, y: bandY), to: CGPoint(x: 120, y: bandY))
         XCTAssertEqual(placed, [3.5, 5.0], "a drag does not move the pointer")
+    }
+
+    func testWhatIsHeardBesidesSpeechIsToldAndMeasured() {
+        let events = DevPipeline.SoundEvents(singing: [2.0...3.6], music: [5.0...5.5])
+        XCTAssertEqual(TimelineGeometry.overlaps(of: events.singing, with: Self.speech), [2.0...3.0])
+        XCTAssertEqual(TimelineGeometry.share(of: 1.0...3.0, in: events.singing), 0.5)
+        XCTAssertEqual(TimelineGeometry.share(of: 6.0...7.0, in: events.singing), 0)
+        var job = DevPipeline.Job(id: "a", tabID: 1, page: "p", step: .speechFireRed, duration: 60)
+        job.analysed = 10
+        job.state = "done"
+        XCTAssertEqual(
+            StepTimeline.summary(selection: nil, speech: Self.speech, job: job, events: events),
+            "3 stretches of speech in 0:10.0 in all · purple: singing, blue: music · click a bar, or drag across the band"
+        )
+        XCTAssertEqual(
+            StepTimeline.summary(selection: 1.0...3.0, speech: Self.speech, job: job, events: events),
+            "0:01.0–0:03.0 · 2.0 s of speech · pause before none, after 1.00 s · 50% singing"
+        )
+        XCTAssertEqual(
+            StepTimeline.summary(selection: 4.0...5.5, speech: Self.speech, job: job, events: events),
+            "0:04.0–0:05.5 · 1.5 s of speech · pause before 1.00 s, after 2.50 s · 33% music"
+        )
     }
 
     func testTheStepsAreTheHostsAndTheChoiceIsKept() {
@@ -201,6 +225,18 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertEqual(picked, [nil])
     }
 
+    func testSingingAndMusicAreDrawnOverTheSpeechOnly() {
+        // Singing over the first bar and past it into the pause; music
+        // over the second bar's end.
+        show(events: DevPipeline.SoundEvents(singing: [2.0...3.6], music: [5.0...5.5]))
+        snapshot("step-timeline-events")
+        XCTAssertTrue(isLit(CGRect(x: 44, y: bandY - 5, width: 12, height: 10), hue: .purple), "singing over the first bar")
+        XCTAssertTrue(isLit(CGRect(x: 22, y: bandY - 5, width: 14, height: 10), hue: .green), "its sung-free start stays green")
+        XCTAssertFalse(isLit(CGRect(x: 63, y: bandY - 5, width: 8, height: 10), hue: .purple), "nothing drawn in the pause")
+        XCTAssertTrue(isLit(CGRect(x: 102, y: bandY - 5, width: 6, height: 10), hue: .blue), "music over the second bar's end")
+        XCTAssertFalse(isLit(CGRect(x: 82, y: bandY - 5, width: 14, height: 10), hue: .blue))
+    }
+
     func testThePlayheadIsDrawnWhereTheVideoIs() {
         show()
         XCTAssertTrue(isLit(CGRect(x: 48, y: 4, width: 4, height: 10), hue: .orange), "a line at 2.5 s, over the ruler too")
@@ -210,6 +246,8 @@ final class StepTimelineTests: XCTestCase {
     private enum Hue {
         case orange
         case green
+        case purple
+        case blue
     }
 
     /// Whether anything of `hue` is drawn in `rect`, from the window's top left.
@@ -225,6 +263,10 @@ final class StepTimelineTests: XCTestCase {
                 case .orange where color.redComponent > 0.5 && color.redComponent > color.greenComponent * 1.3 && color.blueComponent < 0.4:
                     return true
                 case .green where color.greenComponent > 0.4 && color.greenComponent > color.redComponent * 1.5:
+                    return true
+                case .purple where color.blueComponent > 0.6 && color.redComponent > 0.4 && color.greenComponent < 0.5:
+                    return true
+                case .blue where color.blueComponent > 0.7 && color.redComponent < 0.3:
                     return true
                 default:
                     continue
