@@ -26,6 +26,14 @@ final class DevPipeline {
             case .speechFireRed: "1 · Speech (FireRedVAD)"
             }
         }
+
+        /// What finds the speech in the step.
+        var finder: String {
+            switch self {
+            case .speech: "Silero"
+            case .speechFireRed: "FireRedVAD"
+            }
+        }
     }
 
     struct Job: Equatable {

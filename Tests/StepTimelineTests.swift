@@ -120,7 +120,8 @@ final class StepTimelineTests: XCTestCase {
         scale: Double = 20, selection: ClosedRange<Double>? = nil, events: DevPipeline.SoundEvents = DevPipeline.SoundEvents()
     ) {
         let canvas = TimelineCanvas(
-            total: 20, fetched: 10, analysed: 10, speech: Self.speech, events: events, playhead: 2.5, selection: selection,
+            total: 20, fetched: 10, analysed: 10, speech: Self.speech, events: events, finder: "FireRedVAD",
+            playhead: 2.5, selection: selection,
             scale: scale, onSelect: { [unowned self] in picked.append($0) },
             onPlace: { [unowned self] in placed.append($0) }, onZoom: { _ in }
         )
@@ -251,6 +252,45 @@ final class StepTimelineTests: XCTestCase {
         // Another video in front: where it was last put.
         XCTAssertTrue(StepTimeline.pointer(placed: false, cursor: 30, video: nil) == (nil, 30))
         XCTAssertTrue(StepTimeline.pointer(placed: false, cursor: nil, video: nil) == (nil, nil))
+    }
+
+    func testTheBandIsCutIntoWhatEachColourStandsFor() {
+        let events = DevPipeline.SoundEvents(singing: [2.0...3.6], music: [5.0...5.5])
+        let regions = TimelineGeometry.regions(
+            total: 12, fetched: 10, analysed: 9, speech: Self.speech, events: events, finder: "Silero"
+        )
+        XCTAssertEqual(regions.map(\.range), [
+            0...1, 1...2, 2...3, 3...4, 4...5, 5...5.5, 5.5...8, 8...8.4, 8.4...9, 9...10, 10...12,
+        ])
+        XCTAssertEqual(regions.map(\.region), [
+            .noSpeech, .speech(finder: "Silero"), .singing, .noSpeech, .speech(finder: "Silero"), .music,
+            .noSpeech, .speech(finder: "Silero"), .noSpeech, .notLookedAt, .notFetched,
+        ])
+        XCTAssertEqual(TimelineGeometry.Region.singing.label, "Singing over the speech, as FireRedVAD's event model hears it")
+    }
+
+    func testRestingThePointerOnAColourTellsWhatItIs() {
+        show(events: DevPipeline.SoundEvents(singing: [2.0...3.6], music: [5.0...5.5]))
+        let canvas = TestScreen.wait { Self.find(TimelineCanvas.CanvasView.self, in: window.contentView!) }
+        XCTAssertNotNil(canvas)
+        guard let canvas else { return }
+        // Every label covers some of the band, so there is something to rest on.
+        XCTAssertFalse(canvas.labels.isEmpty)
+        XCTAssertTrue(canvas.labels.values.allSatisfy { $0.rect.width > 0 && $0.rect.height > 10 })
+        XCTAssertEqual(canvas.label(at: NSPoint(x: 30, y: bandY)), "Speech, as FireRedVAD found it")
+        XCTAssertEqual(canvas.label(at: NSPoint(x: 50, y: bandY)), "Singing over the speech, as FireRedVAD's event model hears it")
+        XCTAssertEqual(canvas.label(at: NSPoint(x: 105, y: bandY)), "Music with no voice over the speech, as FireRedVAD's event model hears it")
+        XCTAssertEqual(canvas.label(at: NSPoint(x: 70, y: bandY)), "No speech found")
+        XCTAssertEqual(canvas.label(at: NSPoint(x: 300, y: bandY)), "Not fetched yet")
+        XCTAssertNil(canvas.label(at: NSPoint(x: 30, y: 8)), "nothing on the ruler")
+    }
+
+    private static func find<V: NSView>(_ type: V.Type, in view: NSView) -> V? {
+        if let found = view as? V { return found }
+        for child in view.subviews {
+            if let found = find(type, in: child) { return found }
+        }
+        return nil
     }
 
     func testThePlayheadIsDrawnWhereTheVideoIs() {

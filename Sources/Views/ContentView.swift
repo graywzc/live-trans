@@ -251,6 +251,7 @@ struct ContentView: View {
 private struct VideoControls: View {
     @Environment(ChromeVideo.self) private var video
     @Environment(DevPipeline.self) private var dev
+    @Environment(Prefetcher.self) private var prefetch
 
     var body: some View {
         HStack(spacing: 12) {
@@ -277,7 +278,7 @@ private struct VideoControls: View {
         }
         // Space plays from the pointer on the dev timeline once it has been
         // put somewhere, else plays or pauses.
-        .background(SpaceKey { if !dev.playFromCursor() { video.send(.toggle) } })
+        .background(SpaceKey { if !dev.playFromCursor(), video.send(.toggle) { prefetch.toggledByKey() } })
         // Keeps the picker's label on the tab the buttons would control,
         // which changes while LiveTrans is in the background.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in

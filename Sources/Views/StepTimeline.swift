@@ -73,9 +73,9 @@ struct StepTimeline: View {
             .font(.caption.monospacedDigit())
             .buttonStyle(.borderless)
             // Redrawn many times a second while the video plays, so the
-            // orange line moves rather than steps.
+            // pointer glides with the video rather than steps.
             let playing = onJob && playhead?.playing == true
-            TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !playing)) { context in
+            TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !playing)) { context in
                 let line = Self.pointer(
                     placed: dev.cursorArmed, cursor: dev.cursor, video: onJob ? prefetch.position : nil,
                     playedFrom: dev.playedFrom, now: context.date
@@ -83,6 +83,7 @@ struct StepTimeline: View {
                 TimelineCanvas(
                     total: max(dev.job?.duration ?? playhead?.duration ?? 0, dev.job?.fetched ?? 0, 60),
                     fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech, events: dev.events,
+                    finder: dev.job?.step.finder ?? dev.step.finder,
                     playhead: line.playhead, selection: dev.selection, cursor: line.cursor, scale: scale,
                     onSelect: { dev.selection = $0 },
                     onPlace: { dev.place(cursor: $0) },
@@ -196,6 +197,69 @@ enum TimelineGeometry {
 
     /// The pauses either side of `stretch`: to the stretch before it and to
     /// the one after, in seconds, nil where there is none.
+    /// What each colour of the band stands for, told when the pointer
+    /// rests on it.
+    enum Region: Equatable {
+        case speech(finder: String)
+        case singing
+        case music
+        case noSpeech
+        case notLookedAt
+        case notFetched
+
+        var label: String {
+            switch self {
+            case .speech(let finder): "Speech, as \(finder) found it"
+            case .singing: "Singing over the speech, as FireRedVAD's event model hears it"
+            case .music: "Music with no voice over the speech, as FireRedVAD's event model hears it"
+            case .noSpeech: "No speech found"
+            case .notLookedAt: "Fetched, not looked at yet"
+            case .notFetched: "Not fetched yet"
+            }
+        }
+    }
+
+    /// The band from 0 to `total`, cut where what it shows changes, each
+    /// piece with what it stands for; neighbours alike are one piece.
+    static func regions(
+        total: Double, fetched: Double, analysed: Double, speech: [ClosedRange<Double>],
+        events: DevPipeline.SoundEvents, finder: String
+    ) -> [(range: ClosedRange<Double>, region: Region)] {
+        let end = max(total, fetched)
+        guard end > 0 else { return [] }
+        let singing = overlaps(of: events.singing, with: speech), music = overlaps(of: events.music, with: speech)
+        var cuts = Set([0, end, min(fetched, end), min(analysed, end)])
+        for range in speech + singing + music {
+            cuts.insert(min(max(range.lowerBound, 0), end))
+            cuts.insert(min(max(range.upperBound, 0), end))
+        }
+        let points = cuts.sorted()
+        var found: [(range: ClosedRange<Double>, region: Region)] = []
+        for (from, to) in zip(points, points.dropFirst()) where to > from {
+            let middle = (from + to) / 2
+            let region: Region
+            if singing.contains(where: { $0.contains(middle) }) {
+                region = .singing
+            } else if music.contains(where: { $0.contains(middle) }) {
+                region = .music
+            } else if speech.contains(where: { $0.contains(middle) }) {
+                region = .speech(finder: finder)
+            } else if middle < min(analysed, fetched) {
+                region = .noSpeech
+            } else if middle < fetched {
+                region = .notLookedAt
+            } else {
+                region = .notFetched
+            }
+            if let last = found.last, last.region == region, last.range.upperBound == from {
+                found[found.count - 1].range = last.range.lowerBound...to
+            } else {
+                found.append((from...to, region))
+            }
+        }
+        return found
+    }
+
     /// How much of `stretch` the `ranges` cover, from 0 to 1.
     static func share(of stretch: ClosedRange<Double>, in ranges: [ClosedRange<Double>]) -> Double {
         let length = stretch.upperBound - stretch.lowerBound
@@ -236,6 +300,8 @@ struct TimelineCanvas: NSViewRepresentable {
     var analysed: Double
     var speech: [ClosedRange<Double>]
     var events = DevPipeline.SoundEvents()
+    /// What found the speech, for the band's labels.
+    var finder = "the step"
     var playhead: Double?
     var selection: ClosedRange<Double>?
     var cursor: Double?
@@ -268,13 +334,14 @@ struct TimelineCanvas: NSViewRepresentable {
         let visible = scroll.contentView.bounds
         let middle = TimelineGeometry.seconds(at: visible.midX, scale: context.coordinator.scale)
         var redrawAll = canvas.total != total || canvas.fetched != fetched || canvas.analysed != analysed
-            || canvas.speech != speech || canvas.events != events || canvas.selection != selection || canvas.cursor != cursor || canvas.scale != scale
+            || canvas.speech != speech || canvas.events != events || canvas.finder != finder || canvas.selection != selection || canvas.cursor != cursor || canvas.scale != scale
         let wasAt = canvas.playhead
         canvas.total = total
         canvas.fetched = fetched
         canvas.analysed = analysed
         canvas.speech = speech
         canvas.events = events
+        canvas.finder = finder
         canvas.playhead = playhead
         canvas.selection = selection
         canvas.cursor = cursor
@@ -296,6 +363,7 @@ struct TimelineCanvas: NSViewRepresentable {
         }
         if redrawAll {
             canvas.needsDisplay = true
+            canvas.labelRegions()
         } else if wasAt != playhead {
             // Only the line moved: just its old and new places are drawn
             // again, many times a second.
@@ -315,7 +383,7 @@ struct TimelineCanvas: NSViewRepresentable {
         var scale = 0.0
     }
 
-    final class CanvasView: NSView {
+    final class CanvasView: NSView, NSViewToolTipOwner {
         static let rulerHeight: CGFloat = 18
         /// A press that moves less than this is a click.
         static let clickSlop: CGFloat = 3
@@ -332,6 +400,10 @@ struct TimelineCanvas: NSViewRepresentable {
         /// The parts of the stretches of speech heard as singing and as
         /// music, worked out once for each change of either.
         private var heard: (singing: [ClosedRange<Double>], music: [ClosedRange<Double>])?
+        var finder = "the step"
+        /// The band's pieces as labelled for the pointer resting on them,
+        /// by tool tip tag.
+        private(set) var labels: [NSView.ToolTipTag: (rect: NSRect, label: String)] = [:]
         var playhead: Double?
         var selection: ClosedRange<Double>?
         var cursor: Double?
@@ -352,6 +424,38 @@ struct TimelineCanvas: NSViewRepresentable {
         /// The band the audio and speech are drawn in, under the ruler.
         var band: NSRect {
             NSRect(x: 0, y: Self.rulerHeight + 4, width: bounds.width, height: max(bounds.height - Self.rulerHeight - 8, 4))
+        }
+
+        override func setFrameSize(_ newSize: NSSize) {
+            let changed = newSize != frame.size
+            super.setFrameSize(newSize)
+            // The band grows with the view, and its labels with it.
+            if changed { labelRegions() }
+        }
+
+        /// Labels each piece of the band with what its colour stands for,
+        /// told when the pointer rests on it.
+        func labelRegions() {
+            removeAllToolTips()
+            labels = [:]
+            let regions = TimelineGeometry.regions(
+                total: total, fetched: fetched, analysed: analysed, speech: speech, events: events, finder: finder
+            )
+            for (range, region) in regions {
+                let area = rect(range, in: band)
+                guard area.width > 0, area.height > 0 else { continue }
+                labels[addToolTip(area, owner: self, userData: nil)] = (area, region.label)
+            }
+        }
+
+        func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+            labels[tag]?.label ?? ""
+        }
+
+        /// What the band says at `point`, in the view, when the pointer
+        /// rests there.
+        func label(at point: NSPoint) -> String? {
+            labels.values.first { $0.rect.contains(point) }?.label
         }
 
         /// Marks the strip the playhead's line takes at `seconds` for drawing.
@@ -411,10 +515,12 @@ struct TimelineCanvas: NSViewRepresentable {
             if let at = playhead ?? cursor {
                 let x = TimelineGeometry.x(for: at, scale: scale)
                 NSColor.white.setFill()
-                // On whole pixels, so the line is sharp rather than two grey halves.
+                // Put somewhere, on whole pixels, so the line is sharp rather
+                // than two grey halves; going with the video, where it is,
+                // so it glides rather than steps.
                 let pixels = window?.backingScaleFactor ?? 2
-                let left = ((x - 0.5) * pixels).rounded() / pixels
-                NSRect(x: left, y: 0, width: 1, height: bounds.height).intersection(dirtyRect).fill()
+                let left = playhead == nil ? ((x - 1) * pixels).rounded() / pixels : x - 1
+                NSRect(x: left, y: 0, width: 2, height: bounds.height).intersection(dirtyRect).fill()
                 let mark = NSBezierPath()
                 mark.move(to: NSPoint(x: x - 4, y: 0))
                 mark.line(to: NSPoint(x: x + 4, y: 0))

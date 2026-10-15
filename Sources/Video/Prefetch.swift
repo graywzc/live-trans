@@ -164,6 +164,27 @@ final class Prefetcher {
         Task { await tick() }
     }
 
+    /// Where the video is put in place without asking Chrome, for tests.
+    func show(playhead: VideoMoment, at date: Date = Date()) {
+        self.playhead = playhead
+        playheadAt = date
+    }
+
+    /// The video was told to play or pause by Space: shown stopped where
+    /// it is, or moving on from there, at once, rather than carried on (or
+    /// held) until it is next asked, a second later at most, and then put
+    /// back.
+    func toggledByKey() {
+        guard let playhead, let now = position else { return }
+        self.playhead = VideoMoment(
+            tabID: playhead.tabID, url: playhead.url, seconds: now, rate: playhead.rate,
+            playing: !playhead.playing, duration: playhead.duration
+        )
+        playheadAt = Date()
+        // A reading asked for before the key tells of before it.
+        scrubbedAt = Date()
+    }
+
     /// Moves the video to `seconds`, as the bar's thumb was dropped there.
     func scrub(to seconds: Double) {
         guard let playhead, video.send(.scrub(to: seconds)) else { return }
