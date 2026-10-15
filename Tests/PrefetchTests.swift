@@ -41,6 +41,23 @@ final class PrefetchTests: XCTestCase {
     }
 
     @MainActor
+    func testSpaceStopsAndStartsTheVideoWhereItIsAtOnce() {
+        let prefetcher = Prefetcher(engine: CaptionEngine(), video: ChromeVideo())
+        // Playing from 10 s, two seconds ago.
+        prefetcher.show(
+            playhead: VideoMoment(tabID: 1, url: "u", seconds: 10, rate: 1, playing: true), at: Date().addingTimeInterval(-2)
+        )
+        prefetcher.toggledByKey()
+        let stopped = prefetcher.position ?? 0
+        XCTAssertEqual(stopped, 12, accuracy: 0.1, "stopped where it had got to, not where it was last read")
+        XCTAssertEqual(prefetcher.playhead?.playing, false)
+        XCTAssertEqual(prefetcher.position ?? 0, stopped, accuracy: 1e-9, "and held there")
+        prefetcher.toggledByKey()
+        XCTAssertEqual(prefetcher.playhead?.playing, true)
+        XCTAssertEqual(prefetcher.position ?? 0, stopped, accuracy: 0.05, "going on from there")
+    }
+
+    @MainActor
     func testItStartsPausedAndTheToggleTakesItUp() {
         let prefetcher = Prefetcher(engine: CaptionEngine(), video: ChromeVideo())
         XCTAssertTrue(prefetcher.isPaused)

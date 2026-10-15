@@ -15,12 +15,23 @@ final class DevPipeline {
     enum Step: String, CaseIterable, Identifiable {
         /// Silero finding where the speech is.
         case speech
+        /// The same, with FireRedVAD in Silero's place.
+        case speechFireRed = "speech-firered"
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .speech: "1 · Speech (Silero)"
+            case .speechFireRed: "1 · Speech (FireRedVAD)"
+            }
+        }
+
+        /// What finds the speech in the step.
+        var finder: String {
+            switch self {
+            case .speech: "Silero"
+            case .speechFireRed: "FireRedVAD"
             }
         }
     }
@@ -35,11 +46,26 @@ final class DevPipeline {
         var fetched = 0.0
         /// Up to where the step has looked.
         var analysed = 0.0
+        /// Up to where the words have been heard; whether re-timed.
+        var worded = 0.0
+        var aligned = false
+        /// Whether the speakers have been told apart.
+        var spoken = false
         var state = "running"
         /// Whether the host was told to hold the step.
         var paused = false
         /// The audio came from the host's cache rather than a fetch.
         var cached = false
+    }
+
+    /// What FireRedVAD's event model hears besides speech, drawn over the
+    /// stretches of speech to tell a song or a score from talk.
+    struct SoundEvents: Equatable {
+        var singing: [ClosedRange<Double>] = []
+        /// Music with neither singing nor speech in it.
+        var music: [ClosedRange<Double>] = []
+
+        var isEmpty: Bool { singing.isEmpty && music.isEmpty }
     }
 
     static let probeInterval: TimeInterval = 3
@@ -48,6 +74,12 @@ final class DevPipeline {
     private(set) var job: Job?
     /// Where the speech is, as the step found it.
     private(set) var speech: [ClosedRange<Double>] = []
+    /// What else the step heard, when it is FireRedVAD's.
+    private(set) var events = SoundEvents()
+    /// The words Whisper alone hears over the audio, to judge the step by.
+    private(set) var words: [HeardWord] = []
+    /// Who speaks when, as DiariZen tells the voices apart.
+    private(set) var speakers: [SpeakerTurn] = []
     /// Off at launch, like captioning ahead.
     private(set) var isPaused = true
     /// The stretch of the video picked out on the timeline.
@@ -56,13 +88,26 @@ final class DevPipeline {
     /// from there.
     private(set) var cursor: Double?
     /// The pointer has been put somewhere since Space was last pressed, so
-    /// the next press plays from there rather than pausing or resuming.
-    private var cursorArmed = false
+    /// the next press plays from there rather than pausing or resuming;
+    /// until then the pointer stays where it was put, and after it goes
+    /// with the video.
+    private(set) var cursorArmed = false
+    /// Where Space last sent the video, and when: until the video says it
+    /// is there, the pointer stays put rather than going back to where the
+    /// video was.
+    private(set) var playedFrom: (seconds: Double, at: Date)?
     let player = ClipPlayer()
 
-    var step: Step {
-        get { Step(rawValue: UserDefaults.standard.string(forKey: AppSettings.pipelineStep) ?? "") ?? .speech }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: AppSettings.pipelineStep) }
+    /// The step run, kept across launches. Choosing another while a job
+    /// runs stops that job, and the chosen step starts over the same video,
+    /// from the audio the host kept of it.
+    var step = Step(rawValue: UserDefaults.standard.string(forKey: AppSettings.pipelineStep) ?? "") ?? .speech {
+        didSet {
+            guard step != oldValue else { return }
+            UserDefaults.standard.set(step.rawValue, forKey: AppSettings.pipelineStep)
+            lastProbe = .distantPast
+            Task { await tick() }
+        }
     }
 
     var isActive: Bool { job != nil }
@@ -145,6 +190,7 @@ final class DevPipeline {
         cursorArmed = false
         let moment = VideoMoment(tabID: job.tabID, url: job.page, seconds: cursor)
         if video.send(.seek(moment, exact: true)) {
+            playedFrom = (cursor, Date())
             ActivityLog.tell("Playing the video from \(Self.clock(cursor))")
         } else {
             hear(cursor...min(cursor + 120, job.fetched))
@@ -181,9 +227,15 @@ final class DevPipeline {
 
     /// A job and its findings put in place without a host, for tests and
     /// previews.
-    func show(job: Job, speech: [ClosedRange<Double>]) {
+    func show(
+        job: Job, speech: [ClosedRange<Double>], events: SoundEvents = SoundEvents(), words: [HeardWord] = [],
+        speakers: [SpeakerTurn] = []
+    ) {
         self.job = job
         self.speech = speech
+        self.events = events
+        self.words = words
+        self.speakers = speakers
     }
 
     /// Plays the selected stretch in the Chrome video, which pauses at its
@@ -213,6 +265,17 @@ final class DevPipeline {
             await startJob(for: probe, client: client)
             return
         }
+        if current.step != step {
+            // Another step was chosen: this job goes, and the next tick
+            // starts the chosen one.
+            await stopJob()
+            speech = []
+            events = SoundEvents()
+            words = []
+            speakers = []
+            selection = nil
+            return
+        }
         if current.paused != isPaused {
             do {
                 try await client.setPrefetch(job: current.id, paused: isPaused)
@@ -233,11 +296,20 @@ final class DevPipeline {
                 ActivityLog.tell("The host had the video's audio from before: no fetch")
             }
             let analysed = status.analysed ?? 0
-            if analysed > updated.analysed || status.state == "done" && analysed != updated.analysed {
+            let worded = status.worded ?? 0
+            if analysed > updated.analysed || status.state == "done" && analysed != updated.analysed
+                || worded > updated.worded || (status.aligned ?? false) != updated.aligned
+                || (status.speakers ?? false) != updated.spoken {
                 let findings = try await client.stepFindings(job: current.id)
                 guard job?.id == current.id else { return }
                 speech = findings.stretches
+                events = findings.soundEvents
+                words = findings.words ?? []
+                speakers = findings.speakers ?? []
                 updated.analysed = findings.analysed
+                updated.worded = findings.worded ?? 0
+                updated.aligned = findings.aligned ?? false
+                updated.spoken = findings.speakers != nil
             }
             job = updated
             if status.state == "failed" {
@@ -261,6 +333,9 @@ final class DevPipeline {
             )
             job = Job(id: id, tabID: probe.tabID, page: probe.page, step: step, duration: probe.duration)
             speech = []
+            events = SoundEvents()
+            words = []
+            speakers = []
             selection = nil
             cursor = nil
             cursorArmed = false

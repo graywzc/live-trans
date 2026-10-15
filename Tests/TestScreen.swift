@@ -19,6 +19,11 @@ enum TestScreen {
             styleMask: [.titled], backing: .buffered, defer: false
         )
         window.isReleasedWhenClosed = false
+        // No opening animation: while it plays, the window server has the
+        // window a little smaller than its frame, and an event made for it
+        // then lands off by as much (a click at x 70 in the first window
+        // of a run came in at 69.29).
+        window.animationBehavior = .none
         // A frame given to init is put back on the main display; one set
         // afterwards stays where it is put.
         if let screen {
