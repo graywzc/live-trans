@@ -34,6 +34,10 @@ struct PrefetchStatus: Decodable, Equatable {
     var analysed: Double?
     /// Up to where in the video a dev job has heard the words.
     var worded: Double?
+    /// Whether a dev job's words have been re-timed by the aligner, and
+    /// whether its speakers have been told apart.
+    var aligned: Bool?
+    var speakers: Bool?
     /// Whether a dev job's audio came from the host's cache of it.
     var cached: Bool?
 }
@@ -64,6 +68,29 @@ struct HeardWord: Decodable, Equatable {
     var range: ClosedRange<Double> { start...max(start, end) }
 }
 
+/// A stretch one speaker holds, as DiariZen tells the voices apart: sent
+/// as [start, end, "S1"], the speakers named by how much they speak.
+struct SpeakerTurn: Decodable, Equatable {
+    var start: Double
+    var end: Double
+    var speaker: String
+
+    init(start: Double, end: Double, speaker: String) {
+        self.start = start
+        self.end = end
+        self.speaker = speaker
+    }
+
+    init(from decoder: Decoder) throws {
+        var fields = try decoder.unkeyedContainer()
+        start = try fields.decode(Double.self)
+        end = try fields.decode(Double.self)
+        speaker = try fields.decode(String.self)
+    }
+
+    var range: ClosedRange<Double> { start...max(start, end) }
+}
+
 /// What a dev job's step has found so far.
 struct StepFindings: Decodable, Equatable {
     var step: String?
@@ -73,9 +100,13 @@ struct StepFindings: Decodable, Equatable {
     /// FireRedVAD's step only: where it hears singing, and music with
     /// neither singing nor speech, by kind ("singing", "music"), as pairs.
     var events: [String: [[Double]]]?
-    /// The words Whisper alone hears over the audio, and up to where.
+    /// The words Whisper alone hears over the audio, and up to where;
+    /// whether their times are the aligner's rather than Whisper's.
     var words: [HeardWord]?
     var worded: Double?
+    var aligned: Bool?
+    /// Who speaks when, as DiariZen tells the voices apart.
+    var speakers: [SpeakerTurn]?
 
     var stretches: [ClosedRange<Double>] { Self.ranges(speech) }
 

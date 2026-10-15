@@ -11,8 +11,10 @@ import SwiftUI
 /// click also puts the pointer there (on the ruler, only that), and Space
 /// then plays the video from it. The pointer is the one line on the
 /// timeline: where it was put, until Space, and then where the video is.
-/// Under the band, the words Whisper alone hears, each where it was said;
-/// those outside every stretch of speech are orange, to be checked by ear.
+/// Under the band, who speaks when (a colour a speaker, as DiariZen tells
+/// the voices apart), and under that the words Whisper alone hears, each
+/// where it was said (re-timed by the aligner once all are heard); those
+/// outside every stretch of speech are orange, to be checked by ear.
 struct StepTimeline: View {
     @Environment(DevPipeline.self) private var dev
     @Environment(Prefetcher.self) private var prefetch
@@ -122,6 +124,7 @@ struct StepTimeline: View {
                     total: total,
                     fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech, events: dev.events,
                     finder: dev.job?.step.finder ?? dev.step.finder, words: dev.words,
+                    wordsAligned: dev.job?.aligned ?? false, speakers: dev.speakers,
                     playhead: line.playhead, selection: dev.selection, cursor: line.cursor, scale: scale,
                     onSelect: { dev.selection = $0 },
                     onPlace: { dev.place(cursor: $0) },
@@ -357,8 +360,12 @@ struct TimelineCanvas: NSViewRepresentable {
     var events = DevPipeline.SoundEvents()
     /// What found the speech, for the band's labels.
     var finder = "the step"
-    /// The words Whisper alone hears, drawn under the band.
+    /// The words Whisper alone hears, drawn under the band, and whether
+    /// their times are the aligner's.
     var words: [HeardWord] = []
+    var wordsAligned = false
+    /// Who speaks when, drawn between the band and the words.
+    var speakers: [SpeakerTurn] = []
     var playhead: Double?
     var selection: ClosedRange<Double>?
     var cursor: Double?
@@ -399,6 +406,7 @@ struct TimelineCanvas: NSViewRepresentable {
         let middle = TimelineGeometry.seconds(at: visible.midX, scale: context.coordinator.scale)
         var redrawAll = canvas.total != total || canvas.fetched != fetched || canvas.analysed != analysed
             || canvas.speech != speech || canvas.events != events || canvas.finder != finder || canvas.words != words
+            || canvas.wordsAligned != wordsAligned || canvas.speakers != speakers
             || canvas.selection != selection || canvas.cursor != cursor || canvas.scale != scale
         let wasAt = canvas.playhead
         canvas.total = total
@@ -408,6 +416,8 @@ struct TimelineCanvas: NSViewRepresentable {
         canvas.events = events
         canvas.finder = finder
         canvas.words = words
+        canvas.wordsAligned = wordsAligned
+        canvas.speakers = speakers
         canvas.playhead = playhead
         canvas.selection = selection
         canvas.cursor = cursor
@@ -482,6 +492,18 @@ struct TimelineCanvas: NSViewRepresentable {
         /// room), and how wide it is drawn; worked out once per change.
         private var wordLayout: [(word: HeardWord, outside: Bool, row: Int?, width: CGFloat)]?
         static let laneHeight: CGFloat = 30
+        static let speakerHeight: CGFloat = 12
+        var wordsAligned = false
+        var speakers: [SpeakerTurn] = []
+        /// A colour a speaker, S1 first; past the last, they come round again.
+        static let speakerColors: [NSColor] = [
+            .systemTeal, .systemPink, .systemYellow, .systemIndigo, .systemMint, .systemBrown, .systemRed, .systemCyan,
+        ]
+
+        static func color(of speaker: String) -> NSColor {
+            let number = Int(speaker.dropFirst()) ?? 1
+            return speakerColors[(max(number, 1) - 1) % speakerColors.count]
+        }
         static let wordFont = NSFont.systemFont(ofSize: 10)
         var events = DevPipeline.SoundEvents() {
             didSet { heard = nil }
@@ -516,13 +538,18 @@ struct TimelineCanvas: NSViewRepresentable {
         var band: NSRect {
             NSRect(
                 x: 0, y: Self.rulerHeight + 4, width: bounds.width,
-                height: max(bounds.height - Self.rulerHeight - 8 - Self.laneHeight, 4)
+                height: max(bounds.height - Self.rulerHeight - 8 - Self.speakerHeight - Self.laneHeight, 4)
             )
         }
 
-        /// The lane the words are drawn in, under the band.
+        /// The strip who speaks is drawn in, under the band.
+        var speakerLane: NSRect {
+            NSRect(x: 0, y: band.maxY + 3, width: bounds.width, height: Self.speakerHeight - 3)
+        }
+
+        /// The lane the words are drawn in, under the speakers.
         var lane: NSRect {
-            NSRect(x: 0, y: band.maxY + 3, width: bounds.width, height: Self.laneHeight - 3)
+            NSRect(x: 0, y: speakerLane.maxY + 3, width: bounds.width, height: Self.laneHeight - 3)
         }
 
         private func layWords() -> [(word: HeardWord, outside: Bool, row: Int?, width: CGFloat)] {
@@ -543,10 +570,17 @@ struct TimelineCanvas: NSViewRepresentable {
 
         /// What a word's label says: the word, when, how sure Whisper is,
         /// and whether the step found speech there.
-        static func wordLabel(_ word: HeardWord, outside: Bool) -> String {
+        static func wordLabel(_ word: HeardWord, outside: Bool, aligned: Bool = false) -> String {
             "「\(word.text)」 \(StepTimeline.readout(word.start))–\(StepTimeline.readout(word.end))"
                 + " · Whisper \(String(format: "%.2f", word.probability))"
+                + (aligned ? " · times by the aligner" : " · Whisper's times")
                 + (outside ? " · outside the speech found" : "")
+        }
+
+        /// What a speaker's stretch says when the pointer rests on it.
+        static func speakerLabel(_ turn: SpeakerTurn) -> String {
+            "Speaker \(turn.speaker) · \(StepTimeline.readout(turn.start))–\(StepTimeline.readout(turn.end))"
+                + " · as DiariZen tells the voices apart (S1 speaks most)"
         }
 
         override func setFrameSize(_ newSize: NSSize) {
@@ -571,7 +605,12 @@ struct TimelineCanvas: NSViewRepresentable {
             }
             for (word, outside, _, width) in layWords() {
                 let area = NSRect(x: TimelineGeometry.x(for: word.start, scale: scale), y: lane.minY, width: max(width, 2), height: lane.height)
-                labels[addToolTip(area, owner: self, userData: nil)] = (area, Self.wordLabel(word, outside: outside))
+                labels[addToolTip(area, owner: self, userData: nil)] = (area, Self.wordLabel(word, outside: outside, aligned: wordsAligned))
+            }
+            for turn in speakers {
+                let area = rect(turn.range, in: speakerLane)
+                guard area.width > 0 else { continue }
+                labels[addToolTip(area, owner: self, userData: nil)] = (area, Self.speakerLabel(turn))
             }
         }
 
@@ -637,6 +676,7 @@ struct TimelineCanvas: NSViewRepresentable {
                 path.lineWidth = 1
                 path.stroke()
             }
+            drawSpeakers(in: dirtyRect)
             drawWords(in: dirtyRect)
             drawRuler(in: dirtyRect)
             // The pointer, put there or going with the video: one look.
@@ -655,6 +695,17 @@ struct TimelineCanvas: NSViewRepresentable {
                 mark.line(to: NSPoint(x: x, y: 6))
                 mark.close()
                 mark.fill()
+            }
+        }
+
+        private func drawSpeakers(in dirtyRect: NSRect) {
+            let lane = speakerLane
+            guard !speakers.isEmpty, lane.intersects(dirtyRect) else { return }
+            for turn in speakers {
+                let area = rect(turn.range, in: lane)
+                guard area.intersects(dirtyRect) else { continue }
+                Self.color(of: turn.speaker).withAlphaComponent(0.9).setFill()
+                area.fill()
             }
         }
 

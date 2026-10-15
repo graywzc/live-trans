@@ -118,7 +118,10 @@ struct ActivityView: View {
             "Step \(job.step.title) \(job.paused ? "paused" : job.state)",
             "fetched to \(CaptionRow.timestamp(job.fetched))", looked,
         ]
-        if job.worded > 0 { parts.append("words to \(CaptionRow.timestamp(job.worded))") }
+        if job.worded > 0 {
+            parts.append("words to \(CaptionRow.timestamp(job.worded))\(job.aligned ? ", re-timed" : "")")
+        }
+        if job.spoken { parts.append("speakers told apart") }
         return parts.joined(separator: " · ")
     }
 

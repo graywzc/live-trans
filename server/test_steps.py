@@ -19,6 +19,14 @@ import asr_server as srv
 srv.heard_words = lambda audio, start=0.0: []
 
 
+def _not_set_up(name, header, audio):
+    raise RuntimeError(f"{name} is not set up")
+
+
+# Nor the dev tools: none of the tests but those about them see them.
+srv.run_devtool = _not_set_up
+
+
 def loud_stretches(audio):
     """Where `audio` is louder than nothing, by the tenth of a second."""
     step = srv.SAMPLE_RATE // 10
@@ -127,7 +135,7 @@ def test_the_speech_step_finds_the_speech_in_the_whole_audio(monkeypatch=None):
     assert abs(job.analysed - 6.0) < 0.01, job.analysed
     status = job.status()
     assert status["step"] == "speech" and status["lines"] == [] and abs(status["analysed"] - 6.0) < 0.01, status
-    found = {k: v for k, v in job.findings().items() if k not in ("words", "worded")}
+    found = {k: v for k, v in job.findings().items() if k not in ("words", "worded", "aligned")}
     assert found == {"step": "speech", "analysed": 6.0, "speech": [[1.0, 3.0], [4.0, 5.5]]}, found
     # Its audio can be heard, a stretch at a time, as a WAV file.
     with wave.open(io.BytesIO(job.wav(1.0, 2.0))) as f:
@@ -252,6 +260,61 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_off_disk():
     assert found["words"][0] == [0.1, 0.5, "w0", 0.9]
     with open(os.path.join(cache, os.listdir(cache)[0], "speech.json"), encoding="utf-8") as f:
         assert "words" not in json.load(f), "no text on disk"
+    srv.clear_dev_cache()
+
+
+def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
+    cache = fresh_cache()
+    original = srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.WORDS_PIECE, srv.WORDS_OVERLAP
+    srv.speech_stretches = loud_stretches
+    srv.WORDS_PIECE, srv.WORDS_OVERLAP = 4.0, 2.0
+    srv.heard_words = lambda audio, start=0.0: [(0.5, 0.9, "w", 0.9), (2.5, 3.5, "v", 0.8)]
+    asked = []
+
+    def tool(name, header, audio):
+        asked.append((name, header, audio.size))
+        if name == "align":
+            # Each word 0.1 s later and shorter than Whisper had it.
+            return {"pieces": [[[w[0] + 0.1, w[1] - 0.1] for w in p["words"]] for p in header["pieces"]]}
+        return {"segments": [[1.0, 2.0, "S1"], [4.0, 5.5, "S2"]]}
+
+    srv.run_devtool = tool
+    try:
+        url = wav_file(noise_and_silence([(1, False), (5, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/y", {}, 7.0, step="speech")
+        deadline = time.time() + 15
+        while not (job.aligned and job.speakers is not None) and time.time() < deadline:
+            time.sleep(0.1)
+        # Taken from the cache again, the speakers come with no worker run
+        # (the words, never kept, are re-timed again).
+        def again_tool(name, header, audio):
+            asked.append((name, header, audio.size))
+            return _not_set_up(name, header, audio)
+
+        srv.run_devtool = again_tool
+        again = srv.PrefetchJob(url + ".gone", "https://example.com/y", {}, 7.0, step="speech")
+        deadline = time.time() + 15
+        while again.speakers is None and time.time() < deadline:
+            time.sleep(0.1)
+    finally:
+        srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.WORDS_PIECE, srv.WORDS_OVERLAP = original
+    assert job.aligned and job.status()["aligned"] and job.status()["speakers"]
+    # Pieces of 4 s every 2 s; the word at 0.5 is the first piece's, the
+    # one at 2.5 into each piece is that piece's.
+    assert [w[:2] for w in job.words][:2] == [(0.6, 0.8), (2.6, 3.4)], job.words
+    assert job.findings()["speakers"] == [[1.0, 2.0, "S1"], [4.0, 5.5, "S2"]]
+    assert again.speakers == [(1.0, 2.0, "S1"), (4.0, 5.5, "S2")]
+    names = [a[0] for a in asked]
+    assert sorted(set(names)) == ["align", "diarize"] and names.count("diarize") == 1, names
+    assert names.count("align") == 2, names
+    align = next(h for n, h, _ in asked if n == "align")
+    assert align["pieces"][0]["words"][0] == [0.5, 0.9, "w", 0.9]
+    folder = os.path.join(cache, os.listdir(cache)[0])
+    assert sorted(os.listdir(folder)) == ["audio.json", "audio.s16", "speakers.json", "speech.json"], os.listdir(folder)
+    for name in ("speakers.json", "speech.json"):
+        with open(os.path.join(folder, name), encoding="utf-8") as f:
+            kept = json.load(f)
+        assert "words" not in kept and "\"w\"" not in json.dumps(kept), (name, kept)
     srv.clear_dev_cache()
 
 

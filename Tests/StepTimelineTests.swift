@@ -119,10 +119,10 @@ final class StepTimelineTests: XCTestCase {
     private func show(
         scale: Double = 20, selection: ClosedRange<Double>? = nil, events: DevPipeline.SoundEvents = DevPipeline.SoundEvents(),
         total: Double = 20, reveal: TimelineCanvas.Reveal = TimelineCanvas.Reveal(count: 0, seconds: 0),
-        words: [HeardWord] = []
+        words: [HeardWord] = [], speakers: [SpeakerTurn] = []
     ) {
         let canvas = TimelineCanvas(
-            total: total, fetched: 10, analysed: 10, speech: Self.speech, events: events, finder: "FireRedVAD", words: words,
+            total: total, fetched: 10, analysed: 10, speech: Self.speech, events: events, finder: "FireRedVAD", words: words, speakers: speakers,
             playhead: 2.5, selection: selection,
             scale: scale, onSelect: { [unowned self] in picked.append($0) },
             onPlace: { [unowned self] in placed.append($0) }, onZoom: { _ in }, reveal: reveal
@@ -348,15 +348,52 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertGreaterThan(lane.minY, canvas.band.maxY, "under the band")
         XCTAssertEqual(
             canvas.label(at: NSPoint(x: 25, y: lane.midY)),
-            "「aa」 0:01.20–0:01.60 · Whisper 0.90"
+            "「aa」 0:01.20–0:01.60 · Whisper 0.90 · Whisper's times"
         )
         XCTAssertEqual(
             canvas.label(at: NSPoint(x: 70, y: lane.midY)),
-            "「cc」 0:03.30–0:03.80 · Whisper 0.40 · outside the speech found"
+            "「cc」 0:03.30–0:03.80 · Whisper 0.40 · Whisper's times · outside the speech found"
         )
         // The word in the pause is drawn orange; the ones in speech are not.
         XCTAssertTrue(isLit(CGRect(x: 66, y: lane.minY, width: 12, height: lane.height), hue: .orange))
         XCTAssertFalse(isLit(CGRect(x: 22, y: lane.minY, width: 12, height: lane.height), hue: .orange))
+    }
+
+    func testWhoSpeaksIsDrawnBetweenTheBandAndTheWords() {
+        let speakers = [SpeakerTurn(start: 1.0, end: 3.0, speaker: "S1"), SpeakerTurn(start: 4.0, end: 5.5, speaker: "S2")]
+        show(speakers: speakers)
+        snapshot("step-timeline-speakers")
+        let canvas = TestScreen.wait { Self.find(TimelineCanvas.CanvasView.self, in: window.contentView!) }
+        guard let canvas else { return XCTFail("no canvas") }
+        let lane = canvas.speakerLane
+        XCTAssertGreaterThan(lane.minY, canvas.band.maxY)
+        XCTAssertLessThan(lane.maxY, canvas.lane.minY)
+        XCTAssertEqual(
+            canvas.label(at: NSPoint(x: 90, y: lane.midY)),
+            "Speaker S2 · 0:04.00–0:05.50 · as DiariZen tells the voices apart (S1 speaks most)"
+        )
+        XCTAssertNil(canvas.label(at: NSPoint(x: 70, y: lane.midY)), "no one speaks in the pause")
+        // S1 and S2 in their own colours, nothing between.
+        XCTAssertNotEqual(TimelineCanvas.CanvasView.color(of: "S1"), TimelineCanvas.CanvasView.color(of: "S2"))
+        XCTAssertEqual(TimelineCanvas.CanvasView.color(of: "S9"), TimelineCanvas.CanvasView.color(of: "S1"), "round again")
+        let view = window.contentView!
+        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        let lit = { (x: CGFloat) -> NSColor? in rep.colorAt(x: Int(x * scale), y: Int(lane.midY * scale))?.usingColorSpace(.deviceRGB) }
+        XCTAssertGreaterThan(lit(30)?.blueComponent ?? 0, 0.5, "S1 teal under its stretch")
+        XCTAssertLessThan(lit(70).map { $0.redComponent + $0.greenComponent + $0.blueComponent } ?? 9, 0.3, "dark in the pause")
+        var job = DevPipeline.Job(id: "a", tabID: 1, page: "p", step: .speechFireRed, duration: 60)
+        job.fetched = 60
+        job.analysed = 60
+        job.worded = 60
+        job.aligned = true
+        job.spoken = true
+        job.state = "done"
+        XCTAssertEqual(
+            ActivityView.stepStatus(job),
+            "Step 1 · Speech (FireRedVAD) done · fetched to 1:00 · looked to 1:00 of 1:00 · words to 1:00, re-timed · speakers told apart"
+        )
     }
 
     func testThePlayheadIsDrawnWhereTheVideoIs() {

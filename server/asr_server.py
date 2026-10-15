@@ -324,6 +324,34 @@ def heard_words(audio, start=0.0):
         ]
 
 
+# Dev mode's heavier tools, each in its own Python beside the server's (see
+# devtools/setup.sh): "align" re-times the words Whisper heard by CTC
+# forced alignment (Whisper's own word times run early and lie end to end
+# across pauses), "diarize" tells the speakers apart. Run as workers that
+# take the audio on stdin and give back times only.
+DEVTOOLS_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEVTOOLS", "~/livetrans/devtools"))
+# A worker that takes longer than this is given up on.
+DEVTOOL_TIMEOUT = 900
+
+
+def run_devtool(name, header, audio):
+    """Runs the dev tool `name` over `audio` (16 kHz mono floats), with
+    `header` told it first, and gives back what it answers; raises
+    RuntimeError when it is not set up or fails."""
+    python = os.path.join(DEVTOOLS_DIR, name, "bin", "python")
+    script = os.path.join(DEVTOOLS_DIR, f"{name}.py")
+    if not (os.path.exists(python) and os.path.exists(script)):
+        raise RuntimeError(f"{name} is not set up in {DEVTOOLS_DIR} (devtools/setup.sh)")
+    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+    request = json.dumps({**header, "samples": audio.size}).encode("utf-8") + b"\n" + pcm
+    env = {**os.environ, "PYANNOTE_METRICS_ENABLED": "0"}
+    done = subprocess.run([python, "-I", script], input=request, capture_output=True, timeout=DEVTOOL_TIMEOUT, env=env)
+    if done.returncode != 0:
+        last = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no message"]
+        raise RuntimeError(f"{name} failed: {last[0][:300]}")
+    return json.loads(done.stdout)
+
+
 # Silero VAD, the authors' own v6.2 ONNX file (MIT, silero_vad.LICENSE),
 # in place of the one faster_whisper bundles: that is a re-export of the
 # v6.0 weights, whose memory goes dull after half a minute or so of music
@@ -1052,7 +1080,7 @@ DEV_AUDIO_LIMIT = 120.0
 DEV_CACHE_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEV_CACHE", "~/livetrans/devcache"))
 # Bumped with a step's code, so findings cached by the old code are not
 # taken for the new one's.
-STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-whole-2"}
+STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-whole-2", "speakers": "diarizen-large-v2-1"}
 
 
 class DevCache:
@@ -1094,7 +1122,7 @@ class DevCache:
         """Keeps what `step` found, but not the words heard: no text the
         server hears is kept on disk."""
         os.makedirs(self.dir, exist_ok=True)
-        kept = {k: v for k, v in findings.items() if k not in ("words", "worded")}
+        kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step == "speakers"}
         with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
             json.dump({**kept, "version": STEP_VERSIONS.get(step)}, f)
 
@@ -1612,6 +1640,15 @@ class PrefetchJob:
         # every text the server hears.
         self.words = []
         self.worded = self.offset
+        # Whether the words have been re-timed by the aligner, and each
+        # word's piece and place in it, for that: the pieces as heard,
+        # (start, length, words), the times within the piece.
+        self.aligned = False
+        self.word_refs = []
+        self.word_pieces = []
+        # Who speaks when, as DiariZen tells the voices apart: (start, end,
+        # "S1"), in seconds of the video; None until it has run.
+        self.speakers = None
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
         self.cache = DevCache(page, url) if step and self.offset == 0 else None
@@ -1626,6 +1663,7 @@ class PrefetchJob:
         threading.Thread(target=self._analyse if step else self._transcribe, daemon=True).start()
         if step:
             threading.Thread(target=self._hear_words, daemon=True).start()
+            threading.Thread(target=self._tell_speakers, daemon=True).start()
 
     @property
     def fetched(self):
@@ -1851,14 +1889,66 @@ class PrefetchJob:
             # piece keeps its head and the last its tail.
             low = 0.0 if start == 0 else WORDS_OVERLAP / 2
             high = piece.size / SAMPLE_RATE if last else WORDS_PIECE - WORDS_OVERLAP / 2
-            self.words += [
-                (round(self.offset + start + a, 3), round(self.offset + start + b, 3), text, p)
-                for a, b, text, p in heard if low <= a < high
-            ]
+            self.word_pieces.append((start, piece.size / SAMPLE_RATE, heard))
+            for k, (a, b, text, p) in enumerate(heard):
+                if low <= a < high:
+                    self.words.append((round(self.offset + start + a, 3), round(self.offset + start + b, 3), text, p))
+                    self.word_refs.append((len(self.word_pieces) - 1, k))
             self.worded = self.offset + (end if last else start + high)
             if last:
+                self._align_words()
                 return
             start += WORDS_PIECE - WORDS_OVERLAP
+
+    def _align_words(self):
+        """The words re-timed by the aligner, once all are heard; Whisper's
+        own times stay when it is not set up or fails."""
+        with self.audio_lock:
+            audio = self.audio.copy()
+        pieces = [{"start": s, "length": n, "words": [list(w) for w in heard]} for s, n, heard in self.word_pieces]
+        try:
+            timed = run_devtool("align", {"pieces": pieces}, audio)["pieces"]
+        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            print(f"prefetch {self.id}: words not re-timed: {exc}", flush=True)
+            return
+        words = list(self.words)
+        for i, (piece, k) in enumerate(self.word_refs):
+            new = timed[piece][k] if piece < len(timed) and k < len(timed[piece]) else None
+            if new:
+                start = self.word_pieces[piece][0]
+                words[i] = (round(self.offset + start + new[0], 3), round(self.offset + start + new[1], 3), *words[i][2:])
+        self.words = words
+        self.aligned = True
+        print(f"prefetch {self.id}: words re-timed", flush=True)
+
+    def _tell_speakers(self):
+        """Who speaks when, once all the audio is in: DiariZen over the whole
+        of it, or what it found before over this very audio."""
+        while not self.stop_event.is_set() and self.state in ("running", "done"):
+            with self.audio_lock:
+                done = self.fetch_done
+            if done:
+                break
+            time.sleep(0.5)
+        else:
+            return
+        if self.cache and (kept := self.cache.load_findings("speakers")):
+            self.speakers = [tuple(s) for s in kept.get("speakers", [])]
+            return
+        with self.audio_lock:
+            audio = self.audio.copy()
+        try:
+            found = run_devtool("diarize", {}, audio)["segments"]
+        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            print(f"prefetch {self.id}: speakers: {exc}", flush=True)
+            return
+        self.speakers = [(round(self.offset + a, 3), round(self.offset + b, 3), who) for a, b, who in found]
+        print(f"prefetch {self.id}: {len({s[2] for s in self.speakers})} speakers told apart", flush=True)
+        if self.cache:
+            try:
+                self.cache.save_findings("speakers", {"speakers": [list(s) for s in self.speakers]})
+            except OSError as exc:
+                print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
 
     def wav(self, start, end):
         """The fetched audio from `start` to `end` of the video, as a WAV
@@ -1938,6 +2028,8 @@ class PrefetchJob:
             "step": self.step,
             "analysed": round(self.analysed, 2),
             "worded": round(self.worded, 2),
+            "aligned": self.aligned,
+            "speakers": self.speakers is not None,
             "cached": self.cached,
         }
 
@@ -1950,6 +2042,9 @@ class PrefetchJob:
         if self.step:
             found["words"] = [list(w) for w in self.words]
             found["worded"] = round(self.worded, 2)
+            found["aligned"] = self.aligned
+        if self.speakers is not None:
+            found["speakers"] = [list(s) for s in self.speakers]
         return found
 
 

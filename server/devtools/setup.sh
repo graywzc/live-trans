@@ -1,0 +1,35 @@
+#!/bin/bash
+# Sets up the dev mode's heavier tools on the GPU host, each in its own
+# Python beside the server's (which stays on onnxruntime alone):
+#   align   - re-times Whisper's words by CTC forced alignment with
+#             ReazonSpeech's Japanese wav2vec2 (Apache-2.0), PyTorch.
+#   diarize - tells the speakers apart with DiariZen (code MIT, weights
+#             CC BY-NC 4.0: personal, non-commercial use), Python 3.10
+#             and torch 2.1.1 as it is pinned to.
+# Usage: setup.sh [DIR], DIR defaulting to ~/livetrans/devtools. Needs uv
+# and git; the models download from Hugging Face on first use.
+set -euo pipefail
+DIR="${1:-$HOME/livetrans/devtools}"
+mkdir -p "$DIR"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
+
+if [ ! -x align/bin/python ]; then
+    uv venv --python 3.12 align
+    uv pip install --python align/bin/python torch==2.14.1 transformers==5.19.0 tokenizers==0.23.3 pykakasi==2.3.0 numpy
+fi
+
+if [ ! -d DiariZen ]; then
+    git clone https://github.com/BUTSpeechFIT/DiariZen.git
+    git -C DiariZen checkout 844f5555b0a98acd0931511fc641a8c5b8ba92c7
+fi
+if [ ! -x diarize/bin/python ]; then
+    uv venv --python 3.10 diarize
+    # The versions DiariZen was run with on this host, torch 2.1.1 for CUDA 12.1.
+    uv pip install --python diarize/bin/python --index-strategy unsafe-best-match \
+        --extra-index-url https://download.pytorch.org/whl/cu121 -r "$HERE/diarize-requirements.txt"
+    uv pip install --python diarize/bin/python --no-deps -e DiariZen/pyannote-audio -e DiariZen
+fi
+# The workers the server runs in these Pythons.
+cp "$HERE/align.py" "$HERE/diarize.py" "$DIR/"
+echo "dev tools ready in $DIR"

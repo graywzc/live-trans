@@ -108,6 +108,25 @@ singing or as music alone over the stretches of speech; without them that
 step fails and nothing else changes. `LIVETRANS_FIRERED_MODEL` points at
 another model file, with `fireredvad_cmvn.ark` beside it.
 
+Dev mode also shows, under its timeline, who speaks when and the words
+Whisper hears, re-timed. Those need two heavier tools, each in its own
+Python beside the server's, set up once on the GPU host with
+`server/devtools/setup.sh` (uv and git needed; about 11 GB with the models,
+which download on first use):
+
+- the words are re-timed by CTC forced alignment with ReazonSpeech's
+  Japanese wav2vec2 (`reazon-research/japanese-wav2vec2-large-rs35kh`,
+  Apache-2.0), since Whisper's own word times run early and lie end to end
+  across pauses;
+- the speakers are told apart by DiariZen
+  (`BUT-FIT/diarizen-wavlm-large-s80-md-v2`; code MIT, weights CC BY-NC
+  4.0, so for personal, non-commercial use).
+
+They go in `~/livetrans/devtools` (`LIVETRANS_DEVTOOLS` points elsewhere).
+Without them the timeline shows Whisper's own word times and no speakers;
+nothing else changes. Only times come back from them, and the words are
+never written to disk.
+
 To caption videos ahead from their own audio, the host also needs `ffmpeg`,
 and `yt-dlp` with a JavaScript runtime for sites like YouTube:
 
