@@ -296,6 +296,34 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
         return texts
 
 
+# Dev mode hears the words over the whole of a step job's audio, with
+# Whisper alone (no speech finder), so the timeline can show where each
+# word was said and a stretch the finder missed or made up can be told by
+# ear: in pieces this long, each overlapping the next by WORDS_OVERLAP, a
+# word owned by the piece it starts nearest the middle of. A piece of 20 s
+# rather than Whisper's own 30: one that opens on a song skipped and
+# smeared the dialogue after it (10 words in 25 s of talk, four of them
+# stretched over seconds, against 60 and none at 20 s).
+WORDS_PIECE = 20.0
+WORDS_OVERLAP = 5.0
+
+
+def heard_words(audio, start=0.0):
+    """The words Whisper hears in `audio`, a piece from `start` seconds in,
+    as [(start, end, text, probability), ...], the times in seconds into
+    the piece, with no speech finder and nothing carried from before."""
+    if audio.size == 0:
+        return []
+    with _asr_lock:
+        segments, _ = _asr.transcribe(
+            audio, language="ja", beam_size=3, word_timestamps=True, condition_on_previous_text=False,
+        )
+        return [
+            (round(w.start, 3), round(w.end, 3), w.word.strip(), round(w.probability, 3))
+            for s in segments for w in (s.words or []) if w.word.strip()
+        ]
+
+
 # Silero VAD, the authors' own v6.2 ONNX file (MIT, silero_vad.LICENSE),
 # in place of the one faster_whisper bundles: that is a re-export of the
 # v6.0 weights, whose memory goes dull after half a minute or so of music
@@ -1063,9 +1091,12 @@ class DevCache:
         return found if found.get("version") == STEP_VERSIONS.get(step) else None
 
     def save_findings(self, step, findings):
+        """Keeps what `step` found, but not the words heard: no text the
+        server hears is kept on disk."""
         os.makedirs(self.dir, exist_ok=True)
+        kept = {k: v for k, v in findings.items() if k not in ("words", "worded")}
         with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
-            json.dump({**findings, "version": STEP_VERSIONS.get(step)}, f)
+            json.dump({**kept, "version": STEP_VERSIONS.get(step)}, f)
 
 
 def clear_dev_cache():
@@ -1576,6 +1607,11 @@ class PrefetchJob:
         # The FireRedVAD step's sound events, by kind ("singing", "music"):
         # where they are, in seconds of the video.
         self.events = {}
+        # A step job's words, as Whisper alone hears them, in seconds of
+        # the video, and up to where it has listened: in memory only, as
+        # every text the server hears.
+        self.words = []
+        self.worded = self.offset
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
         self.cache = DevCache(page, url) if step and self.offset == 0 else None
@@ -1588,6 +1624,8 @@ class PrefetchJob:
         self.started = time.time()
         threading.Thread(target=self._fetch, daemon=True).start()
         threading.Thread(target=self._analyse if step else self._transcribe, daemon=True).start()
+        if step:
+            threading.Thread(target=self._hear_words, daemon=True).start()
 
     @property
     def fetched(self):
@@ -1787,6 +1825,41 @@ class PrefetchJob:
             # get ahead rather than look all the time.
             time.sleep(min(3 * (time.time() - t0), 10))
 
+    def _hear_words(self):
+        """Whisper over all the audio, a piece at a time as it arrives, for
+        the words on the timeline; the GPU is let go between pieces."""
+        start = 0.0
+        while not self.stop_event.is_set() and self.state in ("running", "done"):
+            with self.audio_lock:
+                have = self.fetched
+                done = self.fetch_done
+            if self.paused.is_set() or (not done and have < start + WORDS_PIECE):
+                time.sleep(0.5)
+                continue
+            if start >= have:
+                return
+            with self.audio_lock:
+                piece = self.audio[int(start * SAMPLE_RATE):int((start + WORDS_PIECE) * SAMPLE_RATE)].copy()
+            try:
+                heard = heard_words(piece)
+            except Exception as exc:
+                print(f"prefetch {self.id}: words: {type(exc).__name__}: {exc}", flush=True)
+                return
+            end = start + piece.size / SAMPLE_RATE
+            last = end >= have and done
+            # A word is the piece's when it starts in its middle; the first
+            # piece keeps its head and the last its tail.
+            low = 0.0 if start == 0 else WORDS_OVERLAP / 2
+            high = piece.size / SAMPLE_RATE if last else WORDS_PIECE - WORDS_OVERLAP / 2
+            self.words += [
+                (round(self.offset + start + a, 3), round(self.offset + start + b, 3), text, p)
+                for a, b, text, p in heard if low <= a < high
+            ]
+            self.worded = self.offset + (end if last else start + high)
+            if last:
+                return
+            start += WORDS_PIECE - WORDS_OVERLAP
+
     def wav(self, start, end):
         """The fetched audio from `start` to `end` of the video, as a WAV
         file, 16 kHz mono; at most DEV_AUDIO_LIMIT seconds of it. Empty
@@ -1864,6 +1937,7 @@ class PrefetchJob:
             "lines": self.lines[since:],
             "step": self.step,
             "analysed": round(self.analysed, 2),
+            "worded": round(self.worded, 2),
             "cached": self.cached,
         }
 
@@ -1873,6 +1947,9 @@ class PrefetchJob:
         found = {"step": self.step, "analysed": round(self.analysed, 2), "speech": [list(s) for s in self.speech]}
         if self.events:
             found["events"] = {kind: [list(s) for s in runs] for kind, runs in self.events.items()}
+        if self.step:
+            found["words"] = [list(w) for w in self.words]
+            found["worded"] = round(self.worded, 2)
         return found
 
 

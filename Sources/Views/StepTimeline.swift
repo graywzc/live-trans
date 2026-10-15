@@ -11,6 +11,8 @@ import SwiftUI
 /// click also puts the pointer there (on the ruler, only that), and Space
 /// then plays the video from it. The pointer is the one line on the
 /// timeline: where it was put, until Space, and then where the video is.
+/// Under the band, the words Whisper alone hears, each where it was said;
+/// those outside every stretch of speech are orange, to be checked by ear.
 struct StepTimeline: View {
     @Environment(DevPipeline.self) private var dev
     @Environment(Prefetcher.self) private var prefetch
@@ -119,7 +121,7 @@ struct StepTimeline: View {
                 TimelineCanvas(
                     total: total,
                     fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech, events: dev.events,
-                    finder: dev.job?.step.finder ?? dev.step.finder,
+                    finder: dev.job?.step.finder ?? dev.step.finder, words: dev.words,
                     playhead: line.playhead, selection: dev.selection, cursor: line.cursor, scale: scale,
                     onSelect: { dev.selection = $0 },
                     onPlace: { dev.place(cursor: $0) },
@@ -355,6 +357,8 @@ struct TimelineCanvas: NSViewRepresentable {
     var events = DevPipeline.SoundEvents()
     /// What found the speech, for the band's labels.
     var finder = "the step"
+    /// The words Whisper alone hears, drawn under the band.
+    var words: [HeardWord] = []
     var playhead: Double?
     var selection: ClosedRange<Double>?
     var cursor: Double?
@@ -394,7 +398,8 @@ struct TimelineCanvas: NSViewRepresentable {
         let visible = scroll.contentView.bounds
         let middle = TimelineGeometry.seconds(at: visible.midX, scale: context.coordinator.scale)
         var redrawAll = canvas.total != total || canvas.fetched != fetched || canvas.analysed != analysed
-            || canvas.speech != speech || canvas.events != events || canvas.finder != finder || canvas.selection != selection || canvas.cursor != cursor || canvas.scale != scale
+            || canvas.speech != speech || canvas.events != events || canvas.finder != finder || canvas.words != words
+            || canvas.selection != selection || canvas.cursor != cursor || canvas.scale != scale
         let wasAt = canvas.playhead
         canvas.total = total
         canvas.fetched = fetched
@@ -402,6 +407,7 @@ struct TimelineCanvas: NSViewRepresentable {
         canvas.speech = speech
         canvas.events = events
         canvas.finder = finder
+        canvas.words = words
         canvas.playhead = playhead
         canvas.selection = selection
         canvas.cursor = cursor
@@ -466,8 +472,17 @@ struct TimelineCanvas: NSViewRepresentable {
         var fetched = 0.0
         var analysed = 0.0
         var speech: [ClosedRange<Double>] = [] {
-            didSet { heard = nil }
+            didSet { heard = nil; wordLayout = nil }
         }
+        var words: [HeardWord] = [] {
+            didSet { if words != oldValue { wordLayout = nil } }
+        }
+        /// The words as laid out in the lane: each with whether it is
+        /// outside the speech, its row of text (none when neither row has
+        /// room), and how wide it is drawn; worked out once per change.
+        private var wordLayout: [(word: HeardWord, outside: Bool, row: Int?, width: CGFloat)]?
+        static let laneHeight: CGFloat = 30
+        static let wordFont = NSFont.systemFont(ofSize: 10)
         var events = DevPipeline.SoundEvents() {
             didSet { heard = nil }
         }
@@ -481,7 +496,9 @@ struct TimelineCanvas: NSViewRepresentable {
         var playhead: Double?
         var selection: ClosedRange<Double>?
         var cursor: Double?
-        var scale = 20.0
+        var scale = 20.0 {
+            didSet { if scale != oldValue { wordLayout = nil } }
+        }
         var onSelect: (ClosedRange<Double>?) -> Void = { _ in }
         var onPlace: (Double) -> Void = { _ in }
         var onZoom: (Double) -> Void = { _ in }
@@ -497,7 +514,39 @@ struct TimelineCanvas: NSViewRepresentable {
 
         /// The band the audio and speech are drawn in, under the ruler.
         var band: NSRect {
-            NSRect(x: 0, y: Self.rulerHeight + 4, width: bounds.width, height: max(bounds.height - Self.rulerHeight - 8, 4))
+            NSRect(
+                x: 0, y: Self.rulerHeight + 4, width: bounds.width,
+                height: max(bounds.height - Self.rulerHeight - 8 - Self.laneHeight, 4)
+            )
+        }
+
+        /// The lane the words are drawn in, under the band.
+        var lane: NSRect {
+            NSRect(x: 0, y: band.maxY + 3, width: bounds.width, height: Self.laneHeight - 3)
+        }
+
+        private func layWords() -> [(word: HeardWord, outside: Bool, row: Int?, width: CGFloat)] {
+            if let wordLayout { return wordLayout }
+            var rightOf: [CGFloat] = [-.infinity, -.infinity]
+            let laid = words.sorted { $0.start < $1.start }.map { word in
+                let middle = (word.start + word.end) / 2
+                let outside = !speech.contains { $0.contains(middle) }
+                let x = TimelineGeometry.x(for: word.start, scale: scale)
+                let width = (word.text as NSString).size(withAttributes: [.font: Self.wordFont]).width
+                let row = rightOf.firstIndex { $0 + 3 <= x }
+                if let row { rightOf[row] = x + width }
+                return (word, outside, row, max(width, TimelineGeometry.x(for: word.end, scale: scale) - x))
+            }
+            wordLayout = laid
+            return laid
+        }
+
+        /// What a word's label says: the word, when, how sure Whisper is,
+        /// and whether the step found speech there.
+        static func wordLabel(_ word: HeardWord, outside: Bool) -> String {
+            "「\(word.text)」 \(StepTimeline.readout(word.start))–\(StepTimeline.readout(word.end))"
+                + " · Whisper \(String(format: "%.2f", word.probability))"
+                + (outside ? " · outside the speech found" : "")
         }
 
         override func setFrameSize(_ newSize: NSSize) {
@@ -519,6 +568,10 @@ struct TimelineCanvas: NSViewRepresentable {
                 let area = rect(range, in: band)
                 guard area.width > 0, area.height > 0 else { continue }
                 labels[addToolTip(area, owner: self, userData: nil)] = (area, region.label)
+            }
+            for (word, outside, _, width) in layWords() {
+                let area = NSRect(x: TimelineGeometry.x(for: word.start, scale: scale), y: lane.minY, width: max(width, 2), height: lane.height)
+                labels[addToolTip(area, owner: self, userData: nil)] = (area, Self.wordLabel(word, outside: outside))
             }
         }
 
@@ -584,6 +637,7 @@ struct TimelineCanvas: NSViewRepresentable {
                 path.lineWidth = 1
                 path.stroke()
             }
+            drawWords(in: dirtyRect)
             drawRuler(in: dirtyRect)
             // The pointer, put there or going with the video: one look.
             if let at = playhead ?? cursor {
@@ -601,6 +655,24 @@ struct TimelineCanvas: NSViewRepresentable {
                 mark.line(to: NSPoint(x: x, y: 6))
                 mark.close()
                 mark.fill()
+            }
+        }
+
+        private func drawWords(in dirtyRect: NSRect) {
+            let lane = lane
+            guard !words.isEmpty, lane.intersects(dirtyRect) else { return }
+            for (word, outside, row, width) in layWords() {
+                let x = TimelineGeometry.x(for: word.start, scale: scale)
+                guard x <= dirtyRect.maxX, x + width >= dirtyRect.minX else { continue }
+                let color = outside ? NSColor.systemOrange : NSColor.white.withAlphaComponent(0.8)
+                color.setFill()
+                rect(word.range, in: NSRect(x: 0, y: lane.minY, width: 0, height: 2)).fill()
+                if let row {
+                    (word.text as NSString).draw(
+                        at: NSPoint(x: x, y: lane.minY + 3 + CGFloat(row) * 12),
+                        withAttributes: [.font: Self.wordFont, .foregroundColor: color]
+                    )
+                }
             }
         }
 

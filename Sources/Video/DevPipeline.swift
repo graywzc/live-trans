@@ -46,6 +46,8 @@ final class DevPipeline {
         var fetched = 0.0
         /// Up to where the step has looked.
         var analysed = 0.0
+        /// Up to where the words have been heard.
+        var worded = 0.0
         var state = "running"
         /// Whether the host was told to hold the step.
         var paused = false
@@ -71,6 +73,8 @@ final class DevPipeline {
     private(set) var speech: [ClosedRange<Double>] = []
     /// What else the step heard, when it is FireRedVAD's.
     private(set) var events = SoundEvents()
+    /// The words Whisper alone hears over the audio, to judge the step by.
+    private(set) var words: [HeardWord] = []
     /// Off at launch, like captioning ahead.
     private(set) var isPaused = true
     /// The stretch of the video picked out on the timeline.
@@ -218,10 +222,11 @@ final class DevPipeline {
 
     /// A job and its findings put in place without a host, for tests and
     /// previews.
-    func show(job: Job, speech: [ClosedRange<Double>], events: SoundEvents = SoundEvents()) {
+    func show(job: Job, speech: [ClosedRange<Double>], events: SoundEvents = SoundEvents(), words: [HeardWord] = []) {
         self.job = job
         self.speech = speech
         self.events = events
+        self.words = words
     }
 
     /// Plays the selected stretch in the Chrome video, which pauses at its
@@ -257,6 +262,7 @@ final class DevPipeline {
             await stopJob()
             speech = []
             events = SoundEvents()
+            words = []
             selection = nil
             return
         }
@@ -280,12 +286,16 @@ final class DevPipeline {
                 ActivityLog.tell("The host had the video's audio from before: no fetch")
             }
             let analysed = status.analysed ?? 0
-            if analysed > updated.analysed || status.state == "done" && analysed != updated.analysed {
+            let worded = status.worded ?? 0
+            if analysed > updated.analysed || status.state == "done" && analysed != updated.analysed
+                || worded > updated.worded {
                 let findings = try await client.stepFindings(job: current.id)
                 guard job?.id == current.id else { return }
                 speech = findings.stretches
                 events = findings.soundEvents
+                words = findings.words ?? []
                 updated.analysed = findings.analysed
+                updated.worded = findings.worded ?? 0
             }
             job = updated
             if status.state == "failed" {
@@ -310,6 +320,7 @@ final class DevPipeline {
             job = Job(id: id, tabID: probe.tabID, page: probe.page, step: step, duration: probe.duration)
             speech = []
             events = SoundEvents()
+            words = []
             selection = nil
             cursor = nil
             cursorArmed = false

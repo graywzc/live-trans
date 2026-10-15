@@ -4,6 +4,7 @@ audio, for looking at what the step does: run with the server's Python,
 and Silero is stood in for by a loudness check, so the test is of the job,
 not of Silero."""
 import io
+import json
 import os
 import tempfile
 import time
@@ -12,6 +13,10 @@ import wave
 import numpy as np
 
 import asr_server as srv
+
+# Whisper is not loaded here: the words a step job hears are made up by
+# the tests that look at them, and none elsewhere.
+srv.heard_words = lambda audio, start=0.0: []
 
 
 def loud_stretches(audio):
@@ -122,7 +127,8 @@ def test_the_speech_step_finds_the_speech_in_the_whole_audio(monkeypatch=None):
     assert abs(job.analysed - 6.0) < 0.01, job.analysed
     status = job.status()
     assert status["step"] == "speech" and status["lines"] == [] and abs(status["analysed"] - 6.0) < 0.01, status
-    assert job.findings() == {"step": "speech", "analysed": 6.0, "speech": [[1.0, 3.0], [4.0, 5.5]]}
+    found = {k: v for k, v in job.findings().items() if k not in ("words", "worded")}
+    assert found == {"step": "speech", "analysed": 6.0, "speech": [[1.0, 3.0], [4.0, 5.5]]}, found
     # Its audio can be heard, a stretch at a time, as a WAV file.
     with wave.open(io.BytesIO(job.wav(1.0, 2.0))) as f:
         assert (f.getnchannels(), f.getsampwidth(), f.getframerate()) == (1, 2, srv.SAMPLE_RATE)
@@ -209,6 +215,44 @@ def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
     assert srv.clear_dev_cache() == 1
     assert os.listdir(cache) == []
     assert srv.clear_dev_cache() == 0
+
+
+def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_off_disk():
+    cache = fresh_cache()
+    original = srv.speech_stretches, srv.heard_words, srv.WORDS_PIECE, srv.WORDS_OVERLAP
+    srv.speech_stretches = loud_stretches
+    srv.WORDS_PIECE, srv.WORDS_OVERLAP = 4.0, 2.0
+    pieces = []
+
+    def heard(audio, start=0.0):
+        # A made-up word a second, each piece on its own clock. (Jobs of
+        # the tests before may still be listening too: theirs are shorter.)
+        pieces.append(audio.size / srv.SAMPLE_RATE)
+        return [(t + 0.1, t + 0.5, f"w{t}", 0.9) for t in range(int(np.ceil(audio.size / srv.SAMPLE_RATE)))]
+
+    srv.heard_words = heard
+    try:
+        url = wav_file(noise_and_silence([(1, False), (6.5, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/x", {}, 8.5, step="speech")
+        wait_for(job, "done")
+        deadline = time.time() + 10
+        while job.worded < 8.5 - 0.01 and time.time() < deadline:
+            time.sleep(0.1)
+    finally:
+        srv.speech_stretches, srv.heard_words, srv.WORDS_PIECE, srv.WORDS_OVERLAP = original
+    # Pieces of 4 s every 2 s: 0-4, 2-6, 4-8, 6-8.5 (the last to the end).
+    assert pieces[-4:] == [4.0, 4.0, 4.0, 2.5], pieces
+    starts = [w[0] for w in job.words]
+    # Each word once, from the piece it starts in the middle of: the first
+    # piece keeps its head, each its middle, the last its tail.
+    assert starts == [0.1, 1.1, 2.1, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1], starts
+    assert [w[2] for w in job.words] == ["w0", "w1", "w2", "w1", "w2", "w1", "w2", "w1", "w2"], job.words
+    assert abs(job.worded - 8.5) < 0.01 and job.status()["worded"] == job.worded
+    found = job.findings()
+    assert found["words"][0] == [0.1, 0.5, "w0", 0.9]
+    with open(os.path.join(cache, os.listdir(cache)[0], "speech.json"), encoding="utf-8") as f:
+        assert "words" not in json.load(f), "no text on disk"
+    srv.clear_dev_cache()
 
 
 def test_the_firered_step_finds_the_speech_with_firered_and_keeps_it_apart():

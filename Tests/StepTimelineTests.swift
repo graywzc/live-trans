@@ -118,10 +118,11 @@ final class StepTimelineTests: XCTestCase {
     /// is 20 points from the left edge.
     private func show(
         scale: Double = 20, selection: ClosedRange<Double>? = nil, events: DevPipeline.SoundEvents = DevPipeline.SoundEvents(),
-        total: Double = 20, reveal: TimelineCanvas.Reveal = TimelineCanvas.Reveal(count: 0, seconds: 0)
+        total: Double = 20, reveal: TimelineCanvas.Reveal = TimelineCanvas.Reveal(count: 0, seconds: 0),
+        words: [HeardWord] = []
     ) {
         let canvas = TimelineCanvas(
-            total: total, fetched: 10, analysed: 10, speech: Self.speech, events: events, finder: "FireRedVAD",
+            total: total, fetched: 10, analysed: 10, speech: Self.speech, events: events, finder: "FireRedVAD", words: words,
             playhead: 2.5, selection: selection,
             scale: scale, onSelect: { [unowned self] in picked.append($0) },
             onPlace: { [unowned self] in placed.append($0) }, onZoom: { _ in }, reveal: reveal
@@ -317,6 +318,45 @@ final class StepTimelineTests: XCTestCase {
         }
         // 100 s at 20 points a second, less half the 480 shown.
         XCTAssertEqual(moved?.contentView.bounds.minX ?? -1, 2000 - 240, accuracy: 1)
+    }
+
+    func testAWordComesAsStartEndTextAndHowSure() throws {
+        let data = Data(#"{"analysed": 3, "speech": [[1, 2]], "words": [[1.2, 1.5, "word", 0.93]], "worded": 30}"#.utf8)
+        let findings = try JSONDecoder().decode(StepFindings.self, from: data)
+        XCTAssertEqual(findings.words, [HeardWord(start: 1.2, end: 1.5, text: "word", probability: 0.93)])
+        XCTAssertEqual(findings.worded, 30)
+        var job = DevPipeline.Job(id: "a", tabID: 1, page: "p", step: .speech, duration: 60)
+        job.fetched = 60
+        job.analysed = 60
+        job.worded = 30
+        job.state = "done"
+        XCTAssertEqual(ActivityView.stepStatus(job), "Step 1 · Speech (Silero) done · fetched to 1:00 · looked to 1:00 of 1:00 · words to 0:30")
+    }
+
+    func testTheWordsAreUnderTheBandWhereTheyWereSaidAndThoseOutsideTheSpeechStandOut() {
+        let words = [
+            HeardWord(start: 1.2, end: 1.6, text: "aa", probability: 0.9),
+            HeardWord(start: 1.3, end: 1.5, text: "bb", probability: 0.8),
+            HeardWord(start: 3.3, end: 3.8, text: "cc", probability: 0.4),
+        ]
+        show(words: words)
+        snapshot("step-timeline-words")
+        let canvas = TestScreen.wait { Self.find(TimelineCanvas.CanvasView.self, in: window.contentView!) }
+        guard let canvas else { return XCTFail("no canvas") }
+        let lane = canvas.lane
+        XCTAssertGreaterThan(lane.height, 20)
+        XCTAssertGreaterThan(lane.minY, canvas.band.maxY, "under the band")
+        XCTAssertEqual(
+            canvas.label(at: NSPoint(x: 25, y: lane.midY)),
+            "「aa」 0:01.20–0:01.60 · Whisper 0.90"
+        )
+        XCTAssertEqual(
+            canvas.label(at: NSPoint(x: 70, y: lane.midY)),
+            "「cc」 0:03.30–0:03.80 · Whisper 0.40 · outside the speech found"
+        )
+        // The word in the pause is drawn orange; the ones in speech are not.
+        XCTAssertTrue(isLit(CGRect(x: 66, y: lane.minY, width: 12, height: lane.height), hue: .orange))
+        XCTAssertFalse(isLit(CGRect(x: 22, y: lane.minY, width: 12, height: lane.height), hue: .orange))
     }
 
     func testThePlayheadIsDrawnWhereTheVideoIs() {

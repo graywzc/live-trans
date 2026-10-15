@@ -32,8 +32,36 @@ struct PrefetchStatus: Decodable, Equatable {
     /// it has looked.
     var step: String?
     var analysed: Double?
+    /// Up to where in the video a dev job has heard the words.
+    var worded: Double?
     /// Whether a dev job's audio came from the host's cache of it.
     var cached: Bool?
+}
+
+/// A word Whisper heard over a dev job's audio: sent as
+/// [start, end, text, probability].
+struct HeardWord: Decodable, Equatable {
+    var start: Double
+    var end: Double
+    var text: String
+    var probability: Double
+
+    init(start: Double, end: Double, text: String, probability: Double) {
+        self.start = start
+        self.end = end
+        self.text = text
+        self.probability = probability
+    }
+
+    init(from decoder: Decoder) throws {
+        var fields = try decoder.unkeyedContainer()
+        start = try fields.decode(Double.self)
+        end = try fields.decode(Double.self)
+        text = try fields.decode(String.self)
+        probability = try fields.decode(Double.self)
+    }
+
+    var range: ClosedRange<Double> { start...max(start, end) }
 }
 
 /// What a dev job's step has found so far.
@@ -45,6 +73,9 @@ struct StepFindings: Decodable, Equatable {
     /// FireRedVAD's step only: where it hears singing, and music with
     /// neither singing nor speech, by kind ("singing", "music"), as pairs.
     var events: [String: [[Double]]]?
+    /// The words Whisper alone hears over the audio, and up to where.
+    var words: [HeardWord]?
+    var worded: Double?
 
     var stretches: [ClosedRange<Double>] { Self.ranges(speech) }
 
