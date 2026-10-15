@@ -16,15 +16,27 @@ struct StepTimeline: View {
     @Environment(Prefetcher.self) private var prefetch
     /// Points per second of the video, kept as its logarithm for the slider.
     @AppStorage("stepTimelineZoom") private var zoom = log(20.0)
+    /// How wide the timeline is shown, for fitting the video to it.
+    @State private var width: CGFloat = 0
+    /// Asks the timeline to bring a moment into view; counted, so asking
+    /// for the same moment again does it again.
+    @State private var reveal = TimelineCanvas.Reveal(count: 0, seconds: 0)
 
+    /// The closest the zoom comes, in points per second; out, it goes as
+    /// far as fitting the whole video, or this, whichever is less.
     static let minimumScale = 4.0
     static let maximumScale = 200.0
+    /// Each press of zoom in or out, by this factor.
+    static let zoomStep = 2.0
 
     var body: some View {
         @Bindable var dev = dev
         let scale = exp(zoom)
         let playhead = prefetch.playhead
         let onJob = dev.isOnJob(playhead)
+        let total = max(dev.job?.duration ?? playhead?.duration ?? 0, dev.job?.fetched ?? 0, 60)
+        let fit = Self.fitScale(width: width, total: total)
+        let range = log(min(Self.minimumScale, fit))...log(Self.maximumScale)
         VStack(spacing: 6) {
             HStack(spacing: 10) {
                 Picker("Step", selection: $dev.step) {
@@ -66,9 +78,33 @@ struct StepTimeline: View {
                     Image(systemName: "trash.slash")
                 }
                 .help("Have the host forget the videos it fetched and the findings it kept for dev mode")
-                Slider(value: $zoom, in: log(Self.minimumScale)...log(Self.maximumScale))
-                    .frame(width: 72)
-                    .help("Zoom")
+                Button {
+                    let line = Self.pointer(
+                        placed: dev.cursorArmed, cursor: dev.cursor, video: onJob ? prefetch.position : nil,
+                        playedFrom: dev.playedFrom
+                    )
+                    if let at = line.playhead ?? line.cursor {
+                        reveal = TimelineCanvas.Reveal(count: reveal.count + 1, seconds: at)
+                    }
+                } label: {
+                    Image(systemName: "scope")
+                }
+                .disabled(dev.cursor == nil && !(onJob && prefetch.position != nil))
+                .help("Scroll to the pointer")
+                Button { zoom = Self.zoomed(zoom, by: 1 / Self.zoomStep, in: range) } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .disabled(zoom <= range.lowerBound + 1e-6)
+                .help("Zoom out")
+                Button { zoom = Self.zoomed(zoom, by: Self.zoomStep, in: range) } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .disabled(zoom >= range.upperBound - 1e-6)
+                .help("Zoom in")
+                Button { zoom = Self.zoomed(log(fit), by: 1, in: range) } label: {
+                    Image(systemName: "arrow.left.and.right.square")
+                }
+                .help("Fit the whole video")
             }
             .font(.caption.monospacedDigit())
             .buttonStyle(.borderless)
@@ -81,16 +117,33 @@ struct StepTimeline: View {
                     playedFrom: dev.playedFrom, now: context.date
                 )
                 TimelineCanvas(
-                    total: max(dev.job?.duration ?? playhead?.duration ?? 0, dev.job?.fetched ?? 0, 60),
+                    total: total,
                     fetched: dev.job?.fetched ?? 0, analysed: dev.job?.analysed ?? 0, speech: dev.speech, events: dev.events,
                     finder: dev.job?.step.finder ?? dev.step.finder,
                     playhead: line.playhead, selection: dev.selection, cursor: line.cursor, scale: scale,
                     onSelect: { dev.selection = $0 },
                     onPlace: { dev.place(cursor: $0) },
-                    onZoom: { zoom = min(max(zoom + log($0), log(Self.minimumScale)), log(Self.maximumScale)) }
+                    onZoom: { zoom = Self.zoomed(zoom, by: $0, in: range) },
+                    reveal: reveal
                 )
             }
+            .background(GeometryReader { geometry in
+                Color.clear
+                    .onAppear { width = geometry.size.width }
+                    .onChange(of: geometry.size.width) { _, new in width = new }
+            })
         }
+    }
+
+    /// The scale that shows `total` seconds in `width` points.
+    static func fitScale(width: CGFloat, total: Double) -> Double {
+        guard width > 0, total > 0 else { return minimumScale }
+        return Double(width) / total
+    }
+
+    /// `zoom`, the logarithm of a scale, times `factor`, kept within `range`.
+    static func zoomed(_ zoom: Double, by factor: Double, in range: ClosedRange<Double>) -> Double {
+        min(max(zoom + log(factor), range.lowerBound), range.upperBound)
     }
 
     /// Where the one line on the timeline is, and whether it goes with the
@@ -311,6 +364,13 @@ struct TimelineCanvas: NSViewRepresentable {
     var onPlace: (Double) -> Void = { _ in }
     /// Called with the factor pinched by.
     var onZoom: (Double) -> Void
+    /// A moment to bring into the middle of what is shown, once per count.
+    var reveal = Reveal(count: 0, seconds: 0)
+
+    struct Reveal: Equatable {
+        var count: Int
+        var seconds: Double
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -377,10 +437,24 @@ struct TimelineCanvas: NSViewRepresentable {
                 scroll.reflectScrolledClipView(scroll.contentView)
             }
         }
+        if reveal.count != context.coordinator.revealed {
+            context.coordinator.revealed = reveal.count
+            // Once laid out: a view just made is not yet as wide as shown.
+            let seconds = reveal.seconds
+            DispatchQueue.main.async { [weak scroll] in
+                guard let scroll, let canvas = scroll.documentView else { return }
+                let shown = scroll.contentView.bounds.width
+                let x = TimelineGeometry.x(for: seconds, scale: scale) - shown / 2
+                scroll.contentView.scroll(to: NSPoint(x: min(max(x, 0), max(canvas.frame.width - shown, 0)), y: 0))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+        }
     }
 
     final class Coordinator {
         var scale = 0.0
+        /// The count of the reveal last done.
+        var revealed = 0
     }
 
     final class CanvasView: NSView, NSViewToolTipOwner {

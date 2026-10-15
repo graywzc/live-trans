@@ -117,13 +117,14 @@ final class StepTimelineTests: XCTestCase {
     /// The canvas fills the window at 20 points per second, so a second
     /// is 20 points from the left edge.
     private func show(
-        scale: Double = 20, selection: ClosedRange<Double>? = nil, events: DevPipeline.SoundEvents = DevPipeline.SoundEvents()
+        scale: Double = 20, selection: ClosedRange<Double>? = nil, events: DevPipeline.SoundEvents = DevPipeline.SoundEvents(),
+        total: Double = 20, reveal: TimelineCanvas.Reveal = TimelineCanvas.Reveal(count: 0, seconds: 0)
     ) {
         let canvas = TimelineCanvas(
-            total: 20, fetched: 10, analysed: 10, speech: Self.speech, events: events, finder: "FireRedVAD",
+            total: total, fetched: 10, analysed: 10, speech: Self.speech, events: events, finder: "FireRedVAD",
             playhead: 2.5, selection: selection,
             scale: scale, onSelect: { [unowned self] in picked.append($0) },
-            onPlace: { [unowned self] in placed.append($0) }, onZoom: { _ in }
+            onPlace: { [unowned self] in placed.append($0) }, onZoom: { _ in }, reveal: reveal
         )
         window.contentView = NSHostingView(
             rootView: canvas.frame(width: Self.size.width, height: Self.size.height).background(Color.black)
@@ -291,6 +292,31 @@ final class StepTimelineTests: XCTestCase {
             if let found = find(type, in: child) { return found }
         }
         return nil
+    }
+
+    func testFittingShowsTheWholeVideoAndZoomStaysInItsRange() {
+        XCTAssertEqual(StepTimeline.fitScale(width: 1440, total: 1440), 1)
+        XCTAssertEqual(StepTimeline.fitScale(width: 0, total: 1440), StepTimeline.minimumScale, "not yet laid out")
+        let range = log(1.0)...log(200.0)
+        XCTAssertEqual(exp(StepTimeline.zoomed(log(20), by: 2, in: range)), 40, accuracy: 1e-9)
+        XCTAssertEqual(exp(StepTimeline.zoomed(log(20), by: 0.5, in: range)), 10, accuracy: 1e-9)
+        XCTAssertEqual(exp(StepTimeline.zoomed(log(1.5), by: 0.5, in: range)), 1, accuracy: 1e-9, "no further out than the fit")
+        XCTAssertEqual(exp(StepTimeline.zoomed(log(150), by: 2, in: range)), 200, accuracy: 1e-9)
+        // Ticks stay apart however far out.
+        XCTAssertGreaterThanOrEqual(TimelineGeometry.tickStep(scale: 0.6) * 0.6, 70)
+    }
+
+    func testScrollingToThePointerPutsItInTheMiddle() {
+        show(total: 200)
+        let scroll = TestScreen.wait { Self.find(NSScrollView.self, in: window.contentView!) }
+        XCTAssertEqual(scroll?.contentView.bounds.minX ?? -1, 0)
+        show(total: 200, reveal: TimelineCanvas.Reveal(count: 1, seconds: 100))
+        let moved = TestScreen.wait { () -> NSScrollView? in
+            let found = Self.find(NSScrollView.self, in: window.contentView!)
+            return found?.contentView.bounds.minX ?? 0 > 0 ? found : nil
+        }
+        // 100 s at 20 points a second, less half the 480 shown.
+        XCTAssertEqual(moved?.contentView.bounds.minX ?? -1, 2000 - 240, accuracy: 1)
     }
 
     func testThePlayheadIsDrawnWhereTheVideoIs() {
