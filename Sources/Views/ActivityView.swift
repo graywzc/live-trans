@@ -114,10 +114,15 @@ struct ActivityView: View {
         if let duration = job.duration, duration > 0 {
             looked += " of \(CaptionRow.timestamp(duration))"
         }
-        return [
+        var parts = [
             "Step \(job.step.title) \(job.paused ? "paused" : job.state)",
             "fetched to \(CaptionRow.timestamp(job.fetched))", looked,
-        ].joined(separator: " · ")
+        ]
+        if job.worded > 0 {
+            parts.append("words to \(CaptionRow.timestamp(job.worded))\(job.aligned ? ", re-timed" : "")")
+        }
+        if job.spoken { parts.append("speakers told apart") }
+        return parts.joined(separator: " · ")
     }
 
     /// "Job 1a2b3c running · fetched to 6:52 · captioned to 6:20 of 24:00"

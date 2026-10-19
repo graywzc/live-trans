@@ -85,6 +85,9 @@ On the GPU machine, once:
 mkdir -p ~/livetrans && cd ~/livetrans
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/asr_server.py
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/silero_vad.onnx
+curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_vad.onnx
+curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_cmvn.ark
+curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_aed.onnx
 python3 -m venv ~/venvs/livetrans
 ~/venvs/livetrans/bin/pip install faster-whisper ctranslate2 numpy
 ollama pull qwen3.5:9b
@@ -95,6 +98,34 @@ ollama pull qwen3.5:9b
 faster-whisper bundles: that one is a re-export of the v6.0 weights, whose
 memory goes dull after half a minute of music or silence and then misses the
 first seconds of speech. `LIVETRANS_SILERO_MODEL` points at another file.
+
+`fireredvad_vad.onnx`, `fireredvad_aed.onnx` and `fireredvad_cmvn.ark` are
+FireRedVAD's non-streaming speech model, its speech/singing/music event
+model and their feature normalisation, the authors' own files (Apache-2.0,
+see `server/fireredvad.LICENSE`). Only the dev step "Speech (FireRedVAD)"
+uses them, to compare with Silero, drawing what the event model hears as
+singing or as music alone over the stretches of speech; without them that
+step fails and nothing else changes. `LIVETRANS_FIRERED_MODEL` points at
+another model file, with `fireredvad_cmvn.ark` beside it.
+
+Dev mode also shows, under its timeline, who speaks when and the words
+Whisper hears, re-timed. Those need two heavier tools, each in its own
+Python beside the server's, set up once on the GPU host with
+`server/devtools/setup.sh` (uv and git needed; about 11 GB with the models,
+which download on first use):
+
+- the words are re-timed by CTC forced alignment with ReazonSpeech's
+  Japanese wav2vec2 (`reazon-research/japanese-wav2vec2-large-rs35kh`,
+  Apache-2.0), since Whisper's own word times run early and lie end to end
+  across pauses;
+- the speakers are told apart by DiariZen
+  (`BUT-FIT/diarizen-wavlm-large-s80-md-v2`; code MIT, weights CC BY-NC
+  4.0, so for personal, non-commercial use).
+
+They go in `~/livetrans/devtools` (`LIVETRANS_DEVTOOLS` points elsewhere).
+Without them the timeline shows Whisper's own word times and no speakers;
+nothing else changes. Only times come back from them, and the words are
+never written to disk.
 
 To caption videos ahead from their own audio, the host also needs `ffmpeg`,
 and `yt-dlp` with a JavaScript runtime for sites like YouTube:

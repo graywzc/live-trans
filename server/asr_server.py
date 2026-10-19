@@ -297,6 +297,62 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
         return texts
 
 
+# Dev mode hears the words over the whole of a step job's audio, with
+# Whisper alone (no speech finder), so the timeline can show where each
+# word was said and a stretch the finder missed or made up can be told by
+# ear: in pieces this long, each overlapping the next by WORDS_OVERLAP, a
+# word owned by the piece it starts nearest the middle of. A piece of 20 s
+# rather than Whisper's own 30: one that opens on a song skipped and
+# smeared the dialogue after it (10 words in 25 s of talk, four of them
+# stretched over seconds, against 60 and none at 20 s).
+WORDS_PIECE = 20.0
+WORDS_OVERLAP = 5.0
+
+
+def heard_words(audio, start=0.0):
+    """The words Whisper hears in `audio`, a piece from `start` seconds in,
+    as [(start, end, text, probability), ...], the times in seconds into
+    the piece, with no speech finder and nothing carried from before."""
+    if audio.size == 0:
+        return []
+    with _asr_lock:
+        segments, _ = _asr.transcribe(
+            audio, language="ja", beam_size=3, word_timestamps=True, condition_on_previous_text=False,
+        )
+        return [
+            (round(w.start, 3), round(w.end, 3), w.word.strip(), round(w.probability, 3))
+            for s in segments for w in (s.words or []) if w.word.strip()
+        ]
+
+
+# Dev mode's heavier tools, each in its own Python beside the server's (see
+# devtools/setup.sh): "align" re-times the words Whisper heard by CTC
+# forced alignment (Whisper's own word times run early and lie end to end
+# across pauses), "diarize" tells the speakers apart. Run as workers that
+# take the audio on stdin and give back times only.
+DEVTOOLS_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEVTOOLS", "~/livetrans/devtools"))
+# A worker that takes longer than this is given up on.
+DEVTOOL_TIMEOUT = 900
+
+
+def run_devtool(name, header, audio):
+    """Runs the dev tool `name` over `audio` (16 kHz mono floats), with
+    `header` told it first, and gives back what it answers; raises
+    RuntimeError when it is not set up or fails."""
+    python = os.path.join(DEVTOOLS_DIR, name, "bin", "python")
+    script = os.path.join(DEVTOOLS_DIR, f"{name}.py")
+    if not (os.path.exists(python) and os.path.exists(script)):
+        raise RuntimeError(f"{name} is not set up in {DEVTOOLS_DIR} (devtools/setup.sh)")
+    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+    request = json.dumps({**header, "samples": audio.size}).encode("utf-8") + b"\n" + pcm
+    env = {**os.environ, "PYANNOTE_METRICS_ENABLED": "0"}
+    done = subprocess.run([python, "-I", script], input=request, capture_output=True, timeout=DEVTOOL_TIMEOUT, env=env)
+    if done.returncode != 0:
+        last = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no message"]
+        raise RuntimeError(f"{name} failed: {last[0][:300]}")
+    return json.loads(done.stdout)
+
+
 # Silero VAD, the authors' own v6.2 ONNX file (MIT, silero_vad.LICENSE),
 # in place of the one faster_whisper bundles: that is a re-export of the
 # v6.0 weights, whose memory goes dull after half a minute or so of music
@@ -342,6 +398,150 @@ class OfficialSilero:
 _silero = OfficialSilero(SILERO_MODEL)
 
 
+# FireRedVAD's non-streaming model, the authors' ONNX file and the feature
+# normalisation it was trained with (Apache-2.0, fireredvad.LICENSE), tried
+# in dev mode against Silero. Its layers each see a bounded stretch of the
+# audio around a frame, nothing carried from further back, so what it says
+# of a moment does not hang on where its reading began, as Silero's does
+# after a loud bed; and it was trained with music as not speech.
+FIRERED_MODEL = os.getenv(
+    "LIVETRANS_FIRERED_MODEL", os.path.join(os.path.dirname(os.path.abspath(__file__)), "fireredvad_vad.onnx")
+)
+FIRERED_CMVN = os.path.join(os.path.dirname(FIRERED_MODEL), "fireredvad_cmvn.ark")
+# The model reads at most this many 10 ms frames at once, as its authors
+# run it.
+FIRERED_CHUNK = 30000
+
+
+def kaldi_fbank(samples):
+    """80-bin log mel filterbank of `samples` (on the int16 scale), one row
+    per 10 ms, as Kaldi computes it with FireRedVAD's options: 25 ms frames
+    with the edges snipped, no dither, the mean taken out, pre-emphasis
+    0.97, the Povey window, a 512-point power spectrum, bins from 20 Hz to
+    8 kHz on Kaldi's mel scale, the log floored at float32's epsilon."""
+    count = 1 + (samples.size - 400) // 160 if samples.size >= 400 else 0
+    if count <= 0:
+        return np.zeros((0, 80), np.float32)
+    window = (0.5 - 0.5 * np.cos(2 * np.pi * np.arange(400) / 399)) ** 0.85
+    mel = lambda f: 1127.0 * np.log(1.0 + f / 700.0)
+    low, high = mel(20.0), mel(8000.0)
+    delta = (high - low) / 81
+    bin_mel = mel(np.arange(256) * SAMPLE_RATE / 512)
+    banks = np.zeros((80, 257))
+    for b in range(80):
+        left, centre, right = low + b * delta, low + (b + 1) * delta, low + (b + 2) * delta
+        rising = (bin_mel > left) & (bin_mel <= centre)
+        falling = (bin_mel > centre) & (bin_mel < right)
+        banks[b, :256][rising] = (bin_mel[rising] - left) / (centre - left)
+        banks[b, :256][falling] = (right - bin_mel[falling]) / (right - centre)
+    out = np.empty((count, 80), np.float32)
+    for first in range(0, count, 20000):
+        rows = np.arange(first, min(first + 20000, count))
+        frames = samples[(rows * 160)[:, None] + np.arange(400)].astype(np.float64)
+        frames -= frames.mean(axis=1, keepdims=True)
+        frames[:, 1:] -= 0.97 * frames[:, :-1].copy()
+        frames[:, 0] -= 0.97 * frames[:, 0]
+        power = np.abs(np.fft.rfft(frames * window, 512)) ** 2
+        out[rows] = np.log(np.maximum(power @ banks.T, np.finfo(np.float32).eps))
+    return out
+
+
+def read_kaldi_cmvn(path):
+    """The means and inverse standard deviations in a Kaldi binary CMVN
+    stats file: two rows of sums and sums of squares, with the count last."""
+    data = open(path, "rb").read()
+    at = data.index(b"\0B") + 2
+    kind = data[at:at + 3]
+    rows = int.from_bytes(data[at + 4:at + 8], "little")
+    cols = int.from_bytes(data[at + 9:at + 13], "little")
+    stats = np.frombuffer(data, dtype="<f8" if kind == b"DM " else "<f4", count=rows * cols, offset=at + 13)
+    stats = stats.reshape(rows, cols).astype(np.float64)
+    count = stats[0, -1]
+    mean = stats[0, :-1] / count
+    variance = np.maximum(stats[1, :-1] / count - mean * mean, 1e-20)
+    return mean, 1.0 / np.sqrt(variance)
+
+
+class FireRedVad:
+    """FireRedVAD standing in for Silero in faster_whisper's speech-timestamp
+    code: called with the padded audio, gives one speech probability per
+    512-sample window, read off the model's 10 ms frames at the middle of
+    each window. `frames` gives the model's own output, a row per 10 ms
+    frame (for the event model: speech, singing, music)."""
+
+    def __init__(self, path, cmvn):
+        self.path = path
+        self.cmvn = cmvn
+        self.session = None
+        self.lock = threading.Lock()
+
+    def frames(self, audio):
+        import onnxruntime
+
+        if self.session is None:
+            with self.lock:
+                if self.session is None:
+                    self.mean, self.istd = read_kaldi_cmvn(self.cmvn)
+                    self.session = onnxruntime.InferenceSession(self.path, providers=["CPUExecutionProvider"])
+        feats = ((kaldi_fbank(audio * 32768.0) - self.mean) * self.istd).astype(np.float32)
+        if not len(feats):
+            return np.zeros((0, 1), dtype=np.float32)
+        return np.concatenate([
+            self.session.run(None, {"feat": feats[None, k:k + FIRERED_CHUNK]})[0][0]
+            for k in range(0, len(feats), FIRERED_CHUNK)
+        ])
+
+    def __call__(self, audio, **kwargs):
+        windows = audio.shape[0] // 512
+        frames = self.frames(audio)[:, 0]
+        if not len(frames):
+            return np.zeros(windows, dtype=np.float32)
+        centres = (np.arange(len(frames)) * 160 + 200) / SAMPLE_RATE
+        return np.interp(np.arange(windows) * 512 / SAMPLE_RATE + 0.016, centres, frames).astype(np.float32)
+
+
+# FireRedVAD's event model, beside it: per 10 ms, how likely speech,
+# singing and music are, each on its own. Shown on the dev timeline over
+# what the speech model found, to tell a song or a score from talk.
+FIRERED_EVENTS_MODEL = os.path.join(os.path.dirname(FIRERED_MODEL), "fireredvad_aed.onnx")
+# Shorter runs of an event are not told, and shorter gaps in one are
+# bridged.
+EVENT_MIN = 0.3
+
+
+def event_runs(on, min_length=EVENT_MIN, bridge=EVENT_MIN):
+    """Where `on`, one flag per 10 ms frame, holds, as [(start, end), ...]
+    in seconds: gaps shorter than `bridge` closed, runs shorter than
+    `min_length` dropped. A frame spans 25 ms from its start."""
+    edges = np.flatnonzero(np.diff(np.r_[0, np.asarray(on, dtype=np.int8), 0]))
+    runs = []
+    for a, b in zip(edges[::2], edges[1::2]):
+        start, end = a * 0.01, (b - 1) * 0.01 + 0.025
+        if runs and start - runs[-1][1] < bridge:
+            runs[-1] = (runs[-1][0], end)
+        else:
+            runs.append((start, end))
+    return [(round(a, 3), round(b, 3)) for a, b in runs if b - a >= min_length]
+
+
+def sound_events(audio):
+    """Where FireRedVAD's event model hears singing, and music with neither
+    singing nor speech, in `audio`: {"singing": [(start, end), ...],
+    "music": [...]}, in seconds."""
+    probs = _firered_events.frames(audio)
+    if probs.shape[1] < 3:
+        return {"singing": [], "music": []}
+    speech, singing, music = probs[:, 0] > 0.5, probs[:, 1] > 0.5, probs[:, 2] > 0.5
+    return {"singing": event_runs(singing), "music": event_runs(music & ~singing & ~speech)}
+
+
+_firered = FireRedVad(FIRERED_MODEL, FIRERED_CMVN)
+_firered_events = FireRedVad(FIRERED_EVENTS_MODEL, FIRERED_CMVN)
+# The model faster_whisper's code scores with on this thread, when not
+# Silero: set for the length of one call.
+_speech_model_here = threading.local()
+
+
 def _use_official_silero():
     """Points faster_whisper's speech-timestamp code at the official model,
     once; its post-processing (thresholds, pauses, padding) is kept."""
@@ -352,7 +552,7 @@ def _use_official_silero():
 
 
 def _official_silero_model():
-    return _silero
+    return getattr(_speech_model_here, "model", None) or _silero
 
 
 def speech_clips(audio):
@@ -896,8 +1096,9 @@ _STOCK_LINE = re.compile(r"ご視聴|ご清聴|チャンネル登録|高評価|�
 PREFETCH_MAX_JOBS = 8
 # The steps of captioning ahead a job can be asked to run on its own, over
 # the whole of its audio, for looking at what the step does: "speech" is
-# the first, Silero finding where the speech is. More to come.
-DEV_STEPS = ("speech",)
+# the first, Silero finding where the speech is, and "speech-firered" the
+# same step with FireRedVAD in Silero's place. More to come.
+DEV_STEPS = ("speech", "speech-firered")
 # A step job looks at the audio again once this much more has arrived.
 DEV_SCAN_STEP = 2.0
 # How much of a job's audio one request may ask for, in seconds.
@@ -912,7 +1113,7 @@ DEV_AUDIO_LIMIT = 120.0
 DEV_CACHE_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEV_CACHE", "~/livetrans/devcache"))
 # Bumped with a step's code, so findings cached by the old code are not
 # taken for the new one's.
-STEP_VERSIONS = {"speech": "silero-6.2-whole-1"}
+STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-whole-2", "speakers": "diarizen-large-v2-1"}
 
 
 class DevCache:
@@ -951,9 +1152,12 @@ class DevCache:
         return found if found.get("version") == STEP_VERSIONS.get(step) else None
 
     def save_findings(self, step, findings):
+        """Keeps what `step` found, but not the words heard: no text the
+        server hears is kept on disk."""
         os.makedirs(self.dir, exist_ok=True)
+        kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step == "speakers"}
         with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
-            json.dump({**findings, "version": STEP_VERSIONS.get(step)}, f)
+            json.dump({**kept, "version": STEP_VERSIONS.get(step)}, f)
 
 
 def clear_dev_cache():
@@ -1012,16 +1216,21 @@ def resolve_media_url(url, page):
 PREFETCH_CUT_LEAD = 0.3
 
 
-def speech_stretches(audio):
+def speech_stretches(audio, model=None):
     """Where the speech is in `audio`, as [(start, end), ...] in seconds:
-    Silero's, with every pause of GRID_PAUSE_MIN or more kept and measured
-    as it is, unpadded (its padding would take most of a second off each)."""
+    Silero's, or `model`'s in its place, with every pause of GRID_PAUSE_MIN
+    or more kept and measured as it is, unpadded (its padding would take
+    most of a second off each)."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
     _use_official_silero()
-    found = get_speech_timestamps(
-        audio, VadOptions(min_silence_duration_ms=int(GRID_PAUSE_MIN * 1000), speech_pad_ms=0)
-    )
+    _speech_model_here.model = model
+    try:
+        found = get_speech_timestamps(
+            audio, VadOptions(min_silence_duration_ms=int(GRID_PAUSE_MIN * 1000), speech_pad_ms=0)
+        )
+    finally:
+        _speech_model_here.model = None
     return [(s["start"] / SAMPLE_RATE, s["end"] / SAMPLE_RATE) for s in found]
 
 
@@ -1541,9 +1750,26 @@ class PrefetchJob:
             os.path.join(tempfile.gettempdir(), f"livetrans-clock-{uuid.uuid4().hex}.crc"), self.offset)
         self.ready = self.offset
         # The speech step's findings: where the speech is, in seconds of
-        # the video, and up to where in it Silero has looked.
+        # the video, and up to where in it Silero (or FireRedVAD) has looked.
         self.speech = []
         self.analysed = self.offset
+        # The FireRedVAD step's sound events, by kind ("singing", "music"):
+        # where they are, in seconds of the video.
+        self.events = {}
+        # A step job's words, as Whisper alone hears them, in seconds of
+        # the video, and up to where it has listened: in memory only, as
+        # every text the server hears.
+        self.words = []
+        self.worded = self.offset
+        # Whether the words have been re-timed by the aligner, and each
+        # word's piece and place in it, for that: the pieces as heard,
+        # (start, length, words), the times within the piece.
+        self.aligned = False
+        self.word_refs = []
+        self.word_pieces = []
+        # Who speaks when, as DiariZen tells the voices apart: (start, end,
+        # "S1"), in seconds of the video; None until it has run.
+        self.speakers = None
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
         self.cache = DevCache(page, url) if step and self.offset == 0 else None
@@ -1556,6 +1782,9 @@ class PrefetchJob:
         self.started = time.time()
         threading.Thread(target=self._fetch, daemon=True).start()
         threading.Thread(target=self._analyse if step else self._transcribe, daemon=True).start()
+        if step:
+            threading.Thread(target=self._hear_words, daemon=True).start()
+            threading.Thread(target=self._tell_speakers, daemon=True).start()
 
     @property
     def fetched(self):
@@ -1710,7 +1939,7 @@ class PrefetchJob:
         """The job's step run over the whole of its audio, from the start,
         and again as more arrives, so what it finds is seen whole rather
         than batch by batch: `speech`, Silero's stretches, as the
-        transcription would have them."""
+        transcription would have them; `speech-firered`, FireRedVAD's."""
         looked = -1.0
         while not self.stop_event.is_set() and self.state == "running":
             with self.audio_lock:
@@ -1722,6 +1951,7 @@ class PrefetchJob:
             if done and self.cached and looked < 0 and (kept := self.cache.load_findings(self.step)):
                 # Found over this very audio by this very step before.
                 self.speech = [tuple(s) for s in kept.get("speech", [])]
+                self.events = {k: [tuple(s) for s in v] for k, v in kept.get("events", {}).items()}
                 self.analysed = float(kept.get("analysed", self.offset))
                 self.state = "done"
                 print(f"prefetch {self.id}: {self.step} step from the cache, {len(self.speech)} stretches", flush=True)
@@ -1749,16 +1979,114 @@ class PrefetchJob:
                 audio = self.audio.copy()
             t0 = time.time()
             try:
-                found = speech_stretches(audio) if audio.size else []
+                if not audio.size:
+                    found = []
+                elif self.step == "speech-firered":
+                    found = speech_stretches(audio, model=_firered)
+                    events = sound_events(audio)
+                else:
+                    found = speech_stretches(audio)
             except Exception as exc:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return
             self.speech = [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in found]
+            if self.step == "speech-firered" and audio.size:
+                self.events = {
+                    kind: [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in runs]
+                    for kind, runs in events.items()
+                }
             self.analysed = self.offset + audio.size / SAMPLE_RATE
             looked = have
             # Looking again takes longer the more there is; let the fetch
             # get ahead rather than look all the time.
             time.sleep(min(3 * (time.time() - t0), 10))
+
+    def _hear_words(self):
+        """Whisper over all the audio, a piece at a time as it arrives, for
+        the words on the timeline; the GPU is let go between pieces."""
+        start = 0.0
+        while not self.stop_event.is_set() and self.state in ("running", "done"):
+            with self.audio_lock:
+                have = self.fetched
+                done = self.fetch_done
+            if self.paused.is_set() or (not done and have < start + WORDS_PIECE):
+                time.sleep(0.5)
+                continue
+            if start >= have:
+                return
+            with self.audio_lock:
+                piece = self.audio[int(start * SAMPLE_RATE):int((start + WORDS_PIECE) * SAMPLE_RATE)].copy()
+            try:
+                heard = heard_words(piece)
+            except Exception as exc:
+                print(f"prefetch {self.id}: words: {type(exc).__name__}: {exc}", flush=True)
+                return
+            end = start + piece.size / SAMPLE_RATE
+            last = end >= have and done
+            # A word is the piece's when it starts in its middle; the first
+            # piece keeps its head and the last its tail.
+            low = 0.0 if start == 0 else WORDS_OVERLAP / 2
+            high = piece.size / SAMPLE_RATE if last else WORDS_PIECE - WORDS_OVERLAP / 2
+            self.word_pieces.append((start, piece.size / SAMPLE_RATE, heard))
+            for k, (a, b, text, p) in enumerate(heard):
+                if low <= a < high:
+                    self.words.append((round(self.offset + start + a, 3), round(self.offset + start + b, 3), text, p))
+                    self.word_refs.append((len(self.word_pieces) - 1, k))
+            self.worded = self.offset + (end if last else start + high)
+            if last:
+                self._align_words()
+                return
+            start += WORDS_PIECE - WORDS_OVERLAP
+
+    def _align_words(self):
+        """The words re-timed by the aligner, once all are heard; Whisper's
+        own times stay when it is not set up or fails."""
+        with self.audio_lock:
+            audio = self.audio.copy()
+        pieces = [{"start": s, "length": n, "words": [list(w) for w in heard]} for s, n, heard in self.word_pieces]
+        try:
+            timed = run_devtool("align", {"pieces": pieces}, audio)["pieces"]
+        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            print(f"prefetch {self.id}: words not re-timed: {exc}", flush=True)
+            return
+        words = list(self.words)
+        for i, (piece, k) in enumerate(self.word_refs):
+            new = timed[piece][k] if piece < len(timed) and k < len(timed[piece]) else None
+            if new:
+                start = self.word_pieces[piece][0]
+                words[i] = (round(self.offset + start + new[0], 3), round(self.offset + start + new[1], 3), *words[i][2:])
+        self.words = words
+        self.aligned = True
+        print(f"prefetch {self.id}: words re-timed", flush=True)
+
+    def _tell_speakers(self):
+        """Who speaks when, once all the audio is in: DiariZen over the whole
+        of it, or what it found before over this very audio."""
+        while not self.stop_event.is_set() and self.state in ("running", "done"):
+            with self.audio_lock:
+                done = self.fetch_done
+            if done:
+                break
+            time.sleep(0.5)
+        else:
+            return
+        if self.cache and (kept := self.cache.load_findings("speakers")):
+            self.speakers = [tuple(s) for s in kept.get("speakers", [])]
+            return
+        with self.audio_lock:
+            audio = self.audio.copy()
+        try:
+            found = run_devtool("diarize", {}, audio)["segments"]
+        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            print(f"prefetch {self.id}: speakers: {exc}", flush=True)
+            return
+        self.speakers = [(round(self.offset + a, 3), round(self.offset + b, 3), who) for a, b, who in found]
+        print(f"prefetch {self.id}: {len({s[2] for s in self.speakers})} speakers told apart", flush=True)
+        if self.cache:
+            try:
+                self.cache.save_findings("speakers", {"speakers": [list(s) for s in self.speakers]})
+            except OSError as exc:
+                print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
 
     def wav(self, start, end):
         """The fetched audio from `start` to `end` of the video, as a WAV
@@ -1840,13 +2168,28 @@ class PrefetchJob:
             "lines": self.lines[since:],
             "step": self.step,
             "analysed": round(self.analysed, 2),
+            "worded": round(self.worded, 2),
+            "aligned": self.aligned,
+            "speakers": self.speakers is not None,
             "cached": self.cached,
+            # Whether the audio is still coming: a dev job's is kept for the
+            # next step only once its fetch has ended unstopped.
+            "fetching": not self.fetch_done,
         }
 
     def findings(self):
-        """What the step has found so far: the stretches of speech, and up
-        to where it has looked."""
-        return {"step": self.step, "analysed": round(self.analysed, 2), "speech": [list(s) for s in self.speech]}
+        """What the step has found so far: the stretches of speech, up to
+        where it has looked, and for FireRedVAD the sound events it heard."""
+        found = {"step": self.step, "analysed": round(self.analysed, 2), "speech": [list(s) for s in self.speech]}
+        if self.events:
+            found["events"] = {kind: [list(s) for s in runs] for kind, runs in self.events.items()}
+        if self.step:
+            found["words"] = [list(w) for w in self.words]
+            found["worded"] = round(self.worded, 2)
+            found["aligned"] = self.aligned
+        if self.speakers is not None:
+            found["speakers"] = [list(s) for s in self.speakers]
+        return found
 
 
 def start_prefetch(url, page, headers, duration, start=0.0, step=None):

@@ -32,8 +32,66 @@ struct PrefetchStatus: Decodable, Equatable {
     /// it has looked.
     var step: String?
     var analysed: Double?
+    /// Up to where in the video a dev job has heard the words.
+    var worded: Double?
+    /// Whether a dev job's words have been re-timed by the aligner, and
+    /// whether its speakers have been told apart.
+    var aligned: Bool?
+    var speakers: Bool?
     /// Whether a dev job's audio came from the host's cache of it.
     var cached: Bool?
+    /// Whether the audio is still being fetched. A server that does not
+    /// say keeps nothing of a fetch it was stopped in.
+    var fetching: Bool?
+}
+
+/// A word Whisper heard over a dev job's audio: sent as
+/// [start, end, text, probability].
+struct HeardWord: Decodable, Equatable {
+    var start: Double
+    var end: Double
+    var text: String
+    var probability: Double
+
+    init(start: Double, end: Double, text: String, probability: Double) {
+        self.start = start
+        self.end = end
+        self.text = text
+        self.probability = probability
+    }
+
+    init(from decoder: Decoder) throws {
+        var fields = try decoder.unkeyedContainer()
+        start = try fields.decode(Double.self)
+        end = try fields.decode(Double.self)
+        text = try fields.decode(String.self)
+        probability = try fields.decode(Double.self)
+    }
+
+    var range: ClosedRange<Double> { start...max(start, end) }
+}
+
+/// A stretch one speaker holds, as DiariZen tells the voices apart: sent
+/// as [start, end, "S1"], the speakers named by how much they speak.
+struct SpeakerTurn: Decodable, Equatable {
+    var start: Double
+    var end: Double
+    var speaker: String
+
+    init(start: Double, end: Double, speaker: String) {
+        self.start = start
+        self.end = end
+        self.speaker = speaker
+    }
+
+    init(from decoder: Decoder) throws {
+        var fields = try decoder.unkeyedContainer()
+        start = try fields.decode(Double.self)
+        end = try fields.decode(Double.self)
+        speaker = try fields.decode(String.self)
+    }
+
+    var range: ClosedRange<Double> { start...max(start, end) }
 }
 
 /// What a dev job's step has found so far.
@@ -42,9 +100,25 @@ struct StepFindings: Decodable, Equatable {
     var analysed: Double
     /// Where the speech is, as [start, end] pairs in seconds of the video.
     var speech: [[Double]]
+    /// FireRedVAD's step only: where it hears singing, and music with
+    /// neither singing nor speech, by kind ("singing", "music"), as pairs.
+    var events: [String: [[Double]]]?
+    /// The words Whisper alone hears over the audio, and up to where;
+    /// whether their times are the aligner's rather than Whisper's.
+    var words: [HeardWord]?
+    var worded: Double?
+    var aligned: Bool?
+    /// Who speaks when, as DiariZen tells the voices apart.
+    var speakers: [SpeakerTurn]?
 
-    var stretches: [ClosedRange<Double>] {
-        speech.compactMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
+    var stretches: [ClosedRange<Double>] { Self.ranges(speech) }
+
+    var soundEvents: DevPipeline.SoundEvents {
+        DevPipeline.SoundEvents(singing: Self.ranges(events?["singing"] ?? []), music: Self.ranges(events?["music"] ?? []))
+    }
+
+    private static func ranges(_ pairs: [[Double]]) -> [ClosedRange<Double>] {
+        pairs.compactMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
     }
 }
 
