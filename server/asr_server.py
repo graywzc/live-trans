@@ -75,6 +75,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -550,6 +551,23 @@ def translate_text(ja):
     return _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)
 
 
+def _ollama_answer_cap(text):
+    """Tokens an answer about `text` may run to: its sentences copied and
+    translated take about one per Japanese character plus the English,
+    well under four per character in all."""
+    return 4 * len(text) + 200
+
+
+def _is_timeout(exc):
+    """A request that took too long, as against ollama not being there."""
+    import socket
+    import urllib.error
+
+    if isinstance(exc, urllib.error.URLError):
+        exc = exc.reason
+    return isinstance(exc, (TimeoutError, socket.timeout))
+
+
 def _ollama_generate(text, timeout, prompt=_OLLAMA_PROMPT):
     global _ollama_supports_think
     import urllib.error
@@ -560,7 +578,10 @@ def _ollama_generate(text, timeout, prompt=_OLLAMA_PROMPT):
         "prompt": prompt + text,
         "stream": False,
         "keep_alive": OLLAMA_KEEP_ALIVE,
-        "options": {"temperature": 0},
+        # The answer is the text again with its English, a few times as
+        # long; now and then the model starts explaining the text instead
+        # and does not stop, and without a cap that runs on to the timeout.
+        "options": {"temperature": 0, "num_predict": _ollama_answer_cap(text)},
     }
     if _ollama_supports_think:
         payload["think"] = False
@@ -774,6 +795,12 @@ def translate_ollama(segments):
             for segment in segments
         ]
     except Exception as exc:
+        if _is_timeout(exc):
+            # Slow this once (the GPU shared, a long answer): the rest of the
+            # session still has its translator. Turned off here, a single
+            # stall left every caption after it without English.
+            print(f"ollama took too long ({exc}); not translated as a whole", flush=True)
+            return None
         _ollama_ok = False
         print(f"ollama translation failed ({exc}); "
               "falling back to whisper task=translate", flush=True)
@@ -860,6 +887,12 @@ PREFETCH_SCAN_STEP = 1.0
 # What the transcription of a batch is told of the one before, so a name
 # carries over; Whisper reads at most ~224 tokens of prompt.
 PREFETCH_PROMPT_CHARS = 120
+# Whisper's stock inventions over music or silence: a video's closing
+# thanks, a request to subscribe, a subtitler's credit. A line holding one
+# is dropped, and so kept out of the prompt for what follows, where it
+# invites more of the same (on six episodes, invented lines 181 -> 114 and
+# the error rate 19.5% -> 15.8%).
+_STOCK_LINE = re.compile(r"ご視聴|ご清聴|チャンネル登録|高評価|字幕(作成|制作|提供)|最後までご覧")
 PREFETCH_MAX_JOBS = 8
 # The steps of captioning ahead a job can be asked to run on its own, over
 # the whole of its audio, for looking at what the step does: "speech" is
@@ -1394,7 +1427,89 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False):
             if told:
                 tell(f"{'heard again ' if within else ''}{clock(start)}–{clock(end)}  {text}\n"
                      f"   starts: {grid.reasons.get(a) or '?'} · ends: {grid.reasons.get(b) or '?'}")
-    return lines
+    return [line for line in lines if not _STOCK_LINE.search(line["ja"])]
+
+
+class PacketClock:
+    """Where the audio a fetch decoded sits in the video.
+
+    The audio of an HLS stream often has short gaps in its timestamps where
+    one segment meets the next (on one site 154 of them, 10.5 s in a
+    24-minute episode). Decoded to raw samples the gaps close up, so the
+    samples' own clock (the offset plus samples heard) falls behind the
+    video's, and every caption timed by it came that much early. The
+    samples are left as they are (filled with silence or stretched to take
+    the gaps up, Whisper heard them worse: 25-27% of characters wrong
+    against 15-17%); ffmpeg lists each audio packet's timestamp beside them
+    (framecrc, to `path`), and times cross between the two clocks by it.
+    The file holds numbers only and is removed once read to its end."""
+
+    def __init__(self, path, offset):
+        self.path = path
+        self.offset = offset
+        self.tb = None
+        self.video = []    # where each packet begins in the video
+        self.at = []       # and on the samples' clock
+        self.length = []   # its duration, seconds
+        self.pos = 0
+        self.lock = threading.Lock()
+
+    def _read(self):
+        try:
+            with open(self.path, encoding="ascii", errors="replace") as f:
+                f.seek(self.pos)
+                for line in f:
+                    if not line.endswith("\n"):
+                        break
+                    self.pos += len(line)
+                    if line.startswith("#tb 0:"):
+                        num, den = line.split(":", 1)[1].strip().split("/")
+                        self.tb = int(num) / int(den)
+                    elif not line.startswith("#") and self.tb:
+                        fields = line.split(",")
+                        pts, length = int(fields[2]) * self.tb, int(fields[3]) * self.tb
+                        if not self.video:
+                            self.first = pts
+                        self.video.append(self.offset + pts - self.first)
+                        self.at.append(self.at[-1] + self.length[-1] if self.at else self.offset)
+                        self.length.append(length)
+        except OSError:
+            pass
+
+    def finish(self):
+        """The fetch is over: what is left of the list read, the file gone."""
+        with self.lock:
+            self._read()
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+
+    def _lookup(self, times, t):
+        """The packet that `t` lies in, on the clock of `times`."""
+        import bisect
+
+        if os.path.exists(self.path):
+            self._read()
+        return max(bisect.bisect_right(times, t) - 1, 0) if times else None
+
+    def to_video(self, t):
+        """`t` on the samples' clock, in seconds of the video."""
+        with self.lock:
+            k = self._lookup(self.at, t)
+            return t if k is None else self.video[k] + (t - self.at[k])
+
+    def to_samples(self, v):
+        """`v`, seconds of the video, on the samples' clock; a moment in a
+        gap goes to the end of the packet before it."""
+        with self.lock:
+            k = self._lookup(self.video, v)
+            if k is None:
+                return v
+            into = v - self.video[k]
+            if k + 1 < len(self.video):
+                into = min(into, self.length[k])
+            return self.at[k] + into
 
 
 class PrefetchJob:
@@ -1418,6 +1533,12 @@ class PrefetchJob:
         self.lines = []
         self.text = ""
         self.grid = CutGrid()
+        # The grid, the audio and `ready` are on the samples' clock; the
+        # lines, and the times asked for, are the video's (see PacketClock).
+        # A dev step's job keeps the one clock, as its audio may come from
+        # the cache.
+        self.clock = None if step else PacketClock(
+            os.path.join(tempfile.gettempdir(), f"livetrans-clock-{uuid.uuid4().hex}.crc"), self.offset)
         self.ready = self.offset
         # The speech step's findings: where the speech is, in seconds of
         # the video, and up to where in it Silero has looked.
@@ -1445,6 +1566,16 @@ class PrefetchJob:
         self.stop_event.set()
         if self.process and self.process.poll() is None:
             self.process.kill()
+        if self.clock:
+            self.clock.finish()
+
+    def _video(self, t):
+        return self.clock.to_video(t) if self.clock else t
+
+    def _on_video_clock(self, lines):
+        for line in lines:
+            line["start"], line["end"] = round(self._video(line["start"]), 2), round(self._video(line["end"]), 2)
+        return lines
 
     def retire(self):
         """Stopped for another stretch of the same video. What it captioned
@@ -1496,6 +1627,11 @@ class PrefetchJob:
             # tried; the audio needs no keyframe to be decoded from.
             *(["-ss", f"{self.offset:.3f}", "-copyts", "-seek2any", "1"] if self.offset > 0 else []), "-i", media,
             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-",
+            # Beside the samples, the decoded frames' own timestamps (see
+            # PacketClock): the same decode as the samples, cut at the same
+            # place by a seek, where packets copied as they are begin up to
+            # a few tenths of a second before it.
+            *(["-map", "0:a:0", "-f", "framecrc", self.clock.path] if self.clock else []),
         ]
         print(f"prefetch {self.id}: fetching", flush=True)
         try:
@@ -1511,6 +1647,8 @@ class PrefetchJob:
             with self.audio_lock:
                 self.audio = np.concatenate([self.audio, samples])
         self.process.wait()
+        if self.clock:
+            self.clock.finish()
         if self.process.returncode not in (0, None) and not self.stop_event.is_set() and self.fetched < 1:
             self.fail(f"ffmpeg: {self.process.stderr.read().decode(errors='replace').strip()[-200:]}")
             return
@@ -1648,7 +1786,8 @@ class PrefetchJob:
         it there."""
         t0 = time.time()
         self.grid.add_speech(speech, start, end, end_reason=reason)
-        lines = hear_pieces(self.grid, audio, start, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:])
+        lines = self._on_video_clock(
+            hear_pieces(self.grid, audio, start, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:]))
         ja = "".join(line["ja"] for line in lines)
         if self.stop_event.is_set():
             # Stopped while this was heard: its audio may be let go already.
@@ -1664,7 +1803,10 @@ class PrefetchJob:
         them, so a sentence is heard whole; only those pieces' lines come
         back. Only the speech of the pieces is decoded, so `vad` (once
         asking for that, for a gap in the captions that may be music)
-        changes nothing."""
+        changes nothing. `start` and `end` are times in the video."""
+        before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
+        if self.clock:
+            start, end = self.clock.to_samples(start), self.clock.to_samples(end)
         pieces = self.grid.pieces(start, end)
         if not pieces:
             return []
@@ -1672,12 +1814,11 @@ class PrefetchJob:
         with self.audio_lock:
             from_sample = int(max(low - self.offset, 0) * SAMPLE_RATE)
             audio = self.audio[from_sample:int(max(high - self.offset, 0) * SAMPLE_RATE)].copy()
-        before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
         t0 = time.time()
         began = self.offset + from_sample / SAMPLE_RATE
-        lines = hear_pieces(
+        lines = self._on_video_clock(hear_pieces(
             self.grid, audio, began, beam_size=10, prompt="".join(before), within=(pieces[0][0], pieces[-1][1])
-        )
+        ))
         print(f"prefetch {self.id}: {start:.1f}-{end:.1f}s heard again, {len(lines)} lines in {time.time() - t0:.1f}s",
               flush=True)
         return lines
@@ -1690,11 +1831,11 @@ class PrefetchJob:
             "error": self.error,
             "duration": self.duration,
             "start": round(self.offset, 2),
-            "fetched": round(self.offset + self.fetched, 2),
+            "fetched": round(self._video(self.offset + self.fetched), 2),
             # Loudness of the last second fetched, on the int16 scale: a
             # fetch that yields silence is a fetch of the wrong thing.
             "level": round(float(np.sqrt(np.mean(last * last))) * 32768, 1) if last.size else 0,
-            "ready": round(self.ready, 2),
+            "ready": round(self._video(self.ready), 2),
             "count": len(self.lines),
             "lines": self.lines[since:],
             "step": self.step,
