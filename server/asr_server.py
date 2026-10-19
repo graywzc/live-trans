@@ -2172,6 +2172,9 @@ class PrefetchJob:
             "aligned": self.aligned,
             "speakers": self.speakers is not None,
             "cached": self.cached,
+            # Whether the audio is still coming: a dev job's is kept for the
+            # next step only once its fetch has ended unstopped.
+            "fetching": not self.fetch_done,
         }
 
     def findings(self):

@@ -167,6 +167,23 @@ def test_a_step_job_begins_where_it_was_told_to():
     assert job.status()["start"] == 1.5
 
 
+def test_a_job_says_while_its_audio_is_still_coming():
+    # The app waits on this before switching a dev job to another step, as
+    # the host keeps the audio for the next step only once a fetch has
+    # ended unstopped.
+    fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = loud_stretches
+    try:
+        path = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        job = srv.PrefetchJob(path, "file", {}, 3.0, step="speech")
+        assert job.status()["fetching"] is True
+        wait_for(job, "done")
+    finally:
+        srv.speech_stretches = original
+    assert job.status()["fetching"] is False
+
+
 def test_only_a_known_step_runs():
     try:
         srv.PrefetchJob("x", "file", {}, None, step="grammar")

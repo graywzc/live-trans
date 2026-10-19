@@ -40,6 +40,9 @@ struct PrefetchStatus: Decodable, Equatable {
     var speakers: Bool?
     /// Whether a dev job's audio came from the host's cache of it.
     var cached: Bool?
+    /// Whether the audio is still being fetched. A server that does not
+    /// say keeps nothing of a fetch it was stopped in.
+    var fetching: Bool?
 }
 
 /// A word Whisper heard over a dev job's audio: sent as

@@ -117,9 +117,13 @@ final class DevPipeline {
     private var loop: Task<Void, Never>?
     private var isTicking = false
     private var lastProbe = Date.distantPast
-    /// Pages the host could not fetch or run the step over; not tried
-    /// again until the mode is switched or the app relaunched.
+    /// Pages the host could not fetch or run a step over, with the step:
+    /// not tried again with that step until the app is relaunched. Another
+    /// step may still work there (FireRedVAD fails where its files are
+    /// missing, Silero does not).
     private var failedPages: Set<String> = []
+
+    private static func failure(_ page: String, _ step: Step) -> String { "\(step.rawValue) \(page)" }
 
     /// Whether the app is in dev mode: see `SidePanel.isDev`.
     var isDev: @MainActor () -> Bool = { false }
@@ -259,7 +263,7 @@ final class DevPipeline {
         guard let current = job else {
             guard !isPaused, Date().timeIntervalSince(lastProbe) >= Self.probeInterval else { return }
             lastProbe = Date()
-            guard let probe = await video.probeMedia(), probe.isFetchable, !failedPages.contains(probe.page) else {
+            guard let probe = await video.probeMedia(), probe.isFetchable, !failedPages.contains(Self.failure(probe.page, step)) else {
                 return
             }
             await startJob(for: probe, client: client)
@@ -267,7 +271,19 @@ final class DevPipeline {
         }
         if current.step != step {
             // Another step was chosen: this job goes, and the next tick
-            // starts the chosen one.
+            // starts the chosen one over the audio the host kept. The host
+            // keeps it only once the fetch has ended unstopped, so while the
+            // audio is still coming the job is held (the GPU let go, the
+            // fetch going on) and the switch waits for it.
+            if let status = try? await client.prefetchStatus(job: current.id, since: 0), status.fetching == true {
+                guard job?.id == current.id else { return }
+                job?.fetched = max(status.fetched, 0)
+                if !current.paused, (try? await client.setPrefetch(job: current.id, paused: true)) != nil {
+                    job?.paused = true
+                    ActivityLog.tell("Step \(step.title) starts once the video is fetched")
+                }
+                return
+            }
             await stopJob()
             speech = []
             events = SoundEvents()
@@ -314,7 +330,7 @@ final class DevPipeline {
             job = updated
             if status.state == "failed" {
                 ActivityLog.tell("Step \(current.step.title) failed: \(status.error ?? "unknown")")
-                failedPages.insert(current.page)
+                failedPages.insert(Self.failure(current.page, current.step))
                 job = nil
             }
         } catch {
@@ -344,7 +360,7 @@ final class DevPipeline {
             print("step \(step.rawValue) \(id): \(probe.mediaURL ?? probe.page)")
         } catch {
             ActivityLog.tell("Step \(step.title) could not start: \(error.localizedDescription)")
-            failedPages.insert(probe.page)
+            failedPages.insert(Self.failure(probe.page, step))
         }
     }
 
