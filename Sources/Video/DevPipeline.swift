@@ -17,6 +17,9 @@ final class DevPipeline {
         case speech
         /// The same, with FireRedVAD in Silero's place.
         case speechFireRed = "speech-firered"
+        /// The same, with FireRedVAD and pyannote's segmentation model
+        /// averaged.
+        case speechMean = "speech-mean"
 
         var id: String { rawValue }
 
@@ -24,6 +27,7 @@ final class DevPipeline {
             switch self {
             case .speech: "1 · Speech (Silero)"
             case .speechFireRed: "1 · Speech (FireRedVAD)"
+            case .speechMean: "1 · Speech (FireRedVAD + pyannote)"
             }
         }
 
@@ -32,6 +36,7 @@ final class DevPipeline {
             switch self {
             case .speech: "Silero"
             case .speechFireRed: "FireRedVAD"
+            case .speechMean: "FireRedVAD and pyannote together"
             }
         }
     }
@@ -74,7 +79,7 @@ final class DevPipeline {
     private(set) var job: Job?
     /// Where the speech is, as the step found it.
     private(set) var speech: [ClosedRange<Double>] = []
-    /// What else the step heard, when it is FireRedVAD's.
+    /// What else the step heard, when FireRedVAD is in it.
     private(set) var events = SoundEvents()
     /// The words Whisper alone hears over the audio, to judge the step by.
     private(set) var words: [HeardWord] = []

@@ -1,5 +1,6 @@
 """The speech finder runs Silero's own v6.2 model, or FireRedVAD in its
-place for the dev step: run with the server's Python, `python test_vad.py`.
+place for the dev step, or FireRedVAD and pyannote's segmentation-3.0
+averaged: run with the server's Python, `python test_vad.py`.
 No real speech is needed to check the plumbing: silence scores near zero,
 the model answers one probability per 32 ms window, and faster_whisper's
 post-processing is fed from it."""
@@ -118,6 +119,43 @@ def test_firered_scores_a_minute_in_well_under_a_second():
     srv._firered(audio[:16000])
     t0 = time.time()
     srv._firered(audio)
+    assert time.time() - t0 < 2.0
+
+
+def test_the_segmentation_file_is_sherpa_onnx_s_conversion():
+    digest = hashlib.sha256(open(os.path.join(HERE, "pyannote_segmentation3.onnx"), "rb").read()).hexdigest()
+    assert digest.startswith("220ad67ca923bef2"), digest
+
+
+def test_segmentation_answers_one_probability_per_window_and_silence_scores_nothing():
+    for seconds in (3, 25.3):
+        audio = np.zeros(int(srv.SAMPLE_RATE * seconds) + 100, dtype=np.float32)
+        frames = srv._segmentation.frames(audio)
+        assert frames.shape == (audio.size // srv.SEGMENTATION_FRAME,), frames.shape
+        probs = srv._segmentation(audio)
+        assert probs.shape == (audio.size // 512,), probs.shape
+        assert float(probs.max()) < 0.1, float(probs.max())
+    assert srv._segmentation(np.zeros(200, dtype=np.float32)).shape == (0,)
+
+
+def test_the_mean_is_taken_window_by_window():
+    class Constant:
+        def __init__(self, value):
+            self.value = value
+
+        def __call__(self, audio, **kwargs):
+            return np.full(audio.shape[0] // 512, self.value, dtype=np.float32)
+
+    probs = srv.MeanOfModels(Constant(0.2), Constant(0.8))(np.zeros(5000, dtype=np.float32))
+    assert probs.shape == (9,) and np.allclose(probs, 0.5), probs
+    assert srv.speech_stretches(np.zeros(srv.SAMPLE_RATE * 2, dtype=np.float32), model=srv._firered_and_segmentation) == []
+
+
+def test_segmentation_scores_a_minute_in_well_under_a_second():
+    audio = (np.random.default_rng(1).standard_normal(srv.SAMPLE_RATE * 60) * 0.01).astype(np.float32)
+    srv._segmentation(audio[:16000])
+    t0 = time.time()
+    srv._segmentation(audio)
     assert time.time() - t0 < 2.0
 
 

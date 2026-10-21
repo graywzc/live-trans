@@ -100,7 +100,7 @@ struct StepFindings: Decodable, Equatable {
     var analysed: Double
     /// Where the speech is, as [start, end] pairs in seconds of the video.
     var speech: [[Double]]
-    /// FireRedVAD's step only: where it hears singing, and music with
+    /// The steps with FireRedVAD in them only: where it hears singing, and music with
     /// neither singing nor speech, by kind ("singing", "music"), as pairs.
     var events: [String: [[Double]]]?
     /// The words Whisper alone hears over the audio, and up to where;

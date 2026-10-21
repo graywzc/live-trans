@@ -537,6 +537,94 @@ def sound_events(audio):
 
 _firered = FireRedVad(FIRERED_MODEL, FIRERED_CMVN)
 _firered_events = FireRedVad(FIRERED_EVENTS_MODEL, FIRERED_CMVN)
+
+
+# pyannote's segmentation-3.0, as sherpa-onnx converted it to ONNX (MIT,
+# pyannote_segmentation3.LICENSE), tried in dev mode averaged with
+# FireRedVAD: on one episode the mean missed 16 words where FireRedVAD
+# alone missed 23, for the same time called speech wrongly, though it
+# bridges more short pauses. The model reads 10 s at a time and says, per
+# 270 samples, how likely each of up to three speakers is to be talking.
+SEGMENTATION_MODEL = os.getenv(
+    "LIVETRANS_SEGMENTATION_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyannote_segmentation3.onnx"),
+)
+SEGMENTATION_WINDOW = 160000
+SEGMENTATION_FRAME = 270
+SEGMENTATION_FRAMES = 589
+# The middle of the model's first frame, in samples: its receptive field
+# is 991 samples wide.
+SEGMENTATION_FIRST_CENTRE = 495.5
+# Windows start this far apart, and where they overlap their frames are
+# averaged, the middle of each window weighed most, as pyannote does.
+SEGMENTATION_HOP = SAMPLE_RATE
+SEGMENTATION_BATCH = 32
+
+
+class PyannoteSegmentation:
+    """segmentation-3.0 standing in for Silero in faster_whisper's
+    speech-timestamp code: called with the padded audio, gives one speech
+    probability per 512-sample window, that of anyone talking (1 - P(nobody)
+    of the model's seven classes), read off its frames at the middle of
+    each window."""
+
+    def __init__(self, path):
+        self.path = path
+        self.session = None
+        self.lock = threading.Lock()
+
+    def frames(self, audio):
+        """1 - P(nobody) per model frame, over all of `audio`."""
+        import onnxruntime
+
+        if self.session is None:
+            with self.lock:
+                if self.session is None:
+                    self.session = onnxruntime.InferenceSession(self.path, providers=["CPUExecutionProvider"])
+        count = audio.size // SEGMENTATION_FRAME
+        if not count:
+            return np.zeros(0, dtype=np.float32)
+        starts = list(range(0, max(audio.size - SEGMENTATION_WINDOW, 0) + 1, SEGMENTATION_HOP))
+        if starts[-1] + SEGMENTATION_WINDOW < audio.size:
+            starts.append(audio.size - SEGMENTATION_WINDOW)
+        total = np.zeros(count + SEGMENTATION_FRAMES)
+        weight = np.zeros(count + SEGMENTATION_FRAMES)
+        hamming = np.hamming(SEGMENTATION_FRAMES)
+        for first in range(0, len(starts), SEGMENTATION_BATCH):
+            batch = starts[first:first + SEGMENTATION_BATCH]
+            windows = np.zeros((len(batch), 1, SEGMENTATION_WINDOW), dtype=np.float32)
+            for row, start in enumerate(batch):
+                piece = audio[start:start + SEGMENTATION_WINDOW]
+                windows[row, 0, :piece.size] = piece
+            talking = 1 - np.exp(self.session.run(None, {"x": windows})[0][..., 0])
+            for start, row in zip(batch, talking):
+                at = int(round(start / SEGMENTATION_FRAME))
+                total[at:at + len(row)] += row * hamming[:len(row)]
+                weight[at:at + len(row)] += hamming[:len(row)]
+        return (total / np.maximum(weight, 1e-9))[:count].astype(np.float32)
+
+    def __call__(self, audio, **kwargs):
+        windows = audio.shape[0] // 512
+        frames = self.frames(audio)
+        if not len(frames):
+            return np.zeros(windows, dtype=np.float32)
+        centres = (np.arange(len(frames)) * SEGMENTATION_FRAME + SEGMENTATION_FIRST_CENTRE) / SAMPLE_RATE
+        return np.interp(np.arange(windows) * 512 / SAMPLE_RATE + 0.016, centres, frames).astype(np.float32)
+
+
+class MeanOfModels:
+    """Several speech models standing in for Silero together: per window,
+    the mean of what they say."""
+
+    def __init__(self, *models):
+        self.models = models
+
+    def __call__(self, audio, **kwargs):
+        return np.mean([model(audio) for model in self.models], axis=0).astype(np.float32)
+
+
+_segmentation = PyannoteSegmentation(SEGMENTATION_MODEL)
+_firered_and_segmentation = MeanOfModels(_firered, _segmentation)
 # The model faster_whisper's code scores with on this thread, when not
 # Silero: set for the length of one call.
 _speech_model_here = threading.local()
@@ -1096,9 +1184,13 @@ _STOCK_LINE = re.compile(r"ご視聴|ご清聴|チャンネル登録|高評価|�
 PREFETCH_MAX_JOBS = 8
 # The steps of captioning ahead a job can be asked to run on its own, over
 # the whole of its audio, for looking at what the step does: "speech" is
-# the first, Silero finding where the speech is, and "speech-firered" the
-# same step with FireRedVAD in Silero's place. More to come.
-DEV_STEPS = ("speech", "speech-firered")
+# the first, Silero finding where the speech is, "speech-firered" the same
+# step with FireRedVAD in Silero's place, and "speech-mean" with the mean
+# of FireRedVAD and pyannote's segmentation model. More to come.
+DEV_STEPS = ("speech", "speech-firered", "speech-mean")
+# The steps whose finder includes FireRedVAD, which also tell what its
+# event model hears.
+FIRERED_STEPS = ("speech-firered", "speech-mean")
 # A step job looks at the audio again once this much more has arrived.
 DEV_SCAN_STEP = 2.0
 # How much of a job's audio one request may ask for, in seconds.
@@ -1113,7 +1205,12 @@ DEV_AUDIO_LIMIT = 120.0
 DEV_CACHE_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEV_CACHE", "~/livetrans/devcache"))
 # Bumped with a step's code, so findings cached by the old code are not
 # taken for the new one's.
-STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-whole-2", "speakers": "diarizen-large-v2-1"}
+STEP_VERSIONS = {
+    "speech": "silero-6.2-whole-1",
+    "speech-firered": "firered-vad-whole-2",
+    "speech-mean": "firered-seg30-mean-1",
+    "speakers": "diarizen-large-v2-1",
+}
 
 
 class DevCache:
@@ -1955,7 +2052,8 @@ class PrefetchJob:
         """The job's step run over the whole of its audio, from the start,
         and again as more arrives, so what it finds is seen whole rather
         than batch by batch: `speech`, Silero's stretches, as the
-        transcription would have them; `speech-firered`, FireRedVAD's."""
+        transcription would have them; `speech-firered`, FireRedVAD's;
+        `speech-mean`, those of FireRedVAD and segmentation-3.0 averaged."""
         looked = -1.0
         while not self.stop_event.is_set() and self.state == "running":
             with self.audio_lock:
@@ -1997,8 +2095,9 @@ class PrefetchJob:
             try:
                 if not audio.size:
                     found = []
-                elif self.step == "speech-firered":
-                    found = speech_stretches(audio, model=_firered)
+                elif self.step in FIRERED_STEPS:
+                    model = _firered if self.step == "speech-firered" else _firered_and_segmentation
+                    found = speech_stretches(audio, model=model)
                     events = sound_events(audio)
                 else:
                     found = speech_stretches(audio)
@@ -2006,7 +2105,7 @@ class PrefetchJob:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return
             self.speech = [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in found]
-            if self.step == "speech-firered" and audio.size:
+            if self.step in FIRERED_STEPS and audio.size:
                 self.events = {
                     kind: [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in runs]
                     for kind, runs in events.items()

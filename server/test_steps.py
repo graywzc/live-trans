@@ -404,6 +404,33 @@ def test_the_firered_step_finds_the_speech_with_firered_and_keeps_it_apart():
     srv.clear_dev_cache()
 
 
+def test_the_mean_step_finds_the_speech_with_both_models_and_tells_the_events():
+    cache = fresh_cache()
+    original = srv.speech_stretches
+    models = []
+
+    def found(audio, model=None):
+        models.append(model)
+        return loud_stretches(audio)
+
+    srv.speech_stretches = found
+    events = srv.sound_events
+    srv.sound_events = lambda audio: {"singing": [], "music": [(0.2, 0.9)]}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/w", {}, 3.0, step="speech-mean")
+        wait_for(job, "done", seconds=10)
+    finally:
+        srv.speech_stretches = original
+        srv.sound_events = events
+    assert models and set(models) == {srv._firered_and_segmentation}, models
+    assert srv._firered_and_segmentation.models == (srv._firered, srv._segmentation)
+    assert job.speech == [(1.0, 2.0)], job.speech
+    assert job.findings()["step"] == "speech-mean"
+    assert job.findings()["events"] == {"singing": [], "music": [[0.2, 0.9]]}
+    srv.clear_dev_cache()
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
