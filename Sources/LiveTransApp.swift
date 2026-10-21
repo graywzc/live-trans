@@ -59,7 +59,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         devPipeline.start()
         prefetcher.isDev = { [panel] in panel.isDev }
         devPipeline.isDev = { [panel] in panel.isDev }
-        panel.onDevChange = { [activity] in activity.isEnabled = $0 }
+        panel.onDevChange = { [activity, engine] isDev in
+            activity.isEnabled = isDev
+            // In dev mode the host fetches the video itself: the Mac's audio
+            // is not heard, and the sound output is left alone.
+            engine.listensToMac = !isDev
+        }
         activity.follow { [engine] in engine.client }
         panel.applyLaunchArgument()
     }

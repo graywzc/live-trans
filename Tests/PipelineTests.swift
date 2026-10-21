@@ -504,3 +504,20 @@ final class RehearingMergeTests: XCTestCase {
         XCTAssertFalse(CaptionEngine.isCaptioned(existing, from: VideoMoment(tabID: 2, url: "u", seconds: 441.5), spoken: 1))
     }
 }
+
+@MainActor
+final class CaptionEngineListeningTests: XCTestCase {
+    func testTheMacsAudioIsHeardUnlessToldOtherwise() {
+        XCTAssertTrue(CaptionEngine().listensToMac)
+    }
+
+    func testTurningTheMacsAudioOffWhileIdleOnlyRemembersIt() {
+        // Not captioning, there is nothing to stop: the engine starts without
+        // the Mac's audio when it does start.
+        let engine = CaptionEngine()
+        engine.listensToMac = false
+        XCTAssertFalse(engine.listensToMac)
+        XCTAssertEqual(engine.status, .idle)
+        XCTAssertFalse(engine.isRunning)
+    }
+}
