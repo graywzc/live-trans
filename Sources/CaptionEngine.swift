@@ -49,6 +49,20 @@ final class CaptionEngine {
     private(set) var client: ASRClient?
     private(set) var serverCanPrefetch = false
 
+    /// Whether the Mac's own audio is heard (BlackHole, or a microphone),
+    /// with the sound output routed for it. Off in dev mode, where the host
+    /// fetches the video by itself and nothing on the Mac needs to listen:
+    /// no input is opened and the output is left alone, so nothing can fight
+    /// the Mac over it. Changed while captioning, the audio is started or
+    /// stopped and the server kept.
+    var listensToMac = true {
+        didSet {
+            // Before the server is reached, run() does as this says once it is.
+            guard listensToMac != oldValue, isRunning, let client else { return }
+            if listensToMac { startListening(client: client) } else { stopListening() }
+        }
+    }
+
     var isRunning: Bool {
         switch status {
         case .idle, .failed: false
@@ -92,6 +106,8 @@ final class CaptionEngine {
     private var source: AudioSource?
     private let outputRouter = OutputRouter()
     private var runTask: Task<Void, Never>?
+    /// Hearing the Mac's audio, while `listensToMac`.
+    private var listenTask: Task<Void, Never>?
     private var finalWorker: Task<Void, Never>?
     private var partialTask: Task<Void, Never>?
     private var finals: AsyncStream<(id: Int, audio: Data)>.Continuation?
@@ -121,9 +137,11 @@ final class CaptionEngine {
     @discardableResult
     func stop() -> Task<Void, Never> {
         runTask?.cancel()
+        listenTask?.cancel()
         finalWorker?.cancel()
         partialTask?.cancel()
         runTask = nil
+        listenTask = nil
         finalWorker = nil
         partialTask = nil
         finals?.finish()
@@ -178,16 +196,10 @@ final class CaptionEngine {
     }
 
     private func run() async {
-        let source = makeSource()
-        if source is InputDeviceSource {
+        if listensToMac, makeSource() is InputDeviceSource {
             status = .connecting("Checking audio input…")
-            // macOS gates every input device behind the microphone
-            // permission, BlackHole included.
-            guard await AVCaptureDevice.requestAccess(for: .audio) else {
-                status = .failed(
-                    "Audio input access is off. Enable LiveTrans in "
-                        + "System Settings > Privacy & Security > Microphone."
-                )
+            guard await Self.mayHearInput() else {
+                status = .failed(Self.inputAccessOff)
                 return
             }
         }
@@ -218,6 +230,39 @@ final class CaptionEngine {
         }
         guard !Task.isCancelled else { return }
 
+        // A fresh segmenter numbers its utterances from zero again.
+        segmenter = UtteranceSegmenter()
+        partialUtterance = -1
+        settledUtterance = -1
+        startFinalWorker(client: client)
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleDisplaySleepDisabled], reason: "Live captioning"
+        )
+        status = .listening(serverLabel)
+        if listensToMac { startListening(client: client) }
+    }
+
+    /// macOS gates every input device behind the microphone permission,
+    /// BlackHole included.
+    private static func mayHearInput() async -> Bool {
+        await AVCaptureDevice.requestAccess(for: .audio)
+    }
+
+    private static let inputAccessOff =
+        "Audio input access is off. Enable LiveTrans in System Settings > Privacy & Security > Microphone."
+
+    private func startListening(client: ASRClient) {
+        guard listenTask == nil else { return }
+        listenTask = Task { [weak self] in await self?.listen(client: client) }
+    }
+
+    private func listen(client: ASRClient) async {
+        let source = makeSource()
+        if source is InputDeviceSource, !(await Self.mayHearInput()) {
+            fail(Self.inputAccessOff)
+            return
+        }
+        guard !Task.isCancelled, listensToMac else { return }
         let frames: AsyncStream<Data>
         do {
             frames = try source.start()
@@ -230,18 +275,7 @@ final class CaptionEngine {
             fail("Could not start audio: \(error.localizedDescription)")
             return
         }
-
         vad = VoiceActivityDetector()
-        // A fresh segmenter numbers its utterances from zero again.
-        segmenter = UtteranceSegmenter()
-        partialUtterance = -1
-        settledUtterance = -1
-        startFinalWorker(client: client)
-        activity = ProcessInfo.processInfo.beginActivity(
-            options: [.userInitiated, .idleDisplaySleepDisabled], reason: "Live captioning"
-        )
-        status = .listening(serverLabel)
-
         for await frame in frames {
             process(frame, client: client)
         }
@@ -250,6 +284,21 @@ final class CaptionEngine {
         if !Task.isCancelled, source is InputDeviceSource {
             fail("The audio input stopped. Check the input device in Settings, then press Start.")
         }
+    }
+
+    /// The Mac's audio let go, the server kept: the input closed and the
+    /// sound output put back.
+    private func stopListening() {
+        listenTask?.cancel()
+        listenTask = nil
+        partialTask?.cancel()
+        partialTask = nil
+        source?.stop()
+        source = nil
+        outputRouter.restore()
+        partialText = ""
+        isSpeaking = false
+        inputLevel = 0
     }
 
     private func fail(_ message: String) {
