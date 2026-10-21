@@ -184,6 +184,38 @@ def test_a_job_says_while_its_audio_is_still_coming():
     assert job.status()["fetching"] is False
 
 
+def test_a_fetch_that_ends_short_of_the_video_is_not_kept():
+    # A link that stops serving partway (its signature run out, say) ends
+    # ffmpeg as if the video were over; kept, every step after ran over
+    # the first minutes only.
+    cache = fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = loud_stretches
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        short = srv.PrefetchJob(url, "https://example.com/short", {}, 60.0, step="speech")
+        wait_for(short, "done")
+        assert short.speech == [(1.0, 2.0)] and not short.cached
+        assert not os.path.exists(os.path.join(short.cache.dir, "audio.s16")), os.listdir(short.cache.dir)
+    finally:
+        srv.speech_stretches = original
+
+
+def test_a_short_audio_kept_by_an_older_server_is_fetched_again():
+    fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = loud_stretches
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        # Kept as if whole: 2 s of a video said to be a minute long.
+        srv.DevCache("https://example.com/old", url).save_audio(srv.np.zeros(2 * srv.SAMPLE_RATE, srv.np.float32), 60.0)
+        job = srv.PrefetchJob(url, "https://example.com/old", {}, 3.0, step="speech")
+        wait_for(job, "done")
+        assert not job.cached and job.speech == [(1.0, 2.0)], (job.cached, job.speech)
+    finally:
+        srv.speech_stretches = original
+
+
 def test_only_a_known_step_runs():
     try:
         srv.PrefetchJob("x", "file", {}, None, step="grammar")
@@ -213,25 +245,25 @@ def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
     srv.speech_stretches = loud_stretches
     try:
         url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
-        first = srv.PrefetchJob(url, "https://example.com/v", {}, 7.0, step="speech")
+        first = srv.PrefetchJob(url, "https://example.com/v", {}, 3.0, step="speech")
         wait_for(first, "done")
         assert not first.cached and first.speech == [(1.0, 2.0)]
         assert sorted(os.listdir(os.path.join(cache, os.listdir(cache)[0]))) == ["audio.json", "audio.s16", "speech.json"]
         # The same page again, from a link that no longer serves: the audio
         # and the step's findings come from the cache, with no fetch.
         srv.speech_stretches = lambda audio: (_ for _ in ()).throw(AssertionError("the step ran again"))
-        again = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 7.0, step="speech")
+        again = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 3.0, step="speech")
         wait_for(again, "done", seconds=5)
         assert again.cached and again.speech == [(1.0, 2.0)] and abs(again.analysed - 3.0) < 0.05, again.speech
-        assert again.status()["cached"] is True and again.duration == 7.0
+        assert again.status()["cached"] is True and again.duration == 3.0
         # The step's code changed: it runs again, over the cached audio.
         srv.STEP_VERSIONS["speech"] = "silero-whole-test"
         srv.speech_stretches = lambda audio: [(0.5, 2.5)]
-        changed = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 7.0, step="speech")
+        changed = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 3.0, step="speech")
         wait_for(changed, "done", seconds=5)
         assert changed.cached and changed.speech == [(0.5, 2.5)], changed.speech
         # A production job keeps nothing and takes nothing.
-        production = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 7.0)
+        production = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 3.0)
         wait_for(production, "failed", seconds=10)
         assert not production.cached
     finally:

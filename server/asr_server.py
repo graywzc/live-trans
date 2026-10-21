@@ -1119,6 +1119,14 @@ STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-
 class DevCache:
     """What dev mode keeps of one video: see DEV_CACHE_DIR."""
 
+    @staticmethod
+    def is_whole(seconds, duration):
+        """Whether `seconds` of audio are the whole of a video `duration`
+        long (None: not known). Some HLS streams' audio comes up to a few
+        tenths of a second short at each segment's end (about 10 s in a
+        24-minute episode), so within 3%."""
+        return not duration or duration <= 0 or seconds >= duration * 0.97
+
     def __init__(self, page, url):
         self.dir = os.path.join(DEV_CACHE_DIR, hashlib.sha256((page or url).encode("utf-8")).hexdigest()[:16])
 
@@ -1132,6 +1140,10 @@ class DevCache:
         except (OSError, ValueError):
             return None
         if abs(audio.size / SAMPLE_RATE - about.get("seconds", -1)) > 1:
+            return None
+        if not self.is_whole(audio.size / SAMPLE_RATE, about.get("duration")):
+            # A fetch that ended early, kept as if whole by an older server:
+            # every step after it ran over its first minutes only.
             return None
         return audio, about.get("duration")
 
@@ -1885,7 +1897,11 @@ class PrefetchJob:
         if self.duration is None or self.duration <= 0:
             self.duration = self.offset + self.fetched
         print(f"prefetch {self.id}: fetched {self.fetched:.0f}s from {self.offset:.0f}s", flush=True)
-        if self.cache and not self.stop_event.is_set() and self.fetched >= 1:
+        whole = self.process.returncode == 0 and DevCache.is_whole(self.offset + self.fetched, self.duration)
+        if not whole and not self.stop_event.is_set():
+            print(f"prefetch {self.id}: the fetch ended early, at {self.offset + self.fetched:.0f}s of {self.duration:.0f}s"
+                  f" (ffmpeg {self.process.returncode}); not kept", flush=True)
+        if self.cache and whole and not self.stop_event.is_set() and self.fetched >= 1:
             try:
                 with self.audio_lock:
                     audio = self.audio.copy()
