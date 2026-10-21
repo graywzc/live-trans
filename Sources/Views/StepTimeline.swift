@@ -236,6 +236,22 @@ enum TimelineGeometry {
         tickSteps.first { CGFloat($0 * scale) >= apart } ?? tickSteps.last!
     }
 
+    /// Where what is shown starts once the scale goes from `old` to `new`:
+    /// the pointer, when it is in view, stays where it is on screen; else
+    /// the middle of what is shown stays in the middle. Kept within the
+    /// timeline, `width` points wide at the new scale.
+    static func zoomedOrigin(
+        visible: NSRect, pointer: Double?, from old: Double, to new: Double, width: CGFloat
+    ) -> CGFloat {
+        var anchor = (seconds: seconds(at: visible.midX, scale: old), offset: visible.width / 2)
+        if let pointer {
+            let x = self.x(for: pointer, scale: old)
+            if x >= visible.minX, x <= visible.maxX { anchor = (pointer, x - visible.minX) }
+        }
+        let origin = self.x(for: anchor.seconds, scale: new) - anchor.offset
+        return min(max(origin, 0), max(width - visible.width, 0))
+    }
+
     /// What a click at `seconds` picks out: the stretch of speech under it,
     /// else the gap it is in, between the stretches either side, or from
     /// the start, or to where the audio ends. Nil past the audio.
@@ -401,9 +417,7 @@ struct TimelineCanvas: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let canvas = scroll.documentView as? CanvasView else { return }
-        // Zoomed, the middle of what is shown stays in the middle.
         let visible = scroll.contentView.bounds
-        let middle = TimelineGeometry.seconds(at: visible.midX, scale: context.coordinator.scale)
         var redrawAll = canvas.total != total || canvas.fetched != fetched || canvas.analysed != analysed
             || canvas.speech != speech || canvas.events != events || canvas.finder != finder || canvas.words != words
             || canvas.wordsAligned != wordsAligned || canvas.speakers != speakers
@@ -431,9 +445,13 @@ struct TimelineCanvas: NSViewRepresentable {
             redrawAll = true
         }
         if scale != context.coordinator.scale {
+            // Zoomed, the pointer stays where it is on screen, so the
+            // moment it marks is not lost.
+            let x = TimelineGeometry.zoomedOrigin(
+                visible: visible, pointer: playhead ?? cursor, from: context.coordinator.scale, to: scale, width: width
+            )
             context.coordinator.scale = scale
-            let x = TimelineGeometry.x(for: middle, scale: scale) - visible.width / 2
-            scroll.contentView.scroll(to: NSPoint(x: min(max(x, 0), max(width - visible.width, 0)), y: 0))
+            scroll.contentView.scroll(to: NSPoint(x: x, y: 0))
             scroll.reflectScrolledClipView(scroll.contentView)
             redrawAll = true
         }

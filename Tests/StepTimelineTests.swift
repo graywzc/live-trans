@@ -307,6 +307,20 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(TimelineGeometry.tickStep(scale: 0.6) * 0.6, 70)
     }
 
+    func testZoomingKeepsThePointerWhereItIsOnScreen() {
+        let shown = NSRect(x: 1000, y: 0, width: 400, height: 100)
+        // The pointer at 60 s is 200 points in at 20 a second; at 40, the
+        // view starts so it is still 200 points in.
+        XCTAssertEqual(TimelineGeometry.zoomedOrigin(visible: shown, pointer: 60, from: 20, to: 40, width: 10_000), 2400 - 200)
+        XCTAssertEqual(TimelineGeometry.zoomedOrigin(visible: shown, pointer: 60, from: 20, to: 10, width: 10_000), 600 - 200)
+        // Out of view, the middle (60 s) stays in the middle.
+        XCTAssertEqual(TimelineGeometry.zoomedOrigin(visible: shown, pointer: 10, from: 20, to: 40, width: 10_000), 2400 - 200)
+        XCTAssertEqual(TimelineGeometry.zoomedOrigin(visible: shown, pointer: nil, from: 20, to: 10, width: 10_000), 600 - 200)
+        // Never past either end.
+        XCTAssertEqual(TimelineGeometry.zoomedOrigin(visible: shown, pointer: 52, from: 20, to: 1, width: 400), 0)
+        XCTAssertEqual(TimelineGeometry.zoomedOrigin(visible: shown, pointer: 69, from: 20, to: 40, width: 2500), 2100)
+    }
+
     func testScrollingToThePointerPutsItInTheMiddle() {
         show(total: 200)
         let scroll = TestScreen.wait { Self.find(NSScrollView.self, in: window.contentView!) }
