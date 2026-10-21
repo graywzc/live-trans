@@ -216,6 +216,45 @@ def test_a_short_audio_kept_by_an_older_server_is_fetched_again():
         srv.speech_stretches = original
 
 
+def test_what_a_step_found_over_a_short_audio_is_not_taken_for_the_whole():
+    cache = fresh_cache()
+    original = srv.speech_stretches, srv.sound_events
+    srv.speech_stretches = lambda audio, model=None: loud_stretches(audio)
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        kept = srv.DevCache("https://example.com/short", url)
+        # An older server kept 2 s of a 3 s video, and what Silero and
+        # DiariZen found over them, with nothing to say which audio that was.
+        kept.save_audio(srv.np.zeros(2 * srv.SAMPLE_RATE, srv.np.float32), 3.0)
+        with open(os.path.join(kept.dir, "speech.json"), "w") as f:
+            json.dump({"speech": [[0.1, 0.2]], "analysed": 2.0, "version": srv.STEP_VERSIONS["speech"]}, f)
+        with open(os.path.join(kept.dir, "speakers.json"), "w") as f:
+            json.dump({"speakers": [[0.1, 0.2, "S1"]], "version": srv.STEP_VERSIONS["speakers"]}, f)
+        # Another step fetches the whole video again and keeps it.
+        firered = srv.PrefetchJob(url, "https://example.com/short", {}, 3.0, step="speech-firered")
+        wait_for(firered, "done")
+        assert not firered.cached
+        assert "speakers.json" not in os.listdir(kept.dir), "the new audio drops the old findings"
+        # Silero, over the audio now kept: found again, not the 2 s of it.
+        silero = srv.PrefetchJob(url + ".gone", "https://example.com/short", {}, 3.0, step="speech")
+        wait_for(silero, "done", seconds=5)
+        assert silero.cached and silero.speech == [(1.0, 2.0)], silero.speech
+        # And found over the whole of it now, taken from the cache again.
+        srv.speech_stretches = lambda audio, model=None: (_ for _ in ()).throw(AssertionError("the step ran again"))
+        again = srv.PrefetchJob(url + ".gone", "https://example.com/short", {}, 3.0, step="speech")
+        wait_for(again, "done", seconds=5)
+        assert again.cached and again.speech == [(1.0, 2.0)], again.speech
+        assert abs(kept.load_findings("speech")["audio_seconds"] - 3.0) < 0.01
+        # A file from before findings said which audio they were over.
+        found = kept.load_findings("speech")
+        with open(os.path.join(kept.dir, "speech.json"), "w") as f:
+            json.dump({k: v for k, v in found.items() if k != "audio_seconds"}, f)
+        assert kept.load_findings("speech") is None
+    finally:
+        srv.speech_stretches, srv.sound_events = original
+    srv.clear_dev_cache()
+
 def test_only_a_known_step_runs():
     try:
         srv.PrefetchJob("x", "file", {}, None, step="grammar")
@@ -343,7 +382,8 @@ def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
         srv.run_devtool = again_tool
         again = srv.PrefetchJob(url + ".gone", "https://example.com/y", {}, 7.0, step="speech")
         deadline = time.time() + 15
-        while again.speakers is None and time.time() < deadline:
+        # Both come once the audio is in, in either order.
+        while (again.speakers is None or [a[0] for a in asked].count("align") < 2) and time.time() < deadline:
             time.sleep(0.1)
     finally:
         srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.WORDS_PIECE, srv.WORDS_OVERLAP = original

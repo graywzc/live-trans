@@ -1245,20 +1245,40 @@ class DevCache:
         return audio, about.get("duration")
 
     def save_audio(self, audio, duration):
+        """Keeps `audio` for the video, and forgets what the steps found over
+        any audio kept before it."""
         os.makedirs(self.dir, exist_ok=True)
+        for name in os.listdir(self.dir):
+            if name.endswith(".json") and name != "audio.json":
+                os.remove(os.path.join(self.dir, name))
         (np.clip(audio, -1, 1) * 32767).astype("<i2").tofile(os.path.join(self.dir, "audio.s16.part"))
         os.replace(os.path.join(self.dir, "audio.s16.part"), os.path.join(self.dir, "audio.s16"))
         with open(os.path.join(self.dir, "audio.json"), "w", encoding="utf-8") as f:
             json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration}, f)
 
+    def audio_seconds(self):
+        """How long the audio kept for the video is, or None."""
+        try:
+            with open(os.path.join(self.dir, "audio.json"), encoding="utf-8") as f:
+                return json.load(f).get("seconds")
+        except (OSError, ValueError):
+            return None
+
     def load_findings(self, step):
-        """What `step`, at its current version, found over the audio, or None."""
+        """What `step`, at its current version, found over the audio kept
+        now, or None. Findings over other audio (kept before a fetch got the
+        whole video, or by a server that did not say) are not taken."""
         try:
             with open(os.path.join(self.dir, f"{step}.json"), encoding="utf-8") as f:
                 found = json.load(f)
         except (OSError, ValueError):
             return None
-        return found if found.get("version") == STEP_VERSIONS.get(step) else None
+        if found.get("version") != STEP_VERSIONS.get(step):
+            return None
+        seconds = self.audio_seconds()
+        if seconds is None or abs(found.get("audio_seconds", -1) - seconds) > 0.01:
+            return None
+        return found
 
     def save_findings(self, step, findings):
         """Keeps what `step` found, but not the words heard: no text the
@@ -1266,7 +1286,7 @@ class DevCache:
         os.makedirs(self.dir, exist_ok=True)
         kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step == "speakers"}
         with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
-            json.dump({**kept, "version": STEP_VERSIONS.get(step)}, f)
+            json.dump({**kept, "version": STEP_VERSIONS.get(step), "audio_seconds": self.audio_seconds()}, f)
 
 
 def clear_dev_cache():
@@ -1990,7 +2010,6 @@ class PrefetchJob:
         if self.process.returncode not in (0, None) and not self.stop_event.is_set() and self.fetched < 1:
             self.fail(f"ffmpeg: {self.process.stderr.read().decode(errors='replace').strip()[-200:]}")
             return
-        self.fetch_done = True
         if self.duration is None or self.duration <= 0:
             self.duration = self.offset + self.fetched
         print(f"prefetch {self.id}: fetched {self.fetched:.0f}s from {self.offset:.0f}s", flush=True)
@@ -2005,6 +2024,9 @@ class PrefetchJob:
                 self.cache.save_audio(audio, self.duration)
             except OSError as exc:
                 print(f"prefetch {self.id}: not cached: {exc}", flush=True)
+        # Only now, so what the steps find over the whole of it is kept with
+        # the audio it was found over.
+        self.fetch_done = True
 
     def _transcribe(self):
         position = 0.0
