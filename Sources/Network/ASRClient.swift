@@ -43,6 +43,9 @@ struct PrefetchStatus: Decodable, Equatable {
     /// Whether the audio is still being fetched. A server that does not
     /// say keeps nothing of a fetch it was stopped in.
     var fetching: Bool?
+    /// A dev job's captions, made as production would with its step's
+    /// speech finder: "running", "done", or "failed: <why>".
+    var captions: String?
 }
 
 /// A word Whisper heard over a dev job's audio: sent as

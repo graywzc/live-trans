@@ -61,6 +61,10 @@ final class DevPipeline {
         var paused = false
         /// The audio came from the host's cache rather than a fetch.
         var cached = false
+        /// How many of the job's captions are on the list, and what the
+        /// host says of the captions ("running", "done", "failed: ...").
+        var seenLines = 0
+        var captions = "running"
     }
 
     /// What FireRedVAD's event model hears besides speech, drawn over the
@@ -280,7 +284,7 @@ final class DevPipeline {
             // keeps it only once the fetch has ended unstopped, so while the
             // audio is still coming the job is held (the GPU let go, the
             // fetch going on) and the switch waits for it.
-            if let status = try? await client.prefetchStatus(job: current.id, since: 0), status.fetching == true {
+            if let status = try? await client.prefetchStatus(job: current.id, since: current.seenLines), status.fetching == true {
                 guard job?.id == current.id else { return }
                 job?.fetched = max(status.fetched, 0)
                 if !current.paused, (try? await client.setPrefetch(job: current.id, paused: true)) != nil {
@@ -307,8 +311,22 @@ final class DevPipeline {
             }
         }
         do {
-            let status = try await client.prefetchStatus(job: current.id, since: 0)
+            let status = try await client.prefetchStatus(job: current.id, since: current.seenLines)
             guard var updated = job, updated.id == current.id else { return }
+            // The captions the step's speech finder led to, on the caption
+            // list as production's would be.
+            if !status.lines.isEmpty {
+                engine.add(status.lines, tabID: current.tabID, url: current.page, heardAgain: false)
+            }
+            updated.seenLines = status.count
+            if let captions = status.captions, captions != updated.captions {
+                updated.captions = captions
+                if captions == "done" {
+                    ActivityLog.tell("Step \(current.step.title): \(status.count) captions, the whole video")
+                } else if captions.hasPrefix("failed") {
+                    ActivityLog.tell("Step \(current.step.title): captions \(captions)")
+                }
+            }
             updated.fetched = max(status.fetched, 0)
             updated.duration = status.duration ?? updated.duration
             updated.state = status.state
@@ -353,6 +371,8 @@ final class DevPipeline {
                 step: step.rawValue
             )
             job = Job(id: id, tabID: probe.tabID, page: probe.page, step: step, duration: probe.duration)
+            // The list shows this step's captions alone.
+            engine.clear()
             speech = []
             events = SoundEvents()
             words = []

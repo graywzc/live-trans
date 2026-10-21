@@ -1191,6 +1191,16 @@ DEV_STEPS = ("speech", "speech-firered", "speech-mean")
 # The steps whose finder includes FireRedVAD, which also tell what its
 # event model hears.
 FIRERED_STEPS = ("speech-firered", "speech-mean")
+
+
+def step_speech_model(step):
+    """The model a dev step finds the speech with, in Silero's place (None:
+    Silero itself): the step's own stretches, and where its captions'
+    batches are cut."""
+    return {"speech-firered": _firered, "speech-mean": _firered_and_segmentation}.get(step)
+# Whether a step job also captions the video, as production would with the
+# step's speech finder cutting the batches.
+DEV_CAPTIONS = True
 # A step job looks at the audio again once this much more has arrived.
 DEV_SCAN_STEP = 2.0
 # How much of a job's audio one request may ask for, in seconds.
@@ -1871,6 +1881,13 @@ class PrefetchJob:
         self.lines = []
         self.text = ""
         self.grid = CutGrid()
+        # Where the speech is found, for the batches and a step's findings.
+        self.speech_model = step_speech_model(step)
+        # A step job captions the video too, as production would with its
+        # speech finder, the lines kept in memory only: whether that has
+        # reached the end, or failed (the step goes on without captions).
+        self.captioned = False
+        self.caption_error = None
         # The grid, the audio and `ready` are on the samples' clock; the
         # lines, and the times asked for, are the video's (see PacketClock).
         # A dev step's job keeps the one clock, as its audio may come from
@@ -1910,8 +1927,12 @@ class PrefetchJob:
         self.process = None
         self.started = time.time()
         threading.Thread(target=self._fetch, daemon=True).start()
-        threading.Thread(target=self._analyse if step else self._transcribe, daemon=True).start()
+        if not step or DEV_CAPTIONS:
+            threading.Thread(target=self._transcribe, daemon=True).start()
+        else:
+            self.captioned = True
         if step:
+            threading.Thread(target=self._analyse, daemon=True).start()
             threading.Thread(target=self._hear_words, daemon=True).start()
             threading.Thread(target=self._tell_speakers, daemon=True).start()
 
@@ -2029,16 +2050,22 @@ class PrefetchJob:
         self.fetch_done = True
 
     def _transcribe(self):
+        """The captions, a batch at a time as the audio comes. A step job's
+        own state is its step's, which may be done before the captions."""
         position = 0.0
         # How far the audio had come when it was last looked at for a batch.
         looked = -1.0
-        while not self.stop_event.is_set() and self.state == "running":
+        while not self.stop_event.is_set() and self.state in (("running", "done") if self.step else ("running",)):
             with self.audio_lock:
                 have = self.fetched
                 done = self.fetch_done
             if done and have <= position + 0.05:
-                self.state = "done"
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
+                if self.step:
+                    self.captioned = True
+                    tell(f"{self.step}: {len(self.lines)} captions, the whole of the audio")
+                else:
+                    self.state = "done"
                 return
             window_end = min(have, position + PREFETCH_SCAN)
             capped = window_end < have
@@ -2048,7 +2075,7 @@ class PrefetchJob:
             looked = window_end
             with self.audio_lock:
                 window = self.audio[int(position * SAMPLE_RATE):int(window_end * SAMPLE_RATE)].copy()
-            speech = speech_stretches(window)
+            speech = speech_stretches(window, model=self.speech_model)
             batch = choose_batch(speech, window.size / SAMPLE_RATE, more=not done, capped=capped)
             if batch is None:
                 time.sleep(0.25)
@@ -2062,6 +2089,11 @@ class PrefetchJob:
                     reason,
                 )
             except Exception as exc:
+                if self.step:
+                    self.caption_error = f"{type(exc).__name__}: {exc}"
+                    print(f"prefetch {self.id}: captions: {self.caption_error}", flush=True)
+                    tell(f"{self.step}: captions stopped, {self.caption_error}")
+                    return
                 self.fail(f"transcription: {type(exc).__name__}: {exc}")
                 return
             if self.stop_event.is_set():
@@ -2117,12 +2149,10 @@ class PrefetchJob:
             try:
                 if not audio.size:
                     found = []
-                elif self.step in FIRERED_STEPS:
-                    model = _firered if self.step == "speech-firered" else _firered_and_segmentation
-                    found = speech_stretches(audio, model=model)
-                    events = sound_events(audio)
                 else:
-                    found = speech_stretches(audio)
+                    found = speech_stretches(audio, model=self.speech_model)
+                    if self.step in FIRERED_STEPS:
+                        events = sound_events(audio)
             except Exception as exc:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return
@@ -2312,6 +2342,10 @@ class PrefetchJob:
             # Whether the audio is still coming: a dev job's is kept for the
             # next step only once its fetch has ended unstopped.
             "fetching": not self.fetch_done,
+            # A step job's captions: "running", "done" (to the end), or
+            # "failed: <why>".
+            "captions": f"failed: {self.caption_error}" if self.caption_error
+            else "done" if self.captioned else "running",
         }
 
     def findings(self):

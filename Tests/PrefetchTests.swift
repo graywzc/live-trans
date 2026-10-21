@@ -146,6 +146,10 @@ final class PrefetchTests: XCTestCase {
         XCTAssertNil(status.start)
         let later = #"{"state":"running","start":597,"fetched":700,"ready":660.2,"count":0,"lines":[]}"#
         XCTAssertEqual(try JSONDecoder().decode(PrefetchStatus.self, from: Data(later.utf8)).start, 597)
+        // A dev job tells how its captions go; a server from before does not.
+        XCTAssertNil(status.captions)
+        let dev = #"{"state":"done","fetched":90,"ready":90,"count":3,"lines":[],"step":"speech","captions":"failed: timeout"}"#
+        XCTAssertEqual(try JSONDecoder().decode(PrefetchStatus.self, from: Data(dev.utf8)).captions, "failed: timeout")
         XCTAssertEqual(status.state, "running")
         XCTAssertEqual(status.ready, 35.8)
         XCTAssertEqual(status.count, 12)
