@@ -23,14 +23,35 @@ final class OutputRouter {
         }?.uid
     }
 
+    /// How often the output may be taken off the device it was routed to
+    /// within `fightWindow` before routing gives way. macOS can put the
+    /// output back on AirPods the moment a Multi-Output Device starts
+    /// playing through them; moved back each time, the output flipped twice
+    /// a second, and Chrome, reopening its sound on every flip, played the
+    /// video in stalls and jumps.
+    static let fightCount = 3
+    static let fightWindow: TimeInterval = 10
+
+    /// Whether the output being taken away at `times` is a fight rather
+    /// than a choice: `fightCount` of them within `fightWindow` of `now`.
+    static func isFight(_ times: [Date], now: Date) -> Bool {
+        times.filter { now.timeIntervalSince($0) <= fightWindow }.count >= fightCount
+    }
+
     private var captureUID: String?
     /// What the output was before we changed it, and what we changed it to.
     private var original: String?
     private var routed: String?
+    /// When the output was taken off `routed`; and whether routing has
+    /// given way to whatever keeps taking it, for this session.
+    private var takenAway: [Date] = []
+    private var yielded = false
     private var listener: AudioObjectPropertyListenerBlock?
 
     func engage(captureUID: String) {
         self.captureUID = captureUID
+        takenAway = []
+        yielded = false
         reroute()
 
         // Putting AirPods in mid-session makes macOS switch the output to them
@@ -61,11 +82,28 @@ final class OutputRouter {
         }
         original = nil
         routed = nil
+        takenAway = []
+        yielded = false
     }
 
     private func reroute() {
-        guard let captureUID, let output = AudioHardware.defaultOutputUID(),
-              let target = Self.route(output: output, capture: captureUID, aggregates: AudioHardware.aggregates())
+        guard let captureUID, !yielded, let output = AudioHardware.defaultOutputUID() else { return }
+        if let routed, output != routed {
+            let now = Date()
+            takenAway.append(now)
+            takenAway.removeAll { now.timeIntervalSince($0) > Self.fightWindow }
+            if Self.isFight(takenAway, now: now) {
+                yielded = true
+                let name = AudioHardware.name(uid: output) ?? output
+                print("output: taken back to \(name) \(takenAway.count) times in \(Int(Self.fightWindow)) s; left there")
+                ActivityLog.tell(
+                    "The Mac keeps moving the sound back to \(name), so LiveTrans stopped moving it to BlackHole: "
+                        + "live captions won't hear what plays until captioning starts again"
+                )
+                return
+            }
+        }
+        guard let target = Self.route(output: output, capture: captureUID, aggregates: AudioHardware.aggregates())
         else { return }
         guard AudioHardware.setDefaultOutput(uid: target) else { return }
         original = output
