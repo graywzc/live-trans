@@ -182,6 +182,15 @@ final class OutputRouterTests: XCTestCase {
         OutputRouter.route(output: output, capture: capture, aggregates: aggregates)
     }
 
+    func testTheOutputTakenAwayThreeTimesInTenSecondsIsAFight() {
+        let now = Date()
+        let times = [now.addingTimeInterval(-6), now.addingTimeInterval(-3), now]
+        XCTAssertTrue(OutputRouter.isFight(times, now: now))
+        // Twice, or three times spread over more than the window: a choice.
+        XCTAssertFalse(OutputRouter.isFight(Array(times.suffix(2)), now: now))
+        XCTAssertFalse(OutputRouter.isFight([now.addingTimeInterval(-25), now.addingTimeInterval(-12), now], now: now))
+    }
+
     func testPicksTheMultiOutputContainingTheCurrentOutput() {
         XCTAssertEqual(route("airpods-a"), "multi-airpods-a")
         XCTAssertEqual(route("airpods-b"), "multi-airpods-b")
