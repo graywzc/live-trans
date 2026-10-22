@@ -162,6 +162,27 @@ final class PrefetchTests: XCTestCase {
         XCTAssertNil(prefetch.playingCaptionID)
     }
 
+    /// Each official line goes to the caption it overlaps most; one too
+    /// slight an overlap, or none, is left out; a caption may take several.
+    func testOfficialSubtitlesAreMatchedToTheCaptionTheyOverlapMost() {
+        func caption(_ id: Int, _ start: Double, _ end: Double) -> Caption {
+            var moment = VideoMoment(tabID: 1, url: "p", seconds: start)
+            moment.end = end
+            return Caption(id: id, japanese: "あ", ruby: [], english: "a", moment: moment)
+        }
+        let captions = [caption(1, 0, 4), caption(2, 4.2, 8)]
+        let lines = [
+            ReferenceLine(start: 0.5, end: 2, text: "甲"),
+            ReferenceLine(start: 2.2, end: 5, text: "乙"),  // 1.8 s with the first, 0.8 s with the second
+            ReferenceLine(start: 5.5, end: 7, text: "丙"),
+            ReferenceLine(start: 7.95, end: 9, text: "丁"),  // 0.05 s: too slight
+            ReferenceLine(start: 20, end: 21, text: "戊"),
+        ]
+        XCTAssertEqual(DevPipeline.match(lines, to: captions), [1: ["甲", "乙"], 2: ["丙"]])
+        let decoded = try? JSONDecoder().decode(ReferenceLine.self, from: Data(#"{"start":1.5,"end":3,"text":"今天"}"#.utf8))
+        XCTAssertEqual(decoded, ReferenceLine(start: 1.5, end: 3, text: "今天"))
+    }
+
     func testStatusDecodes() throws {
         let json = #"{"state":"running","error":null,"duration":90.5,"fetched":60,"ready":35.8,"level":1200.5,"count":12,"lines":[{"ja":"あ","en":"a","start":35,"end":36}]}"#
         let status = try JSONDecoder().decode(PrefetchStatus.self, from: Data(json.utf8))

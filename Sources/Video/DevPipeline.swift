@@ -85,6 +85,11 @@ final class DevPipeline {
     private(set) var speech: [ClosedRange<Double>] = []
     /// What else the step heard, when FireRedVAD is in it.
     private(set) var events = SoundEvents()
+    /// The episode's official subtitles, when the host has them, to set
+    /// beside the step's captions; and the page they are of.
+    private(set) var reference: [ReferenceLine] = []
+    private(set) var referencePage: String?
+    @ObservationIgnored private var matched: (key: [Int], lines: [Int: [String]]) = ([], [:])
     /// The words Whisper alone hears over the audio, to judge the step by.
     private(set) var words: [HeardWord] = []
     /// Who speaks when, as DiariZen tells the voices apart.
@@ -373,6 +378,13 @@ final class DevPipeline {
             job = Job(id: id, tabID: probe.tabID, page: probe.page, step: step, duration: probe.duration)
             // The list shows this step's captions alone.
             engine.clear()
+            if referencePage != probe.page {
+                referencePage = probe.page
+                reference = await client.reference(page: probe.page)
+                if !reference.isEmpty {
+                    ActivityLog.tell("\(reference.count) official subtitle lines to set beside the captions")
+                }
+            }
             speech = []
             events = SoundEvents()
             words = []
@@ -394,6 +406,36 @@ final class DevPipeline {
         self.job = nil
         player.stop()
         await engine.client?.stopPrefetch(job: job.id)
+    }
+
+    /// The official subtitle lines matched to `caption`, joined, or nil.
+    func official(for caption: Caption) -> String? {
+        guard !reference.isEmpty else { return nil }
+        let key = [engine.captions.count, engine.captions.first?.id ?? -1, engine.captions.last?.id ?? -1, reference.count]
+        if matched.key != key {
+            matched = (key, Self.match(reference, to: engine.captions))
+        }
+        return matched.lines[caption.id].map { $0.joined(separator: " ") }
+    }
+
+    /// Each official line given to the caption it overlaps most in time,
+    /// when they overlap by 0.3 s or half the shorter of the two: by
+    /// caption id, the lines in order. A line overlapping no caption is
+    /// left out.
+    nonisolated static func match(_ lines: [ReferenceLine], to captions: [Caption]) -> [Int: [String]] {
+        var result: [Int: [String]] = [:]
+        for line in lines {
+            var best: (id: Int, overlap: Double)?
+            for caption in captions {
+                guard let moment = caption.moment, let end = moment.end else { continue }
+                let overlap = min(end, line.end) - max(moment.seconds, line.start)
+                let shorter = min(end - moment.seconds, line.end - line.start)
+                guard overlap > 0, overlap >= min(0.3, shorter / 2) else { continue }
+                if best == nil || overlap > best!.overlap { best = (caption.id, overlap) }
+            }
+            if let best { result[best.id, default: []].append(line.text) }
+        }
+        return result
     }
 
     /// "4:05.3", a place in the video to the tenth, as the host tells it.

@@ -510,6 +510,21 @@ def test_a_step_job_captions_the_video_with_its_speech_finder_and_keeps_no_text(
             assert "ことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name
     srv.clear_dev_cache()
 
+def test_the_official_subtitles_of_a_page_are_found_by_its_index():
+    folder = tempfile.mkdtemp()
+    os.makedirs(os.path.join(folder, "site", "ep1"))
+    with open(os.path.join(folder, "index.json"), "w") as f:
+        json.dump({"https://example.com/play/1.html": "site/ep1"}, f)
+    with open(os.path.join(folder, "site", "ep1", "subtitles.tsv"), "w", encoding="utf-8") as f:
+        f.write("index\tstart\tend\ttext\n0\t1.5\t3.0\t-\n1\t4.0\t6.5\t今天下雨了\n2\t7.0\t9.0\t(credits)\n")
+    kept = srv.REFERENCE_DIR
+    srv.REFERENCE_DIR = folder
+    try:
+        assert srv.reference_lines("https://example.com/play/1.html?from=list") == [{"start": 4.0, "end": 6.5, "text": "今天下雨了"}]
+        assert srv.reference_lines("https://example.com/play/2.html") is None
+    finally:
+        srv.REFERENCE_DIR = kept
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

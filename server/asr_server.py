@@ -1572,6 +1572,35 @@ class DevCache:
             json.dump({**kept, "version": STEP_VERSIONS.get(step), "audio_seconds": self.audio_seconds()}, f)
 
 
+# Official subtitles read off episodes for comparing the captions with in dev
+# mode (made by the tools in that folder, kept on this host only):
+# index.json maps a page to its episode's folder, whose subtitles.tsv holds
+# index, start, end and text per line, "-" or "(...)" where there is no
+# dialogue.
+REFERENCE_DIR = os.path.expanduser(os.getenv("LIVETRANS_REFERENCE_DIR", "~/subtitle-reference"))
+
+
+def reference_lines(page):
+    """The official subtitle lines of the episode at `page`, as [{"start",
+    "end", "text"}] in seconds of the video, or None when there are none."""
+    page = (page or "").split("?")[0].split("#")[0]
+    try:
+        with open(os.path.join(REFERENCE_DIR, "index.json"), encoding="utf-8") as f:
+            folder = json.load(f).get(page)
+        if not folder:
+            return None
+        lines = []
+        with open(os.path.join(REFERENCE_DIR, folder, "subtitles.tsv"), encoding="utf-8") as f:
+            next(f)
+            for row in f:
+                _, start, end, text = row.rstrip("\n").split("\t", 3)
+                if text != "-" and not text.startswith("("):
+                    lines.append({"start": float(start), "end": float(end), "text": text})
+        return lines
+    except (OSError, ValueError, StopIteration):
+        return None
+
+
 def clear_dev_cache():
     """Forgets every video dev mode kept; how many there were."""
     try:
@@ -2694,6 +2723,12 @@ class Handler(BaseHTTPRequestHandler):
 
             query = parse_qs(urlparse(self.path).query)
             self._send(200, events_since(int(query.get("since", ["0"])[0])))
+        elif self.path.startswith("/reference"):
+            from urllib.parse import parse_qs, urlparse
+
+            page = parse_qs(urlparse(self.path).query).get("page", [""])[0]
+            lines = reference_lines(page)
+            self._send(200 if lines is not None else 404, {"lines": lines or []})
         elif self.path.startswith("/prefetch/"):
             from urllib.parse import parse_qs, urlparse
 
