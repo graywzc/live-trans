@@ -155,6 +155,22 @@ def test_one_line_left_in_japanese_is_translated_alone_or_left_empty():
     finally:
         srv._ollama_generate = generate
 
+def test_two_lines_given_one_translation_are_translated_again_each_alone():
+    generate = srv._ollama_generate
+    asked = []
+    srv._ollama_generate = lambda text, timeout, prompt=None: asked.append(text) or f"译文{len(asked)}"
+    try:
+        pairs = srv._translate_what_is_left([
+            ("公害ですかああ", "是罗兰交给我的纸。"),
+            ("ローランから渡された紙だ", "是罗兰交给我的纸。"),
+            ("うん", "嗯"), ("うん", "嗯"),
+        ])
+    finally:
+        srv._ollama_generate = generate
+    assert pairs == [("公害ですかああ", "译文1"), ("ローランから渡された紙だ", "译文2"),
+                     ("うん", "嗯"), ("うん", "嗯")], pairs
+    assert asked == ["公害ですかああ", "ローランから渡された紙だ"], "the same words may share a translation"
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

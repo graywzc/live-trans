@@ -1354,12 +1354,18 @@ def translate_ollama(segments):
 
 
 def _translate_what_is_left(pairs):
-    """`pairs` with any line answered with the Japanese again translated by
-    itself once more; one still Japanese after that is left untranslated,
-    rather than shown as its own translation."""
+    """`pairs` with any line answered with the Japanese again, or given the
+    same translation as a different line (the LLM now and then repeats the
+    next sentence's translation for the one before it: two captions with one
+    meaning), translated by itself once more. One still Japanese after that
+    is left untranslated, rather than shown as its own translation."""
+    meanings = collections.defaultdict(set)
+    for ja, en in pairs:
+        if _content(en):
+            meanings[_content(en)].add(_content(ja))
     result = []
     for ja, en in pairs:
-        if _left_in_japanese(en):
+        if _left_in_japanese(en) or len(meanings.get(_content(en), ())) > 1:
             en = _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)
             if _left_in_japanese(en):
                 en = ""
