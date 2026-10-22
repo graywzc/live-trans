@@ -512,6 +512,36 @@ def test_a_step_job_captions_the_video_with_its_speech_finder_and_keeps_no_text(
             assert "ことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name
     srv.clear_dev_cache()
 
+def test_a_step_job_s_captions_are_kept_and_shown_again_without_hearing():
+    fresh_cache()
+    original = srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS
+    calls = []
+
+    def heard(grid, audio, start, **kwargs):
+        calls.append(start)
+        return [{"ja": "ことば", "en": "words", "start": a, "end": b} for a, b in grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)]
+
+    def captions():
+        job = srv.PrefetchJob(url, "https://example.com/k", {}, 3.0, step="speech")
+        deadline = time.time() + 15
+        while not job.captioned and time.time() < deadline:
+            time.sleep(0.1)
+        return job.status()
+
+    srv.speech_stretches, srv.hear_pieces, srv.DEV_CAPTIONS = (lambda audio, model=None: loud_stretches(audio)), heard, True
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        first = captions()
+        made = len(calls)
+        again = captions()
+    finally:
+        srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS = original
+    assert made >= 1 and len(calls) == made, (made, calls)
+    assert again["lines"] == first["lines"] and again["captions"] == "done", (first, again)
+    srv.clear_dev_cache()
+
+
 def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_time():
     cache = fresh_cache()
     original = (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,

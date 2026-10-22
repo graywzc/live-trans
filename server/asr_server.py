@@ -1597,6 +1597,9 @@ STEP_VERSIONS = {
     "speech-mean": "firered-seg30-mean-1",
     "speakers": "diarizen-large-v2-1",
     "others": "nemo-v2-qwen3-asr-1.7b-vibevoice-hf-1",
+    # A step job's captions, kept as "captions-<step>": bumped with the
+    # captioning's code, so captions made by the old code are made again.
+    **{f"captions-{step}": "k2-speaker-cuts-1" for step in DEV_STEPS},
 }
 
 
@@ -1675,9 +1678,10 @@ class DevCache:
 
     def save_findings(self, step, findings):
         """Keeps what `step` found, but not the words heard: no text the
-        server hears is kept on disk, but for what the other recognizers
-        heard over each caption ("others"), kept so dev mode can set them
-        beside the captions without hearing them all again; POST
+        server hears is kept on disk, but for a step job's captions
+        ("captions-<step>") and what the other recognizers heard over each
+        ("others"), kept so dev mode can show them again at once, to look
+        at against the video, rather than making them all again; POST
         /devcache/clear forgets them with the rest."""
         os.makedirs(self.dir, exist_ok=True)
         kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step == "speakers"}
@@ -2543,7 +2547,11 @@ class PrefetchJob:
         """The captions, a batch at a time as the audio comes. A step job's
         own state is its step's, which may be done before the captions. A
         step job's waits for the speakers first (DiariZen needs all the
-        audio), to cut its lines where the speaker changes."""
+        audio), to cut its lines where the speaker changes; or takes the
+        captions made before over the same audio, from the dev cache, and
+        keeps those it makes there."""
+        if self.step and self._captions_from_cache():
+            return
         if self.step and DEV_SPEAKER_CUTS:
             waited = time.time()
             while self.turns is None and not self.stop_event.is_set() and time.time() - waited < DEVTOOL_TIMEOUT:
@@ -2560,6 +2568,11 @@ class PrefetchJob:
             if done and have <= position + 0.05:
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
                 if self.step:
+                    if self.cache and self.cache.audio_seconds():
+                        try:
+                            self.cache.save_findings(f"captions-{self.step}", {"lines": self.lines})
+                        except OSError as exc:
+                            print(f"prefetch {self.id}: captions not cached: {exc}", flush=True)
                     self.captioned = True
                     tell(f"{self.step}: {len(self.lines)} captions, the whole of the audio")
                 else:
@@ -2755,6 +2768,23 @@ class PrefetchJob:
                 self.cache.save_findings("speakers", {"speakers": [list(s) for s in self.speakers]})
             except OSError as exc:
                 print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
+
+    def _captions_from_cache(self):
+        """Whether the captions came from the dev cache: made before by the
+        same code over the same audio, which this job took from the cache."""
+        if not self.cache or not self.cache.audio_seconds():
+            return False
+        while not self.stop_event.is_set() and not self.fetch_done:
+            time.sleep(0.2)
+        kept = self.cache.load_findings(f"captions-{self.step}") if self.cached else None
+        if not kept or not kept.get("lines"):
+            return False
+        self.lines = kept["lines"]
+        self.text = "".join(line["ja"] for line in self.lines)
+        self.captioned = True
+        print(f"prefetch {self.id}: {len(self.lines)} captions from the cache", flush=True)
+        tell(f"{self.step}: {len(self.lines)} captions kept from before")
+        return True
 
     def _hear_others(self):
         """Each caption heard again by DEV_OTHER_HEARERS, one after another,
