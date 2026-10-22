@@ -8,9 +8,15 @@ struct ServerHealth: Decodable, Equatable {
     var ollamaModel: String?
     /// The server can fetch a video's audio ahead and caption it.
     var prefetch: Bool?
+    /// The language it translates into; a server that doesn't say, English.
+    var target: String?
+
+    var translatesInto: ServerConfig.Target {
+        target.flatMap(ServerConfig.Target.init(rawValue:)) ?? .english
+    }
 
     enum CodingKeys: String, CodingKey {
-        case status, asr, device, prefetch
+        case status, asr, device, prefetch, target
         case translationBackend = "translation_backend"
         case ollamaModel = "ollama_model"
     }
@@ -125,6 +131,15 @@ struct StepFindings: Decodable, Equatable {
     }
 }
 
+/// A line of an episode's official subtitles, read off the video and kept
+/// on the host, for dev mode to set beside the captions; in seconds of the
+/// video.
+struct ReferenceLine: Decodable, Equatable {
+    var start: Double
+    var end: Double
+    var text: String
+}
+
 struct CaptionPair: Decodable, Equatable {
     var ja: String
     var en: String
@@ -235,6 +250,21 @@ struct ASRClient {
     }
 
     /// What a dev job's step has found so far.
+    /// The official subtitles of the episode at `page`, when the host has
+    /// them; empty when it has none, or is a server from before.
+    func reference(page: String) async -> [ReferenceLine] {
+        struct Lines: Decodable { var lines: [ReferenceLine] }
+        var components = URLComponents(url: baseURL.appending(path: "reference"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "page", value: page)]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 10
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(Lines.self, from: data)
+        else { return [] }
+        return decoded.lines
+    }
+
     func stepFindings(job: String) async throws -> StepFindings {
         var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/speech"))
         request.timeoutInterval = 20

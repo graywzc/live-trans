@@ -159,6 +159,24 @@ def test_segmentation_scores_a_minute_in_well_under_a_second():
     assert time.time() - t0 < 2.0
 
 
+def test_production_finds_speech_with_firered_and_segmentation_when_installed():
+    import os
+    kept = srv.SEGMENTATION_MODEL, os.environ.get("LIVETRANS_SPEECH")
+    try:
+        os.environ.pop("LIVETRANS_SPEECH", None)
+        assert srv._production_speech_model() is srv._firered_and_segmentation
+        assert srv.step_speech_model(None) is srv.PRODUCTION_SPEECH_MODEL
+        assert srv.step_speech_model("speech") is None, "the Silero step stays Silero"
+        os.environ["LIVETRANS_SPEECH"] = "silero"
+        assert srv._production_speech_model() is None
+        os.environ.pop("LIVETRANS_SPEECH")
+        srv.SEGMENTATION_MODEL = "/nonexistent/model.onnx"
+        assert srv._production_speech_model() is None, "a file missing: Silero"
+    finally:
+        srv.SEGMENTATION_MODEL = kept[0]
+        if kept[1] is not None:
+            os.environ["LIVETRANS_SPEECH"] = kept[1]
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

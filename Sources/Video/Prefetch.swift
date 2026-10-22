@@ -456,8 +456,11 @@ final class Prefetcher {
         await engine.client?.stopPrefetch(job: job.id)
     }
 
-    private func followPlayhead() {
-        guard job != nil || !finished.isEmpty, let playhead, let now = position else {
+    /// Marks the caption being played, which the list follows and
+    /// highlights: over captions fetched ahead, or in dev mode over the
+    /// step's captions, made by DevPipeline rather than a job here.
+    func followPlayhead() {
+        guard job != nil || !finished.isEmpty || isDev(), let playhead, let now = position else {
             if currentCaptionID != nil { currentCaptionID = nil }
             if playingCaptionID != nil { playingCaptionID = nil }
             if lull != nil { lull = nil }

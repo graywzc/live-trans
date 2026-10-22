@@ -121,7 +121,8 @@ struct ContentView: View {
                 selection: selectionBinding(for: caption),
                 onAnalyze: { analyze(caption) },
                 onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
-                isCurrent: prefetch.currentCaptionID == caption.id
+                isCurrent: prefetch.currentCaptionID == caption.id,
+                official: panel.isDev ? dev.official(for: caption) : nil
             )
         }
         .selectionActions(onLookUp: lookUp)
@@ -682,6 +683,8 @@ struct CaptionRow: View {
     var onSeek: (() -> Void)?
     /// The sentence being spoken, among captions fetched ahead.
     var isCurrent = false
+    /// The episode's official subtitle for the same moment, in dev mode.
+    var official: String?
 
     @State private var isHovered = false
 
@@ -695,6 +698,10 @@ struct CaptionRow: View {
                 if !caption.english.isEmpty {
                     // Not SwiftUI's selectable text, which keeps its clicks.
                     SelectableText(caption.english, size: fontSize * 0.82, color: .systemGreen, onClick: onSeek)
+                }
+                if let official {
+                    SelectableText(official, size: fontSize * 0.82, color: .systemOrange, onClick: onSeek)
+                        .help("The episode's official subtitle")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

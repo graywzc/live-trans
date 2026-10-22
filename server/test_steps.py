@@ -347,7 +347,7 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_off_disk():
     # piece keeps its head, each its middle, the last its tail.
     assert starts == [0.1, 1.1, 2.1, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1], starts
     assert [w[2] for w in job.words] == ["w0", "w1", "w2", "w1", "w2", "w1", "w2", "w1", "w2"], job.words
-    assert abs(job.worded - 8.5) < 0.01 and job.status()["worded"] == job.worded
+    assert abs(job.worded - 8.5) < 0.01 and job.status()["worded"] == round(job.worded, 2), (job.worded, job.status()["worded"])
     found = job.findings()
     assert found["words"][0] == [0.1, 0.5, "w0", 0.9]
     with open(os.path.join(cache, os.listdir(cache)[0], "speech.json"), encoding="utf-8") as f:
@@ -508,6 +508,58 @@ def test_a_step_job_captions_the_video_with_its_speech_finder_and_keeps_no_text(
     for name in os.listdir(folder):
         if name.endswith(".json"):
             assert "ことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name
+    srv.clear_dev_cache()
+
+def test_the_official_subtitles_of_a_page_are_found_by_its_index():
+    folder = tempfile.mkdtemp()
+    os.makedirs(os.path.join(folder, "site", "ep1"))
+    with open(os.path.join(folder, "index.json"), "w") as f:
+        json.dump({"https://example.com/play/1.html": "site/ep1"}, f)
+    with open(os.path.join(folder, "site", "ep1", "subtitles.tsv"), "w", encoding="utf-8") as f:
+        f.write("index\tstart\tend\ttext\n0\t1.5\t3.0\t-\n1\t4.0\t6.5\t今天下雨了\n2\t7.0\t9.0\t(credits)\n")
+    kept = srv.REFERENCE_DIR
+    srv.REFERENCE_DIR = folder
+    try:
+        assert srv.reference_lines("https://example.com/play/1.html?from=list") == [{"start": 4.0, "end": 6.5, "text": "今天下雨了"}]
+        assert srv.reference_lines("https://example.com/play/2.html") is None
+    finally:
+        srv.REFERENCE_DIR = kept
+
+def test_a_dev_job_is_timed_on_the_video_s_clock_and_its_cache_keeps_it():
+    fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = lambda audio, model=None: loud_stretches(audio)
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        first = srv.PrefetchJob(url, "https://example.com/clock", {}, 3.0, step="speech")
+        wait_for(first, "done")
+        assert first.clock and first.clock.at, "the fetch timed its packets"
+        kept = srv.DevCache("https://example.com/clock", url).load_audio()
+        assert kept and kept[2]["at"] == first.clock.at, "the cache keeps the clock"
+        again = srv.PrefetchJob(url + ".gone", "https://example.com/clock", {}, 3.0, step="speech")
+        wait_for(again, "done", seconds=5)
+        assert again.cached and again.clock.at == first.clock.at
+        # Audio kept with no clock (by an older server) is fetched again.
+        older = srv.DevCache("https://example.com/older", url)
+        older.save_audio(srv.np.zeros(3 * srv.SAMPLE_RATE, srv.np.float32), 3.0)
+        assert older.load_audio() is None
+    finally:
+        srv.speech_stretches = original
+    srv.clear_dev_cache()
+
+def test_a_failed_fetch_falls_back_to_audio_kept_without_a_clock():
+    fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = lambda audio, model=None: loud_stretches(audio)
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        kept = srv.DevCache("https://example.com/stale", url)
+        kept.save_audio(noise_and_silence([(1, False), (1, True), (1, False)]), 3.0)
+        job = srv.PrefetchJob(url + ".gone", "https://example.com/stale", {}, 3.0, step="speech")
+        wait_for(job, "done", seconds=10)
+        assert job.cached and job.clock is None and job.speech == [(1.0, 2.0)], (job.cached, job.speech)
+    finally:
+        srv.speech_stretches = original
     srv.clear_dev_cache()
 
 if __name__ == "__main__":

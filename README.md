@@ -94,6 +94,25 @@ python3 -m venv ~/venvs/livetrans
 ollama pull qwen3.5:9b
 ```
 
+For ReazonSpeech, the speech recognizer the server uses when it finds it
+(recommended for Japanese; otherwise it uses Whisper):
+
+```
+~/venvs/livetrans/bin/pip install sherpa-onnx
+curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2
+tar -xjf sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2
+mv sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01 ~/livetrans/reazonspeech
+```
+
+ReazonSpeech k2 v2 (Apache-2.0, a zipformer trained on Japanese TV, run by
+sherpa-onnx on the CPU) heard the words right more often than Whisper on the
+episodes we measured: 9% of subtitle lines wrong against 15-16%, mostly
+where Whisper writes a word that sounds the same with the wrong kanji. It
+writes no punctuation, and now and then hears little in a loud, fast scene.
+`LIVETRANS_ASR` picks the recognizer: `whisper`, `reazon`, or `hybrid`
+(ReazonSpeech, with Whisper's words for a clip where ReazonSpeech heard much
+less); `LIVETRANS_REAZON_DIR` points at another model folder.
+
 `silero_vad.onnx` is Silero VAD v6.2, the authors' own file (MIT, see
 `server/silero_vad.LICENSE`), which the server runs in place of the model
 faster-whisper bundles: that one is a re-export of the v6.0 weights, whose

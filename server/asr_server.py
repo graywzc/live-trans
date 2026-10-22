@@ -103,37 +103,56 @@ OLLAMA_MODEL = os.getenv("LIVETRANS_OLLAMA_MODEL", "qwen3.5:9b")
 OLLAMA_KEEP_ALIVE = os.getenv("LIVETRANS_OLLAMA_KEEP_ALIVE", "30m")
 OLLAMA_TIMEOUT = float(os.getenv("LIVETRANS_OLLAMA_TIMEOUT", "30"))
 
-_OLLAMA_PROMPT = (
-    "Translate this Japanese to natural English. "
-    "Output only the translation, nothing else.\n\n"
-)
+# The language the captions are translated into: "en" (English) or "zh"
+# (Simplified Chinese), set by the app when it starts the server.
+TARGETS = {"en": ("English", "eng_Latn"), "zh": ("Simplified Chinese", "zho_Hans")}
+TARGET = os.getenv("LIVETRANS_TARGET", "en")
+
+
+def _language():
+    return TARGETS[TARGET][0]
+
+
+def _ollama_prompt():
+    return f"Translate this Japanese to natural {_language()}. Output only the translation, nothing else.\n\n"
+
+
 # One VAD segment routinely holds several sentences (often several speakers),
 # and Whisper frequently emits them with no punctuation at all, so there is
 # nothing to split on mechanically. The LLM is translating anyway; have it mark
 # the sentence boundaries in the same pass.
-_OLLAMA_SPLIT_PROMPT = (
-    "Below is a Japanese speech transcript. It may contain several sentences "
-    "run together, often without punctuation, possibly from different speakers.\n"
-    "Split it into individual sentences and translate each into natural English.\n"
-    "Output one sentence per line in exactly this format:\n"
-    "<Japanese sentence> ||| <English translation>\n"
-    "Copy the Japanese characters exactly as given; do not add, drop, or change "
-    "any. Output nothing else.\n\n"
-)
+def _split_prompt(insist=False):
+    return (
+        "Below is a Japanese speech transcript. It may contain several sentences "
+        "run together, often without punctuation, possibly from different speakers.\n"
+        f"Split it into individual sentences and translate each into natural {_language()}.\n"
+        "Output one sentence per line in exactly this format:\n"
+        f"<Japanese sentence> ||| <{_language()} translation>\n"
+        "Copy the Japanese characters exactly as given; do not add, drop, or change "
+        "any. Output nothing else.\n"
+        + (f"Before ||| copy the Japanese as given, never translated; after ||| write the "
+           f"{_language()} translation, never the Japanese again.\n" if insist else "")
+        + "\n"
+    )
+
+
 # Whisper now and then returns half a minute of speech as one segment with
 # no punctuation. Among the other lines of a transcript the LLM leaves such
 # a line whole; given it alone and told it is too long, it breaks it up.
-_OLLAMA_LONG_PROMPT = (
-    "Below is one long stretch of Japanese speech, transcribed without sentence breaks.\n"
-    "Break it into short lines, each a sentence or a clause, cutting after sentence "
-    "endings and after connectives such as けど, ので, から, し, て or たら. "
-    "A line should be at most about 40 Japanese characters.\n"
-    "Translate each line into natural English.\n"
-    "Output one line per piece in exactly this format:\n"
-    "<Japanese> ||| <English translation>\n"
-    "Copy the Japanese characters exactly as given, in order; do not add, drop, or "
-    "change any. Output nothing else.\n\n"
-)
+def _long_prompt():
+    return (
+        "Below is one long stretch of Japanese speech, transcribed without sentence breaks.\n"
+        "Break it into short lines, each a sentence or a clause, cutting after sentence "
+        "endings and after connectives such as けど, ので, から, し, て or たら. "
+        "A line should be at most about 40 Japanese characters.\n"
+        f"Translate each line into natural {_language()}.\n"
+        "Output one line per piece in exactly this format:\n"
+        f"<Japanese> ||| <{_language()} translation>\n"
+        "Copy the Japanese characters exactly as given, in order; do not add, drop, or "
+        "change any. Output nothing else.\n\n"
+    )
+
+
 _PAIR_SEPARATOR = "|||"
 # How much of the transcript the LLM's copy must match for its sentence
 # breaks to be used.
@@ -240,7 +259,188 @@ def decode_pcm(pcm_bytes):
     return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False, breaks=None, clips=None):
+# The speech recognizer that writes the Japanese, LIVETRANS_ASR, else
+# ReazonSpeech when it is installed (see _installed_recognizer): "whisper"
+# (faster-whisper, ASR_MODEL) or "reazon": ReazonSpeech k2 (a zipformer trained on Japanese
+# TV, run by sherpa-onnx on the CPU), which on two episodes heard the words
+# right more often (227 of 287 subtitle lines against 200), mostly where
+# Whisper wrote a word that sounds the same with the wrong kanji. It writes
+# no punctuation and takes no prompt; Whisper still translates, when asked
+# to, and hears the dev step's words.
+REAZON_DIR = os.path.expanduser(os.getenv("LIVETRANS_REAZON_DIR", "~/livetrans/reazonspeech"))
+
+
+def _installed_recognizer():
+    """ReazonSpeech where its model files and sherpa-onnx are on the host,
+    else Whisper. With them, ReazonSpeech alone left the fewest captions
+    wrong on both episodes measured (9% of subtitle lines against Whisper's
+    15-16%), though on one it heard next to nothing in a loud, fast scene
+    ("hybrid" keeps Whisper for those)."""
+    import importlib.util
+
+    files = ("encoder-epoch-99-avg-1.onnx", "decoder-epoch-99-avg-1.onnx", "joiner-epoch-99-avg-1.onnx", "tokens.txt")
+    if all(os.path.exists(os.path.join(REAZON_DIR, f)) for f in files) and importlib.util.find_spec("sherpa_onnx"):
+        return "reazon"
+    return "whisper"
+
+
+ASR_BACKEND = (os.getenv("LIVETRANS_ASR") or _installed_recognizer()).lower()
+# ReazonSpeech is given a clip of speech at a time, none longer than this:
+# a 30 s stretch with a long quiet part in it came out as two characters,
+# where 15 s pieces of it were heard whole. A longer clip is cut at its
+# quietest moment.
+REAZON_PIECE = 15.0
+# Silence put either side of each piece: without it the first or last word
+# of a clip is now and then lost.
+REAZON_PAD = 0.5
+# A gap this long between two characters starts a new segment. Shorter
+# gaps come inside words: the times of a word's characters can lie more
+# than half a second apart (頭 0.0 s, 痛 1.7 s).
+REAZON_SEGMENT_GAP = 1.0
+_reazon = None
+_reazon_lock = threading.Lock()
+
+
+def _reazon_recognizer():
+    global _reazon
+    if _reazon is None:
+        import sherpa_onnx
+
+        _reazon = sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=os.path.join(REAZON_DIR, "encoder-epoch-99-avg-1.onnx"),
+            decoder=os.path.join(REAZON_DIR, "decoder-epoch-99-avg-1.onnx"),
+            joiner=os.path.join(REAZON_DIR, "joiner-epoch-99-avg-1.onnx"),
+            tokens=os.path.join(REAZON_DIR, "tokens.txt"),
+            num_threads=8, decoding_method="modified_beam_search",
+        )
+    return _reazon
+
+
+def _reazon_pieces(audio, start, end):
+    """`start`..`end` (seconds into `audio`) in pieces of at most
+    REAZON_PIECE, each long one cut at the quietest tenth of a second in the
+    second half of its first REAZON_PIECE."""
+    pieces = []
+    while end - start > REAZON_PIECE:
+        low, high = start + REAZON_PIECE / 2, start + REAZON_PIECE
+        steps = np.arange(low, high - 0.1, 0.1)
+        energy = [float(np.mean(audio[int(t * SAMPLE_RATE):int((t + 0.1) * SAMPLE_RATE)] ** 2)) for t in steps]
+        cut = float(steps[int(np.argmin(energy))]) + 0.05
+        pieces.append((start, cut))
+        start = cut
+    pieces.append((start, end))
+    return pieces
+
+
+def run_reazon(audio, words=None, breaks=None, clips=None, vad=False):
+    """run_whisper's transcription with ReazonSpeech in Whisper's place:
+    the same segments, `words` (here each character, from its time to the
+    next one's) and `breaks`. `clips` are [(start, end), ...] in seconds;
+    without them the speech is found first, or with `vad` off the whole of
+    the audio is taken."""
+    if audio.size == 0:
+        return []
+    length = audio.size / SAMPLE_RATE
+    if clips is None:
+        found = speech_clips(audio) if vad else [0.0, length]
+        clips = list(zip(found[::2], found[1::2]))
+    pieces = [p for a, b in clips for p in _reazon_pieces(audio, max(a, 0.0), min(b, length)) if p[1] - p[0] > 0.05]
+    pad = np.zeros(int(REAZON_PAD * SAMPLE_RATE), dtype=np.float32)
+    texts = []
+    with _reazon_lock:
+        recognizer = _reazon_recognizer()
+        for a, b in pieces:
+            stream = recognizer.create_stream()
+            stream.accept_waveform(SAMPLE_RATE, np.concatenate([pad, audio[int(a * SAMPLE_RATE):int(b * SAMPLE_RATE)], pad]))
+            recognizer.decode_stream(stream)
+            tokens = list(stream.result.tokens)
+            times = [min(max(a + t - REAZON_PAD, a), b) for t in stream.result.timestamps]
+            segment = ""
+            for k, (token, at) in enumerate(zip(tokens, times)):
+                if k == 0 or at - times[k - 1] >= REAZON_SEGMENT_GAP:
+                    if segment:
+                        texts.append(segment)
+                    segment = ""
+                    if breaks is not None:
+                        breaks.append((len(words), at))
+                segment += token
+                if words is not None:
+                    after = times[k + 1] if k + 1 < len(times) else b
+                    words.append((token, at, max(min(after, at + 1.0), at + 0.02)))
+            if segment:
+                texts.append(segment)
+    return texts
+
+
+# "hybrid": both, clip by clip: ReazonSpeech's words, except in a clip
+# where it heard much less than Whisper. It now and then hears next to
+# nothing in a loud, fast scene (9 characters for eight lines of shouting,
+# at any window size) that Whisper hears whole.
+HYBRID_RATIO = 0.6
+HYBRID_MIN_CHARS = 4
+
+
+def run_hybrid(audio, beam_size, prompt, words=None, breaks=None, clips=None, vad=False):
+    """run_whisper's transcription by both recognizers: Whisper over all
+    the clips, as it would alone, and ReazonSpeech over each; each clip's
+    words, segments and breaks those of ReazonSpeech, unless it heard fewer
+    than HYBRID_RATIO of Whisper's characters there (Whisper having heard
+    HYBRID_MIN_CHARS or more), when they are Whisper's."""
+    if audio.size == 0:
+        return []
+    words = [] if words is None else words
+    length = audio.size / SAMPLE_RATE
+    if clips is None:
+        found = speech_clips(audio) if vad else [0.0, length]
+        clips = list(zip(found[::2], found[1::2]))
+    clips = [(max(a, 0.0), min(b, length)) for a, b in clips if min(b, length) - max(a, 0.0) > 0.05]
+    if not clips:
+        return []
+    heard, heard_breaks = [], []
+    whisper_texts = run_whisper(audio, beam_size=beam_size, prompt=prompt, words=heard, breaks=heard_breaks,
+                                clips=clips, recognizer="whisper")
+    # Whisper's segments, each with its words, by the clip its start is in.
+    segments = []
+    for k, (index, _) in enumerate(heard_breaks):
+        end = heard_breaks[k + 1][0] if k + 1 < len(heard_breaks) else len(heard)
+        members = heard[index:end]
+        at = members[0][1] if members else heard_breaks[k][1]
+        segments.append((at, whisper_texts[k] if k < len(whisper_texts) else "", members))
+
+    def clip_of(at):
+        return min(range(len(clips)), key=lambda c: 0 if clips[c][0] <= at <= clips[c][1] else min(abs(at - clips[c][0]), abs(at - clips[c][1])))
+
+    by_clip = [[] for _ in clips]
+    for segment in segments:
+        by_clip[clip_of(segment[0])].append(segment)
+    texts, from_whisper = [], 0
+    for c, clip in enumerate(clips):
+        said, said_breaks = [], []
+        reazon_texts = run_reazon(audio, words=said, breaks=said_breaks, clips=[clip])
+        whisper_chars = sum(len(_content(text)) for _, text, _ in by_clip[c])
+        reazon_chars = sum(len(_content(text)) for text in reazon_texts)
+        if whisper_chars >= HYBRID_MIN_CHARS and reazon_chars < HYBRID_RATIO * whisper_chars:
+            from_whisper += 1
+            for at, text, members in by_clip[c]:
+                if breaks is not None:
+                    breaks.append((len(words), at))
+                if words is not None:
+                    words.extend(members)
+                texts.append(text)
+        else:
+            for index, at in said_breaks:
+                if breaks is not None:
+                    breaks.append((len(words) + index, at))
+            if words is not None:
+                words.extend(said)
+            texts.extend(reazon_texts)
+    if from_whisper:
+        print(f"hybrid: {from_whisper} of {len(clips)} clips from Whisper", flush=True)
+    return texts
+
+
+def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False, breaks=None, clips=None,
+                recognizer=None):
     """task="transcribe" -> Japanese, task="translate" -> English.
 
     `vad` finds the speech in the audio first (Silero), and Whisper is
@@ -269,6 +469,11 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
     """
     if audio.size == 0:
         return []
+    recognizer = recognizer or ASR_BACKEND
+    if recognizer == "reazon" and task == "transcribe":
+        return run_reazon(audio, words=words, breaks=breaks, clips=clips, vad=vad)
+    if recognizer == "hybrid" and task == "transcribe":
+        return run_hybrid(audio, beam_size, prompt, words=words, breaks=breaks, clips=clips, vad=vad)
     if clips is not None:
         clips = [t for clip in clips for t in clip]
         if not clips:
@@ -625,6 +830,21 @@ class MeanOfModels:
 
 _segmentation = PyannoteSegmentation(SEGMENTATION_MODEL)
 _firered_and_segmentation = MeanOfModels(_firered, _segmentation)
+
+
+def _production_speech_model():
+    """What finds the speech outside the dev steps: FireRedVAD and
+    segmentation-3.0 averaged, where their files are on the host (on one
+    episode they missed 16 words of speech, FireRedVAD alone 23, Silero
+    58, at about the same time called speech wrongly); else Silero (None).
+    LIVETRANS_SPEECH=silero keeps Silero."""
+    if os.getenv("LIVETRANS_SPEECH", "").lower() == "silero":
+        return None
+    files = (FIRERED_MODEL, FIRERED_CMVN, FIRERED_EVENTS_MODEL, SEGMENTATION_MODEL)
+    return _firered_and_segmentation if all(os.path.exists(f) for f in files) else None
+
+
+PRODUCTION_SPEECH_MODEL = _production_speech_model()
 # The model faster_whisper's code scores with on this thread, when not
 # Silero: set for the length of one call.
 _speech_model_here = threading.local()
@@ -646,13 +866,19 @@ def _official_silero_model():
 def speech_clips(audio):
     """Where the speech is in `audio`, as [start, end, start, end, ...] in
     seconds, for Whisper's `clip_timestamps`; empty when there is none.
-    Silero's own defaults, as its filter in Whisper would use them: a pause
-    shorter than two seconds stays inside a clip."""
+    Found by the production speech model, with Silero's own defaults as
+    its filter in Whisper would use them: a pause shorter than two seconds
+    stays inside a clip."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
     _use_official_silero()
+    _speech_model_here.model = PRODUCTION_SPEECH_MODEL
+    try:
+        found = get_speech_timestamps(audio, VadOptions())
+    finally:
+        _speech_model_here.model = None
     clips = []
-    for chunk in get_speech_timestamps(audio, VadOptions()):
+    for chunk in found:
         clips += [chunk["start"] / SAMPLE_RATE, chunk["end"] / SAMPLE_RATE]
     return clips
 
@@ -856,8 +1082,9 @@ def _is_timeout(exc):
     return isinstance(exc, (TimeoutError, socket.timeout))
 
 
-def _ollama_generate(text, timeout, prompt=_OLLAMA_PROMPT):
+def _ollama_generate(text, timeout, prompt=None):
     global _ollama_supports_think
+    prompt = _ollama_prompt() if prompt is None else prompt
     import urllib.error
     import urllib.request
 
@@ -943,6 +1170,26 @@ def _content(text):
     return "".join(ch for ch in text if ch not in _BOUNDARY_NOISE)
 
 
+# A translation this much kana is the Japanese again rather than English or
+# Chinese, neither of which is written in kana. (Kanji alone may be both: a
+# Chinese 天才 for the Japanese 天才 is a translation.)
+LEFT_IN_JAPANESE = 0.3
+
+
+def _left_in_japanese(translation):
+    text = _content(translation)
+    kana = sum("\u3040" <= ch <= "\u30ff" for ch in text)
+    return bool(text) and kana >= LEFT_IN_JAPANESE * len(text)
+
+
+def _japanese_again(pairs):
+    """How many of `pairs` were answered with the Japanese again, when that
+    is a third of them or more (at least two): the LLM copied rather than
+    translated, and the answer is not to be used; else 0."""
+    left = sum(_left_in_japanese(en) for _, en in pairs)
+    return left if left >= max(2, len(pairs) / 3) else 0
+
+
 def _parse_pairs(response, source, why=None):
     """Parse "ja ||| en" lines. None if the LLM strayed from the format or
     rewrote the transcript instead of copying it. A copy off by a character
@@ -968,6 +1215,8 @@ def _parse_pairs(response, source, why=None):
     if copied == wanted:
         if any(not en for _, en in pairs):
             return refuse(f"{sum(not en for _, en in pairs)} of {len(pairs)} lines have no English")
+        if left := _japanese_again(pairs):
+            return refuse(f"{left} of {len(pairs)} lines left in Japanese")
         return pairs
     import difflib
 
@@ -994,6 +1243,8 @@ def _parse_pairs(response, source, why=None):
         return refuse("no line holds the transcript")
     if any(not en for _, en in restored):
         return refuse(f"{sum(not en for _, en in restored)} of {len(restored)} lines have no English")
+    if left := _japanese_again(restored):
+        return refuse(f"{left} of {len(restored)} lines left in Japanese")
     return restored
 
 
@@ -1040,7 +1291,10 @@ def _breaks_only(response, source):
     translate it ("ja ||| ja ||| ja"), each translated by itself. None if
     the answer is not that."""
     fields = [field.strip() for line in response.splitlines() for field in line.split(_PAIR_SEPARATOR)]
-    japanese = [field for field in fields if any(ch > "\u3000" for ch in field)]
+    # The pieces of the transcript, not a translation into another
+    # language written in kanji.
+    whole = _content(source)
+    japanese = [field for field in fields if _content(field) and _content(field) in whole]
     pieces = _parse_pairs("\n".join(f"{field} {_PAIR_SEPARATOR} -" for field in japanese), source)
     if not pieces or len(pieces) < 2:
         return None
@@ -1064,7 +1318,7 @@ def _split_long(pairs, words):
         pieces = None
         size = len(_content(ja))
         if _is_long(ja, span, words) and size >= 2 * SPLIT_MIN_PIECE_CHARS:
-            prompt = _OLLAMA_LONG_PROMPT if size > SPLIT_MIN_CHARS else _OLLAMA_SPLIT_PROMPT
+            prompt = _long_prompt() if size > SPLIT_MIN_CHARS else _split_prompt()
             try:
                 response = _ollama_generate(_for_splitting(ja), timeout=OLLAMA_TIMEOUT, prompt=prompt)
                 pieces = _parse_pairs(response, ja) or _breaks_only(response, ja)
@@ -1087,18 +1341,29 @@ def translate_ollama(segments):
     text = "\n".join(segments)
     try:
         response = _ollama_generate(
-            _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_SPLIT_PROMPT
+            _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_split_prompt()
         )
         why = []
-        pairs = _parse_pairs(response, text, why)
+        pairs = _parse_pairs(response, text, why) or _by_position(response, segments)
+        if not pairs:
+            # Answered out of the format, now and then a whole batch: the
+            # Japanese copied rather than translated, or translated where it
+            # was to be copied, or the translations alone. Asked once more,
+            # told both.
+            print(f"ollama split unusable ({why[0] if why else 'no reason'}); asking again", flush=True)
+            response = _ollama_generate(
+                _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_split_prompt(insist=True)
+            )
+            why = []
+            pairs = _parse_pairs(response, text, why) or _by_position(response, segments)
         if pairs:
-            return pairs
+            return _translate_what_is_left(pairs)
         print(f"ollama split unusable ({len(text)} characters in, {len(response)} out"
               f"{', ' + why[0] if why else ''}); translating per segment", flush=True)
-        return [
+        return _translate_what_is_left([
             (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
             for segment in segments
-        ]
+        ])
     except Exception as exc:
         if _is_timeout(exc):
             # Slow this once (the GPU shared, a long answer): the rest of the
@@ -1112,6 +1377,42 @@ def translate_ollama(segments):
         return None
 
 
+def _by_position(response, segments):
+    """An answer that kept to one line per segment but not to the format
+    (the translation alone, or translated where the Japanese was to be
+    copied), taken line by line: each segment with its line's last field.
+    None when the lines are not one per segment. The LLM's sentence breaks
+    within a segment are lost, its translation in context kept."""
+    lines = [line for line in response.splitlines() if line.strip()]
+    if len(lines) != len(segments) or len(segments) < 2:
+        return None
+    pairs = [(segment, line.split(_PAIR_SEPARATOR)[-1].strip()) for segment, line in zip(segments, lines)]
+    if any(not en for _, en in pairs) or _japanese_again(pairs):
+        return None
+    print(f"ollama answer out of its format; taken line by line ({len(lines)} lines)", flush=True)
+    return pairs
+
+
+def _translate_what_is_left(pairs):
+    """`pairs` with any line answered with the Japanese again, or given the
+    same translation as a different line (the LLM now and then repeats the
+    next sentence's translation for the one before it: two captions with one
+    meaning), translated by itself once more. One still Japanese after that
+    is left untranslated, rather than shown as its own translation."""
+    meanings = collections.defaultdict(set)
+    for ja, en in pairs:
+        if _content(en):
+            meanings[_content(en)].add(_content(ja))
+    result = []
+    for ja, en in pairs:
+        if _left_in_japanese(en) or len(meanings.get(_content(en), ())) > 1:
+            en = _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)
+            if _left_in_japanese(en):
+                en = ""
+        result.append((ja, en))
+    return result
+
+
 def translate_nllb(text):
     stripped = text.strip()
     if _nllb is None or _is_untranslatable(stripped):
@@ -1119,10 +1420,10 @@ def translate_nllb(text):
     with _nllb_lock:
         tokens = _nllb_tok.convert_ids_to_tokens(_nllb_tok.encode(stripped))
         results = _nllb.translate_batch(
-            [tokens], target_prefix=[["eng_Latn"]], beam_size=2, max_decoding_length=256
+            [tokens], target_prefix=[[TARGETS[TARGET][1]]], beam_size=2, max_decoding_length=256
         )
     hyp = results[0].hypotheses[0]
-    if hyp and hyp[0] == "eng_Latn":
+    if hyp and hyp[0] == TARGETS[TARGET][1]:
         hyp = hyp[1:]
     return _nllb_tok.decode(_nllb_tok.convert_tokens_to_ids(hyp)).strip()
 
@@ -1146,9 +1447,10 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
         else:
             pairs = translate_ollama(segments) if _ollama_ok else None
             if pairs is None:
+                # Whisper translates into English only.
                 pairs = [(ja, " ".join(run_whisper(
                     audio, beam_size=beam_size, task="translate"
-                )))]
+                )) if TARGET == "en" else "")]
             else:
                 pairs = _split_long(pairs, words)
     lines = []
@@ -1211,9 +1513,12 @@ FIRERED_STEPS = ("speech-firered", "speech-mean")
 
 
 def step_speech_model(step):
-    """The model a dev step finds the speech with, in Silero's place (None:
-    Silero itself): the step's own stretches, and where its captions'
-    batches are cut."""
+    """The model a job finds the speech with, in Silero's place (None:
+    Silero itself): a dev step's own stretches, and where a job's captions'
+    batches are cut. A production job (no step) takes the production one;
+    the "speech" step keeps Silero, to compare with."""
+    if step is None:
+        return PRODUCTION_SPEECH_MODEL
     return {"speech-firered": _firered, "speech-mean": _firered_and_segmentation}.get(step)
 # Whether a step job also captions the video, as production would with the
 # step's speech finder cutting the batches.
@@ -1254,9 +1559,11 @@ class DevCache:
     def __init__(self, page, url):
         self.dir = os.path.join(DEV_CACHE_DIR, hashlib.sha256((page or url).encode("utf-8")).hexdigest()[:16])
 
-    def load_audio(self):
-        """The whole audio kept for the video, from its start, and the
-        video's length, or None."""
+    def load_audio(self, unclocked=False):
+        """The whole audio kept for the video, from its start, the video's
+        length, and where its packets lie in the video (PacketClock.state),
+        or None. `unclocked` takes audio kept with no clock too (the clock
+        then None)."""
         try:
             with open(os.path.join(self.dir, "audio.json"), encoding="utf-8") as f:
                 about = json.load(f)
@@ -1269,9 +1576,13 @@ class DevCache:
             # A fetch that ended early, kept as if whole by an older server:
             # every step after it ran over its first minutes only.
             return None
-        return audio, about.get("duration")
+        if not about.get("clock") and not unclocked:
+            # Kept by a server that timed a step on the samples' clock: on an
+            # HLS stream a second or more off the video's by the end.
+            return None
+        return audio, about.get("duration"), about.get("clock")
 
-    def save_audio(self, audio, duration):
+    def save_audio(self, audio, duration, clock=None):
         """Keeps `audio` for the video, and forgets what the steps found over
         any audio kept before it."""
         os.makedirs(self.dir, exist_ok=True)
@@ -1281,7 +1592,7 @@ class DevCache:
         (np.clip(audio, -1, 1) * 32767).astype("<i2").tofile(os.path.join(self.dir, "audio.s16.part"))
         os.replace(os.path.join(self.dir, "audio.s16.part"), os.path.join(self.dir, "audio.s16"))
         with open(os.path.join(self.dir, "audio.json"), "w", encoding="utf-8") as f:
-            json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration}, f)
+            json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration, "clock": clock}, f)
 
     def audio_seconds(self):
         """How long the audio kept for the video is, or None."""
@@ -1314,6 +1625,35 @@ class DevCache:
         kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step == "speakers"}
         with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
             json.dump({**kept, "version": STEP_VERSIONS.get(step), "audio_seconds": self.audio_seconds()}, f)
+
+
+# Official subtitles read off episodes for comparing the captions with in dev
+# mode (made by the tools in that folder, kept on this host only):
+# index.json maps a page to its episode's folder, whose subtitles.tsv holds
+# index, start, end and text per line, "-" or "(...)" where there is no
+# dialogue.
+REFERENCE_DIR = os.path.expanduser(os.getenv("LIVETRANS_REFERENCE_DIR", "~/subtitle-reference"))
+
+
+def reference_lines(page):
+    """The official subtitle lines of the episode at `page`, as [{"start",
+    "end", "text"}] in seconds of the video, or None when there are none."""
+    page = (page or "").split("?")[0].split("#")[0]
+    try:
+        with open(os.path.join(REFERENCE_DIR, "index.json"), encoding="utf-8") as f:
+            folder = json.load(f).get(page)
+        if not folder:
+            return None
+        lines = []
+        with open(os.path.join(REFERENCE_DIR, folder, "subtitles.tsv"), encoding="utf-8") as f:
+            next(f)
+            for row in f:
+                _, start, end, text = row.rstrip("\n").split("\t", 3)
+                if text != "-" and not text.startswith("("):
+                    lines.append({"start": float(start), "end": float(end), "text": text})
+        return lines
+    except (OSError, ValueError, StopIteration):
+        return None
 
 
 def clear_dev_cache():
@@ -1841,6 +2181,18 @@ class PacketClock:
         except OSError:
             pass
 
+    def state(self):
+        """The packets' times, to keep with the audio (numbers only)."""
+        with self.lock:
+            return {"offset": self.offset, "video": self.video, "at": self.at, "length": self.length}
+
+    @classmethod
+    def restored(cls, state):
+        """A clock from `state`, for audio kept from an earlier fetch."""
+        clock = cls("", state["offset"])
+        clock.video, clock.at, clock.length = state["video"], state["at"], state["length"]
+        return clock
+
     def finish(self):
         """The fetch is over: what is left of the list read, the file gone."""
         with self.lock:
@@ -1854,7 +2206,7 @@ class PacketClock:
         """The packet that `t` lies in, on the clock of `times`."""
         import bisect
 
-        if os.path.exists(self.path):
+        if self.path and os.path.exists(self.path):
             self._read()
         return max(bisect.bisect_right(times, t) - 1, 0) if times else None
 
@@ -1906,10 +2258,10 @@ class PrefetchJob:
         self.captioned = False
         self.caption_error = None
         # The grid, the audio and `ready` are on the samples' clock; the
-        # lines, and the times asked for, are the video's (see PacketClock).
-        # A dev step's job keeps the one clock, as its audio may come from
-        # the cache.
-        self.clock = None if step else PacketClock(
+        # lines, a step's findings, and the times asked for, are the
+        # video's (see PacketClock). A dev step's audio taken from the cache
+        # brings its clock with it.
+        self.clock = PacketClock(
             os.path.join(tempfile.gettempdir(), f"livetrans-clock-{uuid.uuid4().hex}.crc"), self.offset)
         self.ready = self.offset
         # The speech step's findings: where the speech is, in seconds of
@@ -1968,6 +2320,9 @@ class PrefetchJob:
     def _video(self, t):
         return self.clock.to_video(t) if self.clock else t
 
+    def _samples(self, v):
+        return self.clock.to_samples(v) if self.clock else v
+
     def _on_video_clock(self, lines):
         for line in lines:
             line["start"], line["end"] = round(self._video(line["start"]), 2), round(self._video(line["end"]), 2)
@@ -1978,7 +2333,7 @@ class PrefetchJob:
         can still be heard again; the audio past that is let go."""
         self.stop()
         with self.audio_lock:
-            kept = max(self.ready, self.analysed) - self.offset
+            kept = max(self.ready, self._samples(self.analysed)) - self.offset
             self.audio = self.audio[:int(max(kept, 0) * SAMPLE_RATE)].copy()
         if self.state == "running":
             self.state = "stopped"
@@ -1989,23 +2344,40 @@ class PrefetchJob:
         self.state = "failed"
         self.stop()
 
+    def _from_cache(self, kept):
+        audio, duration, clock = kept
+        self.clock = PacketClock.restored(clock) if clock else None
+        with self.audio_lock:
+            self.audio = audio
+        self.cached = True
+        self.fetch_done = True
+        if self.duration is None or self.duration <= 0:
+            self.duration = duration or self.fetched
+        print(f"prefetch {self.id}: {self.fetched:.0f}s of audio from the cache", flush=True)
+
+    def _fail_fetch(self, message):
+        """The fetch failed: a dev step goes on over the audio kept from an
+        older server, timed on its samples' clock, rather than over
+        nothing (a page's stream link is short-lived; one read from a tab
+        left open for hours is gone)."""
+        if self.cache and (kept := self.cache.load_audio(unclocked=True)):
+            print(f"prefetch {self.id}: {message}; the audio kept before taken instead", flush=True)
+            tell(f"{self.step}: the video could not be fetched again ({message[:80]}); the audio kept before is "
+                 "used, timed less exactly. Reload the page for a fresh fetch")
+            self._from_cache(kept)
+            return
+        self.fail(message)
+
     def _fetch(self):
         if self.cache and (kept := self.cache.load_audio()):
-            audio, duration = kept
-            with self.audio_lock:
-                self.audio = audio
-            self.cached = True
-            self.fetch_done = True
-            if self.duration is None or self.duration <= 0:
-                self.duration = duration or self.fetched
-            print(f"prefetch {self.id}: {self.fetched:.0f}s of audio from the cache", flush=True)
+            self._from_cache(kept)
             return
         try:
             media, error = resolve_media_url(self.url, self.page)
         except Exception as exc:
             media, error = None, f"{type(exc).__name__}: {exc}"
         if not media:
-            self.fail(error or "no media")
+            self._fail_fetch(error or "no media")
             return
         header_lines = "".join(f"{k}: {v}\r\n" for k, v in self.headers.items())
         command = [
@@ -2033,7 +2405,7 @@ class PrefetchJob:
         try:
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as exc:
-            self.fail(f"ffmpeg: {exc}")
+            self._fail_fetch(f"ffmpeg: {exc}")
             return
         while not self.stop_event.is_set():
             chunk = self.process.stdout.read(SAMPLE_RATE * 2)  # one second
@@ -2046,7 +2418,7 @@ class PrefetchJob:
         if self.clock:
             self.clock.finish()
         if self.process.returncode not in (0, None) and not self.stop_event.is_set() and self.fetched < 1:
-            self.fail(f"ffmpeg: {self.process.stderr.read().decode(errors='replace').strip()[-200:]}")
+            self._fail_fetch(f"ffmpeg: {self.process.stderr.read().decode(errors='replace').strip()[-200:]}")
             return
         if self.duration is None or self.duration <= 0:
             self.duration = self.offset + self.fetched
@@ -2059,7 +2431,7 @@ class PrefetchJob:
             try:
                 with self.audio_lock:
                     audio = self.audio.copy()
-                self.cache.save_audio(audio, self.duration)
+                self.cache.save_audio(audio, self.duration, self.clock.state() if self.clock else None)
             except OSError as exc:
                 print(f"prefetch {self.id}: not cached: {exc}", flush=True)
         # Only now, so what the steps find over the whole of it is kept with
@@ -2173,13 +2545,13 @@ class PrefetchJob:
             except Exception as exc:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return
-            self.speech = [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in found]
+            self.speech = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3)) for a, b in found]
             if self.step in FIRERED_STEPS and audio.size:
                 self.events = {
-                    kind: [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in runs]
+                    kind: [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3)) for a, b in runs]
                     for kind, runs in events.items()
                 }
-            self.analysed = self.offset + audio.size / SAMPLE_RATE
+            self.analysed = self._video(self.offset + audio.size / SAMPLE_RATE)
             looked = have
             # Looking again takes longer the more there is; let the fetch
             # get ahead rather than look all the time.
@@ -2214,9 +2586,9 @@ class PrefetchJob:
             self.word_pieces.append((start, piece.size / SAMPLE_RATE, heard))
             for k, (a, b, text, p) in enumerate(heard):
                 if low <= a < high:
-                    self.words.append((round(self.offset + start + a, 3), round(self.offset + start + b, 3), text, p))
+                    self.words.append((round(self._video(self.offset + start + a), 3), round(self._video(self.offset + start + b), 3), text, p))
                     self.word_refs.append((len(self.word_pieces) - 1, k))
-            self.worded = self.offset + (end if last else start + high)
+            self.worded = self._video(self.offset + (end if last else start + high))
             if last:
                 self._align_words()
                 return
@@ -2238,7 +2610,7 @@ class PrefetchJob:
             new = timed[piece][k] if piece < len(timed) and k < len(timed[piece]) else None
             if new:
                 start = self.word_pieces[piece][0]
-                words[i] = (round(self.offset + start + new[0], 3), round(self.offset + start + new[1], 3), *words[i][2:])
+                words[i] = (round(self._video(self.offset + start + new[0]), 3), round(self._video(self.offset + start + new[1]), 3), *words[i][2:])
         self.words = words
         self.aligned = True
         print(f"prefetch {self.id}: words re-timed", flush=True)
@@ -2264,7 +2636,7 @@ class PrefetchJob:
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             print(f"prefetch {self.id}: speakers: {exc}", flush=True)
             return
-        self.speakers = [(round(self.offset + a, 3), round(self.offset + b, 3), who) for a, b, who in found]
+        self.speakers = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3), who) for a, b, who in found]
         print(f"prefetch {self.id}: {len({s[2] for s in self.speakers})} speakers told apart", flush=True)
         if self.cache:
             try:
@@ -2279,8 +2651,8 @@ class PrefetchJob:
         import io
         import wave
 
-        start = max(float(start), self.offset)
-        end = min(float(end), start + DEV_AUDIO_LIMIT)
+        start = max(self._samples(float(start)), self.offset)
+        end = min(self._samples(float(end)), start + DEV_AUDIO_LIMIT)
         with self.audio_lock:
             samples = self.audio[int((start - self.offset) * SAMPLE_RATE):int(max(end - self.offset, 0) * SAMPLE_RATE)]
             pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
@@ -2421,7 +2793,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             self._send(200, {
                 "status": "ok",
-                "asr": ASR_MODEL,
+                "asr": {"reazon": "reazonspeech-k2", "hybrid": f"reazonspeech-k2+{ASR_MODEL}"}.get(ASR_BACKEND, ASR_MODEL),
                 "device": DEVICE,
                 "translation": TRANSLATE_BACKEND != "nllb" or _nllb is not None,
                 "translation_backend": (
@@ -2431,12 +2803,19 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "ollama_model": OLLAMA_MODEL if _ollama_ok else None,
                 "prefetch": True,
+                "target": TARGET,
             })
         elif self.path.startswith("/events"):
             from urllib.parse import parse_qs, urlparse
 
             query = parse_qs(urlparse(self.path).query)
             self._send(200, events_since(int(query.get("since", ["0"])[0])))
+        elif self.path.startswith("/reference"):
+            from urllib.parse import parse_qs, urlparse
+
+            page = parse_qs(urlparse(self.path).query).get("page", [""])[0]
+            lines = reference_lines(page)
+            self._send(200 if lines is not None else 404, {"lines": lines or []})
         elif self.path.startswith("/prefetch/"):
             from urllib.parse import parse_qs, urlparse
 
@@ -2580,6 +2959,7 @@ def start_idle_watchdog(timeout):
 
 
 def main():
+    global TARGET
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
@@ -2589,7 +2969,15 @@ def main():
         default=float(os.getenv("LIVETRANS_IDLE_TIMEOUT", "0")),
         help="exit after this many idle seconds (0 disables)",
     )
+    parser.add_argument(
+        "--target", choices=sorted(TARGETS), default=TARGET,
+        help="the language captions are translated into",
+    )
     args = parser.parse_args()
+    TARGET = args.target
+    print(f"translating into {_language()}", flush=True)
+    print(f"speech recognizer: {ASR_BACKEND}", flush=True)
+    print(f"speech finder: {'FireRedVAD + segmentation-3.0' if PRODUCTION_SPEECH_MODEL else 'Silero'}", flush=True)
 
     load_models()
     # A plain `kill` should release the LLM too, not just this process.
