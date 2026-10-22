@@ -17,6 +17,7 @@ import asr_server as srv
 # The step tests look at the steps; the captions a step job also makes
 # have a test of their own.
 srv.DEV_CAPTIONS = False
+srv.DEV_SPEAKER_CUTS = False
 
 # Whisper is not loaded here: the words a step job hears are made up by
 # the tests that look at them, and none elsewhere.

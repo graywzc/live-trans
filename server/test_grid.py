@@ -265,6 +265,24 @@ def test_a_cut_inside_a_clip_keeps_what_asked_for_it():
     assert list(grid.reasons.values()).count("Whisper's sentence end, no pause") == 1, grid.reasons
 
 
+def test_a_piece_is_cut_where_the_speaker_changes():
+    # One stretch of speech, no pause: a question, then its answer by
+    # another voice.
+    grid = grid_with([(0.2, 4.0)], 0.0, 5.0)
+    whisper = FakeWhisper([("父上が", 0.3, 0.9), ("まだ", 0.9, 1.3), ("来ない", 1.3, 1.9), ("ええ", 2.0, 2.3), ("困りましたね", 2.3, 3.5)])
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = (lambda texts, fixes=None: [(t, "zh") for t in texts]), srv.translate_ollama
+    try:
+        whole = srv.hear_pieces(grid_with([(0.2, 4.0)], 0.0, 5.0), silence(5.0), 0.0, beam_size=5, prompt="")
+        # A short pause between the two turns, the word in it nobody's.
+        turns = [(0.2, 1.6, "S1"), (2.05, 3.6, "S2")]
+        cut = srv.hear_pieces(grid, silence(5.0), 0.0, beam_size=5, prompt="", turns=turns)
+    finally:
+        srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+    assert [l["ja"] for l in whole] == ["父上がまだ来ないええ困りましたね"], whole
+    assert [l["ja"] for l in cut] == ["父上がまだ来ない", "ええ困りましたね"], cut
+    assert srv.speaker_at(turns, 1.0) == "S1" and srv.speaker_at(turns, 4.0) is None
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

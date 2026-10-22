@@ -17,6 +17,7 @@ import sys
 import wave
 
 MODEL = "BUT-FIT/diarizen-wavlm-large-s80-md-v2"
+BATCH = 8
 
 
 def main():
@@ -35,6 +36,10 @@ def main():
     # Libraries print as they load and run; only the answer goes to stdout.
     with contextlib.redirect_stdout(sys.stderr):
         pipeline = DiariZenPipeline.from_pretrained(MODEL)
+        # The model's own 32 ran out of memory beside the server's Whisper
+        # and the translator on a 24 GB card; 8 peaks near 3 GB.
+        pipeline.segmentation_batch_size = BATCH
+        pipeline.embedding_batch_size = BATCH
         annotation = pipeline(wav)
     segments = [(turn.start, turn.end, str(label)) for turn, _, label in annotation.itertracks(yield_label=True)]
     talk = {}

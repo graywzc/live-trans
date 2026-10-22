@@ -1520,6 +1520,10 @@ def step_speech_model(step):
     if step is None:
         return PRODUCTION_SPEECH_MODEL
     return {"speech-firered": _firered, "speech-mean": _firered_and_segmentation}.get(step)
+# Whether a step job's captions are also cut where DiariZen hears the
+# speaker change (one line held two speakers' words: a question and its
+# answer, run together with no pause).
+DEV_SPEAKER_CUTS = os.getenv("LIVETRANS_SPEAKER_CUTS", "1") != "0"
 # Whether a step job also captions the video, as production would with the
 # step's speech finder cutting the batches.
 DEV_CAPTIONS = True
@@ -1969,14 +1973,30 @@ def _content_offsets(texts):
     return offsets
 
 
-def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False):
+# How far a cut at a change of speaker may move to the widest gap between
+# words, in seconds.
+SPEAKER_SNAP = 0.4
+
+
+def speaker_at(turns, t):
+    """Who speaks at `t` among `turns` [(start, end, who)]: the one whose
+    turn holds it (the latest begun, where turns overlap), else None."""
+    who = None
+    for start, end, speaker in turns:
+        if start <= t <= end:
+            who = speaker
+    return who
+
+
+def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None):
     """`audio`, the video from `began` on, heard by its hard pieces, and
     its words put into the pieces of `grid`: the lines [{"ja", "en",
     "start", "end"}] of the pieces with words in them, those partly in
     `within` (seconds of the video) when given. Where a sentence ends
     inside a piece in `within`, a cut is made (see CutGrid). A piece's
     times are its speech's. `told`, for a dev step, lists each line with
-    what cut it (see `tell`)."""
+    what cut it (see `tell`). `turns`, [(start, end, who)] on the samples'
+    clock, cut a piece where two words in a row are different speakers'."""
     import bisect
 
     low, high = within or (began, began + audio.size / SAMPLE_RATE)
@@ -2090,6 +2110,24 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False):
             cut_after(i, heard=True, why="Whisper's sentence end")
         elif i + 1 in breaks:
             cut_after(i, heard=False, why="Whisper's segment")
+    # Where the speaker changes: a cut before the first word of the new
+    # one. Words between two speakers' turns (a short pause) belong to
+    # neither, so a word is set against the last word that had a speaker.
+    # The two clocks (the speakers' turns, the words' times) can differ by
+    # a word, so the cut goes in the widest gap between words within
+    # SPEAKER_SNAP of the change: a speaker's first word placed a little
+    # early would otherwise be cut in two (え|え).
+    if turns:
+        last = None
+        for i, (_, start, end) in enumerate(words):
+            speaker = speaker_at(turns, (start + end) / 2)
+            if speaker is None:
+                continue
+            if last is not None and speaker != last and i > 0:
+                near = [k for k in range(len(words) - 1) if abs(words[k + 1][1] - start) <= SPEAKER_SNAP]
+                k = max(near, key=lambda k: words[k + 1][1] - words[k][2]) if near else i - 1
+                cut_after(k, heard=True, why="a change of speaker")
+            last = speaker
 
     pieces = grouped()
     texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
@@ -2283,8 +2321,11 @@ class PrefetchJob:
         self.word_refs = []
         self.word_pieces = []
         # Who speaks when, as DiariZen tells the voices apart: (start, end,
-        # "S1"), in seconds of the video; None until it has run.
+        # "S1"), in seconds of the video; None until it has run. `turns`,
+        # the same on the samples' clock, for cutting the captions where the
+        # speaker changes; [] when DiariZen could not run, None until it has.
         self.speakers = None
+        self.turns = None
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
         self.cache = DevCache(page, url) if step and self.offset == 0 else None
@@ -2440,7 +2481,15 @@ class PrefetchJob:
 
     def _transcribe(self):
         """The captions, a batch at a time as the audio comes. A step job's
-        own state is its step's, which may be done before the captions."""
+        own state is its step's, which may be done before the captions. A
+        step job's waits for the speakers first (DiariZen needs all the
+        audio), to cut its lines where the speaker changes."""
+        if self.step and DEV_SPEAKER_CUTS:
+            waited = time.time()
+            while self.turns is None and not self.stop_event.is_set() and time.time() - waited < DEVTOOL_TIMEOUT:
+                time.sleep(0.5)
+            if self.turns:
+                print(f"prefetch {self.id}: captions cut at {len(self.turns)} speaker turns", flush=True)
         position = 0.0
         # How far the audio had come when it was last looked at for a batch.
         looked = -1.0
@@ -2628,6 +2677,7 @@ class PrefetchJob:
             return
         if self.cache and (kept := self.cache.load_findings("speakers")):
             self.speakers = [tuple(s) for s in kept.get("speakers", [])]
+            self.turns = [(self._samples(a), self._samples(b), who) for a, b, who in self.speakers]
             return
         with self.audio_lock:
             audio = self.audio.copy()
@@ -2635,7 +2685,9 @@ class PrefetchJob:
             found = run_devtool("diarize", {}, audio)["segments"]
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             print(f"prefetch {self.id}: speakers: {exc}", flush=True)
+            self.turns = []
             return
+        self.turns = [(self.offset + a, self.offset + b, who) for a, b, who in found]
         self.speakers = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3), who) for a, b, who in found]
         print(f"prefetch {self.id}: {len({s[2] for s in self.speakers})} speakers told apart", flush=True)
         if self.cache:
@@ -2671,7 +2723,8 @@ class PrefetchJob:
         t0 = time.time()
         self.grid.add_speech(speech, start, end, end_reason=reason)
         lines = self._on_video_clock(
-            hear_pieces(self.grid, audio, start, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:]))
+            hear_pieces(self.grid, audio, start, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:],
+                        turns=self.turns if DEV_SPEAKER_CUTS else None))
         ja = "".join(line["ja"] for line in lines)
         if self.stop_event.is_set():
             # Stopped while this was heard: its audio may be let go already.
@@ -2701,7 +2754,8 @@ class PrefetchJob:
         t0 = time.time()
         began = self.offset + from_sample / SAMPLE_RATE
         lines = self._on_video_clock(hear_pieces(
-            self.grid, audio, began, beam_size=10, prompt="".join(before), within=(pieces[0][0], pieces[-1][1])
+            self.grid, audio, began, beam_size=10, prompt="".join(before), within=(pieces[0][0], pieces[-1][1]),
+            turns=self.turns if DEV_SPEAKER_CUTS else None,
         ))
         print(f"prefetch {self.id}: {start:.1f}-{end:.1f}s heard again, {len(lines)} lines in {time.time() - t0:.1f}s",
               flush=True)
