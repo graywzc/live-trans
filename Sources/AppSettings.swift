@@ -48,6 +48,8 @@ enum AppSettings {
     static let analysisModel = "analysisModel"
     static let demoAudioPath = "demoAudioPath"
     static let autoStart = "autoStart"
+    /// Whether the app was last in dev mode, to open in it again.
+    static let devMode = "devMode"
     /// The step dev mode runs, by `DevPipeline.Step`.
     static let pipelineStep = "pipelineStep"
     static let activityTimelineHeight = "activityTimelineHeight"

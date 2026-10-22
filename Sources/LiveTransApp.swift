@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine.listensToMac = !isDev
         }
         activity.follow { [engine] in engine.client }
+        panel.restoreMode()
         panel.applyLaunchArgument()
     }
 
