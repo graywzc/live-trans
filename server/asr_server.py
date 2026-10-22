@@ -830,6 +830,21 @@ class MeanOfModels:
 
 _segmentation = PyannoteSegmentation(SEGMENTATION_MODEL)
 _firered_and_segmentation = MeanOfModels(_firered, _segmentation)
+
+
+def _production_speech_model():
+    """What finds the speech outside the dev steps: FireRedVAD and
+    segmentation-3.0 averaged, where their files are on the host (on one
+    episode they missed 16 words of speech, FireRedVAD alone 23, Silero
+    58, at about the same time called speech wrongly); else Silero (None).
+    LIVETRANS_SPEECH=silero keeps Silero."""
+    if os.getenv("LIVETRANS_SPEECH", "").lower() == "silero":
+        return None
+    files = (FIRERED_MODEL, FIRERED_CMVN, FIRERED_EVENTS_MODEL, SEGMENTATION_MODEL)
+    return _firered_and_segmentation if all(os.path.exists(f) for f in files) else None
+
+
+PRODUCTION_SPEECH_MODEL = _production_speech_model()
 # The model faster_whisper's code scores with on this thread, when not
 # Silero: set for the length of one call.
 _speech_model_here = threading.local()
@@ -851,13 +866,19 @@ def _official_silero_model():
 def speech_clips(audio):
     """Where the speech is in `audio`, as [start, end, start, end, ...] in
     seconds, for Whisper's `clip_timestamps`; empty when there is none.
-    Silero's own defaults, as its filter in Whisper would use them: a pause
-    shorter than two seconds stays inside a clip."""
+    Found by the production speech model, with Silero's own defaults as
+    its filter in Whisper would use them: a pause shorter than two seconds
+    stays inside a clip."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
     _use_official_silero()
+    _speech_model_here.model = PRODUCTION_SPEECH_MODEL
+    try:
+        found = get_speech_timestamps(audio, VadOptions())
+    finally:
+        _speech_model_here.model = None
     clips = []
-    for chunk in get_speech_timestamps(audio, VadOptions()):
+    for chunk in found:
         clips += [chunk["start"] / SAMPLE_RATE, chunk["end"] / SAMPLE_RATE]
     return clips
 
@@ -1492,9 +1513,12 @@ FIRERED_STEPS = ("speech-firered", "speech-mean")
 
 
 def step_speech_model(step):
-    """The model a dev step finds the speech with, in Silero's place (None:
-    Silero itself): the step's own stretches, and where its captions'
-    batches are cut."""
+    """The model a job finds the speech with, in Silero's place (None:
+    Silero itself): a dev step's own stretches, and where a job's captions'
+    batches are cut. A production job (no step) takes the production one;
+    the "speech" step keeps Silero, to compare with."""
+    if step is None:
+        return PRODUCTION_SPEECH_MODEL
     return {"speech-firered": _firered, "speech-mean": _firered_and_segmentation}.get(step)
 # Whether a step job also captions the video, as production would with the
 # step's speech finder cutting the batches.
@@ -2953,6 +2977,7 @@ def main():
     TARGET = args.target
     print(f"translating into {_language()}", flush=True)
     print(f"speech recognizer: {ASR_BACKEND}", flush=True)
+    print(f"speech finder: {'FireRedVAD + segmentation-3.0' if PRODUCTION_SPEECH_MODEL else 'Silero'}", flush=True)
 
     load_models()
     # A plain `kill` should release the LLM too, not just this process.
