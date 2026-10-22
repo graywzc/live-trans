@@ -1617,7 +1617,7 @@ STEP_VERSIONS = {
     "words": "whisper-large-v3-reazon-aligned-1",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-floor-speaker-cuts-5" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-steady-floor-speaker-cuts-7" for step in DEV_STEPS},
 }
 
 
@@ -2063,6 +2063,12 @@ SPEAKER_SNAP = 0.4
 # A piece cut off at a change of speaker may be this short: a reply such
 # as はい or ああ is a line of its own.
 SPEAKER_MIN_PIECE_CHARS = 2
+# A turn shorter than this, in seconds, is not a change of speaker: on a
+# drama DiariZen hands a voice a few hundredths to a few tenths of a second
+# in the middle of another's sentence (a breath, a sound) far more often
+# than anyone gets a word in that briefly. A reply such as ああ runs half a
+# second.
+SPEAKER_MIN_TURN = 0.4
 
 
 def speaker_at(turns, t):
@@ -2092,6 +2098,26 @@ def floor_turns(turns):
         else:
             floor.append((start, end, speaker))
     return floor
+
+
+def steady_floor(turns):
+    """floor_turns with each turn shorter than SPEAKER_MIN_TURN given to
+    the speaker before it (after it, at the start), so that a moment's
+    other voice is no change."""
+    floor = floor_turns(turns)
+    steady = []
+    for start, end, speaker in floor:
+        if end - start < SPEAKER_MIN_TURN and (steady or len(floor) > 1):
+            if steady:
+                steady[-1] = (steady[-1][0], end, steady[-1][2])
+            continue
+        if steady and steady[-1][2] == speaker:
+            steady[-1] = (steady[-1][0], end, speaker)
+        elif not steady and floor and start > floor[0][0]:
+            steady.append((floor[0][0], end, speaker))  # what came before it was a moment's
+        else:
+            steady.append((start, end, speaker))
+    return steady
 
 
 def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None):
@@ -2219,14 +2245,14 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             cut_after(i, heard=False, why="Whisper's segment")
     # Where the speaker changes: one turn ends and the next speaker's
     # begins (a voice heard over someone still speaking is not a change).
-    # The cut goes at the break between words nearest where the first
-    # turn ends, within SPEAKER_SNAP of it: the recognizer times a word
-    # from its first sound, a speaker's first word a little early, so the
-    # break nearest the turn's end is the speakers' own (父上がまだ来ない⁉｜
-    # ええ, not ⁉え｜え); and a cut only between two words heard on either
-    # side of it as the two speakers'.
+    # The cut goes at the first break between words that lies in the quiet
+    # between the two turns, else the break nearest it, within
+    # SPEAKER_SNAP: the recognizer times a speaker's first word a little
+    # early, so the first break in the quiet is the speakers' own (父上が
+    # まだ来ない⁉｜ええ, not ⁉え｜え); and a cut only between two words heard
+    # on either side of it as the two speakers'.
     if turns:
-        floor = floor_turns(turns)
+        floor = steady_floor(turns)
         for (_, end, before), (start, _, after) in zip(floor, floor[1:]):
             if before == after:
                 continue
@@ -2237,7 +2263,9 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
                 and speaker_at(floor, (words[k + 1][1] + words[k + 1][2]) / 2) in (after, None)
             ]
             if breaks:
-                k = min(breaks, key=lambda k: abs(words[k + 1][1] - end))
+                # In the quiet between the two turns if one is, the first
+                # such; else the nearest to it.
+                k = min(breaks, key=lambda k: (max(end - words[k + 1][1], words[k + 1][1] - start, 0), words[k + 1][1]))
                 cut_after(k, heard=True, why="a change of speaker", min_chars=SPEAKER_MIN_PIECE_CHARS)
 
     pieces = grouped()
