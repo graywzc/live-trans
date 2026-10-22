@@ -188,7 +188,7 @@ final class StepTimelineTests: XCTestCase {
 
     func testTheStepsAreTheHostsAndTheChoiceIsKept() {
         // The names the host's DEV_STEPS knows them by.
-        XCTAssertEqual(DevPipeline.Step.allCases.map(\.rawValue), ["speech", "speech-firered"])
+        XCTAssertEqual(DevPipeline.Step.allCases.map(\.rawValue), ["speech", "speech-firered", "speech-mean"])
         let kept = UserDefaults.standard.string(forKey: AppSettings.pipelineStep)
         defer { UserDefaults.standard.set(kept, forKey: AppSettings.pipelineStep) }
         let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())

@@ -38,28 +38,30 @@ final class SidePanelTests: XCTestCase {
 
         let dev = SidePanel()
         dev.applyLaunchArgument(defaults: defaults(sidePanel: "dev"))
+        XCTAssertTrue(dev.isDev, "dev mode, the panel as it was")
         XCTAssertTrue(dev.isPresented)
-        XCTAssertEqual(dev.tab, .dev)
+        XCTAssertEqual(dev.tab, .jisho)
     }
 
-    /// Dev mode is the Dev tab being looked at, and nothing else: an
-    /// ordinary launch is production.
-    func testDevModeIsTheDevTabBeingShown() {
+    /// Dev mode is the header's switch alone: the panel's tabs, and closing
+    /// it, leave it as it is, so analysing a caption does not stop the
+    /// step. An ordinary launch is production.
+    func testDevModeIsTheSwitchNotATab() {
         let panel = SidePanel()
         var told: [Bool] = []
         panel.onDevChange = { told.append($0) }
         XCTAssertFalse(panel.isDev)
         panel.show(.analysis)
         XCTAssertEqual(told, [])
-        panel.show(.dev)
-        XCTAssertTrue(panel.isDev)
+        panel.isDev = true
+        panel.show(.analysis)
+        panel.show(.jisho)
         panel.isPresented = false
-        XCTAssertFalse(panel.isDev, "closed, the panel shows nothing")
-        panel.isPresented = true
-        XCTAssertTrue(panel.isDev)
-        panel.tab = .jisho
+        XCTAssertTrue(panel.isDev, "analysing, looking up and closing the panel keep the step going")
+        panel.isDev = true
+        panel.isDev = false
         XCTAssertFalse(panel.isDev)
-        XCTAssertEqual(told, [true, false, true, false])
+        XCTAssertEqual(told, [true, false], "told of changes only")
     }
 
     func testAnUnknownValueIsIgnored() {

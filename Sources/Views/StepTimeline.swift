@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// The video's audio as a step of the pipeline saw it: a ruler, the audio
-/// fetched as a grey band, the stretches of speech the step found (Silero's
-/// or FireRedVAD's, by the picker) as green bars, with what FireRedVAD hears
+/// fetched as a grey band, the stretches of speech the step found (Silero's,
+/// FireRedVAD's, or FireRedVAD's and pyannote's averaged, by the picker) as green bars, with what FireRedVAD hears
 /// as singing purple and as music alone blue over them, the stretch picked out, and where the video is. Scrolls sideways;
 /// pinch, or the slider, to zoom. Click a bar to pick it out, or the gap
 /// between two, or drag across the band for any stretch; the stretch can

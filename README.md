@@ -88,6 +88,7 @@ curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/silero
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_vad.onnx
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_cmvn.ark
 curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/fireredvad_aed.onnx
+curl -LO https://raw.githubusercontent.com/graywzc/live-trans/main/server/pyannote_segmentation3.onnx
 python3 -m venv ~/venvs/livetrans
 ~/venvs/livetrans/bin/pip install faster-whisper ctranslate2 numpy
 ollama pull qwen3.5:9b
@@ -107,6 +108,13 @@ uses them, to compare with Silero, drawing what the event model hears as
 singing or as music alone over the stretches of speech; without them that
 step fails and nothing else changes. `LIVETRANS_FIRERED_MODEL` points at
 another model file, with `fireredvad_cmvn.ark` beside it.
+
+`pyannote_segmentation3.onnx` is pyannote's segmentation-3.0 as the
+sherpa-onnx project converted it to ONNX (MIT, see
+`server/pyannote_segmentation3.LICENSE`). Only the dev step "Speech
+(FireRedVAD + pyannote)" uses it, averaging its speech probability with
+FireRedVAD's; without it that step fails and nothing else changes.
+`LIVETRANS_SEGMENTATION_MODEL` points at another file.
 
 Dev mode also shows, under its timeline, who speaks when and the words
 Whisper hears, re-timed. Those need two heavier tools, each in its own

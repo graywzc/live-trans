@@ -1,57 +1,53 @@
 import SwiftUI
 import WebKit
 
-/// What the right-hand part of the window is showing. Jisho, the sentence
-/// analysis and dev mode share it: one place to look, one divider, one
-/// width.
+/// What the right-hand part of the window is showing: Jisho or the
+/// sentence analysis, one place to look, one divider, one width. It also
+/// holds whether the app is in dev mode, which the header's switch sets and
+/// the panel's tabs leave alone.
 @MainActor
 @Observable
 final class SidePanel {
     enum Tab: Hashable {
         case jisho
         case analysis
-        case dev
     }
 
     /// Open from the first frame: the window is captions and a panel, not
     /// captions that a panel joins once something has been looked up.
-    var isPresented = true {
-        didSet { devMayHaveChanged() }
-    }
-    var tab = Tab.jisho {
-        didSet { devMayHaveChanged() }
-    }
+    var isPresented = true
+    var tab = Tab.jisho
 
-    /// Dev mode is the Dev tab being looked at: one step of the pipeline
-    /// run on its own, and the list of what goes on behind it. On any
-    /// other tab, or with the panel closed, the app is in production,
-    /// making captions and keeping no account of how.
-    var isDev: Bool { isPresented && tab == .dev }
+    /// Dev mode: one step of the pipeline run on its own over the whole
+    /// video, its captions, its timeline under the captions and the list of
+    /// what goes on behind it. Off, the app is in production, making
+    /// captions and keeping no account of how. Set by the header's
+    /// Production | Dev switch; Jisho and the analysis work the same in
+    /// both.
+    var isDev = false {
+        didSet {
+            guard isDev != oldValue else { return }
+            onDevChange(isDev)
+        }
+    }
     /// Told when dev mode is entered or left.
     @ObservationIgnored var onDevChange: (Bool) -> Void = { _ in }
-    @ObservationIgnored private var wasDev = false
-
-    private func devMayHaveChanged() {
-        guard isDev != wasDev else { return }
-        wasDev = isDev
-        onDevChange(isDev)
-    }
 
     func show(_ tab: Tab) {
         self.tab = tab
         isPresented = true
     }
 
-    /// `-sidePanel jisho`, `-sidePanel analysis`, `-sidePanel dev` or
-    /// `-sidePanel closed`
+    /// `-sidePanel jisho`, `-sidePanel analysis` or `-sidePanel closed`
     /// (UserDefaults reads such arguments) picks what the panel shows at
-    /// launch, or leaves the captions alone. Nothing is persisted: the next
-    /// ordinary launch opens the panel on Jisho again.
+    /// launch, or leaves the captions alone; `-sidePanel dev` starts in dev
+    /// mode. Nothing is persisted: the next ordinary launch opens the panel
+    /// on Jisho again, in production.
     func applyLaunchArgument(defaults: UserDefaults = .standard) {
         switch defaults.string(forKey: "sidePanel") {
         case "jisho": show(.jisho)
         case "analysis": show(.analysis)
-        case "dev": show(.dev)
+        case "dev": isDev = true
         case "closed": isPresented = false
         default: break
         }
@@ -75,7 +71,6 @@ struct SidePanelView: View {
                 Picker("Panel", selection: $panel.tab) {
                     Text("Jisho").tag(SidePanel.Tab.jisho)
                     Text("Analysis").tag(SidePanel.Tab.analysis)
-                    Text("Dev").tag(SidePanel.Tab.dev)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -83,7 +78,6 @@ struct SidePanelView: View {
                 switch panel.tab {
                 case .jisho: jishoControls
                 case .analysis: analysisControls
-                case .dev: ActivityControls()
                 }
                 Button {
                     panel.isPresented = false
@@ -102,7 +96,6 @@ struct SidePanelView: View {
                 WebView(webView: browser.webView)
                     .onAppear(perform: browser.loadHomeIfBlank)
             case .analysis: AnalysisView()
-            case .dev: ActivityView()
             }
         }
     }

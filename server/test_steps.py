@@ -14,6 +14,10 @@ import numpy as np
 
 import asr_server as srv
 
+# The step tests look at the steps; the captions a step job also makes
+# have a test of their own.
+srv.DEV_CAPTIONS = False
+
 # Whisper is not loaded here: the words a step job hears are made up by
 # the tests that look at them, and none elsewhere.
 srv.heard_words = lambda audio, start=0.0: []
@@ -27,7 +31,7 @@ def _not_set_up(name, header, audio):
 srv.run_devtool = _not_set_up
 
 
-def loud_stretches(audio):
+def loud_stretches(audio, model=None):
     """Where `audio` is louder than nothing, by the tenth of a second."""
     step = srv.SAMPLE_RATE // 10
     loud = [np.abs(audio[i:i + step]).mean() > 0.01 for i in range(0, audio.size, step)]
@@ -216,6 +220,45 @@ def test_a_short_audio_kept_by_an_older_server_is_fetched_again():
         srv.speech_stretches = original
 
 
+def test_what_a_step_found_over_a_short_audio_is_not_taken_for_the_whole():
+    cache = fresh_cache()
+    original = srv.speech_stretches, srv.sound_events
+    srv.speech_stretches = lambda audio, model=None: loud_stretches(audio)
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        kept = srv.DevCache("https://example.com/short", url)
+        # An older server kept 2 s of a 3 s video, and what Silero and
+        # DiariZen found over them, with nothing to say which audio that was.
+        kept.save_audio(srv.np.zeros(2 * srv.SAMPLE_RATE, srv.np.float32), 3.0)
+        with open(os.path.join(kept.dir, "speech.json"), "w") as f:
+            json.dump({"speech": [[0.1, 0.2]], "analysed": 2.0, "version": srv.STEP_VERSIONS["speech"]}, f)
+        with open(os.path.join(kept.dir, "speakers.json"), "w") as f:
+            json.dump({"speakers": [[0.1, 0.2, "S1"]], "version": srv.STEP_VERSIONS["speakers"]}, f)
+        # Another step fetches the whole video again and keeps it.
+        firered = srv.PrefetchJob(url, "https://example.com/short", {}, 3.0, step="speech-firered")
+        wait_for(firered, "done")
+        assert not firered.cached
+        assert "speakers.json" not in os.listdir(kept.dir), "the new audio drops the old findings"
+        # Silero, over the audio now kept: found again, not the 2 s of it.
+        silero = srv.PrefetchJob(url + ".gone", "https://example.com/short", {}, 3.0, step="speech")
+        wait_for(silero, "done", seconds=5)
+        assert silero.cached and silero.speech == [(1.0, 2.0)], silero.speech
+        # And found over the whole of it now, taken from the cache again.
+        srv.speech_stretches = lambda audio, model=None: (_ for _ in ()).throw(AssertionError("the step ran again"))
+        again = srv.PrefetchJob(url + ".gone", "https://example.com/short", {}, 3.0, step="speech")
+        wait_for(again, "done", seconds=5)
+        assert again.cached and again.speech == [(1.0, 2.0)], again.speech
+        assert abs(kept.load_findings("speech")["audio_seconds"] - 3.0) < 0.01
+        # A file from before findings said which audio they were over.
+        found = kept.load_findings("speech")
+        with open(os.path.join(kept.dir, "speech.json"), "w") as f:
+            json.dump({k: v for k, v in found.items() if k != "audio_seconds"}, f)
+        assert kept.load_findings("speech") is None
+    finally:
+        srv.speech_stretches, srv.sound_events = original
+    srv.clear_dev_cache()
+
 def test_only_a_known_step_runs():
     try:
         srv.PrefetchJob("x", "file", {}, None, step="grammar")
@@ -228,7 +271,7 @@ def test_only_a_known_step_runs():
 def test_at_most_a_couple_of_minutes_of_audio_come_at_once():
     fresh_cache()
     original = srv.speech_stretches
-    srv.speech_stretches = lambda audio: []
+    srv.speech_stretches = lambda audio, model=None: []
     try:
         path = wav_file(noise_and_silence([(130, False)]))
         job = srv.PrefetchJob(path, "file", {}, None, step="speech")
@@ -251,14 +294,14 @@ def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
         assert sorted(os.listdir(os.path.join(cache, os.listdir(cache)[0]))) == ["audio.json", "audio.s16", "speech.json"]
         # The same page again, from a link that no longer serves: the audio
         # and the step's findings come from the cache, with no fetch.
-        srv.speech_stretches = lambda audio: (_ for _ in ()).throw(AssertionError("the step ran again"))
+        srv.speech_stretches = lambda audio, model=None: (_ for _ in ()).throw(AssertionError("the step ran again"))
         again = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 3.0, step="speech")
         wait_for(again, "done", seconds=5)
         assert again.cached and again.speech == [(1.0, 2.0)] and abs(again.analysed - 3.0) < 0.05, again.speech
         assert again.status()["cached"] is True and again.duration == 3.0
         # The step's code changed: it runs again, over the cached audio.
         srv.STEP_VERSIONS["speech"] = "silero-whole-test"
-        srv.speech_stretches = lambda audio: [(0.5, 2.5)]
+        srv.speech_stretches = lambda audio, model=None: [(0.5, 2.5)]
         changed = srv.PrefetchJob(url + ".gone", "https://example.com/v", {}, 3.0, step="speech")
         wait_for(changed, "done", seconds=5)
         assert changed.cached and changed.speech == [(0.5, 2.5)], changed.speech
@@ -343,7 +386,8 @@ def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
         srv.run_devtool = again_tool
         again = srv.PrefetchJob(url + ".gone", "https://example.com/y", {}, 7.0, step="speech")
         deadline = time.time() + 15
-        while again.speakers is None and time.time() < deadline:
+        # Both come once the audio is in, in either order.
+        while (again.speakers is None or [a[0] for a in asked].count("align") < 2) and time.time() < deadline:
             time.sleep(0.1)
     finally:
         srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.WORDS_PIECE, srv.WORDS_OVERLAP = original
@@ -403,6 +447,68 @@ def test_the_firered_step_finds_the_speech_with_firered_and_keeps_it_apart():
     assert kept == ["audio.json", "audio.s16", "speech-firered.json", "speech.json"], kept
     srv.clear_dev_cache()
 
+
+def test_the_mean_step_finds_the_speech_with_both_models_and_tells_the_events():
+    cache = fresh_cache()
+    original = srv.speech_stretches
+    models = []
+
+    def found(audio, model=None):
+        models.append(model)
+        return loud_stretches(audio)
+
+    srv.speech_stretches = found
+    events = srv.sound_events
+    srv.sound_events = lambda audio: {"singing": [], "music": [(0.2, 0.9)]}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/w", {}, 3.0, step="speech-mean")
+        wait_for(job, "done", seconds=10)
+    finally:
+        srv.speech_stretches = original
+        srv.sound_events = events
+    assert models and set(models) == {srv._firered_and_segmentation}, models
+    assert srv._firered_and_segmentation.models == (srv._firered, srv._segmentation)
+    assert job.speech == [(1.0, 2.0)], job.speech
+    assert job.findings()["step"] == "speech-mean"
+    assert job.findings()["events"] == {"singing": [], "music": [[0.2, 0.9]]}
+    srv.clear_dev_cache()
+
+
+def test_a_step_job_captions_the_video_with_its_speech_finder_and_keeps_no_text():
+    cache = fresh_cache()
+    original = srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS
+    models = []
+
+    def found(audio, model=None):
+        models.append(model)
+        return loud_stretches(audio)
+
+    def heard(grid, audio, start, **kwargs):
+        return [{"ja": "ことば", "en": "words", "start": a, "end": b} for a, b in grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)]
+
+    srv.speech_stretches, srv.hear_pieces, srv.DEV_CAPTIONS = found, heard, True
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/c", {}, 3.0, step="speech-firered")
+        deadline = time.time() + 15
+        while not job.captioned and time.time() < deadline:
+            time.sleep(0.1)
+        status = job.status()
+    finally:
+        srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS = original
+    assert status["captions"] == "done", status
+    assert status["count"] >= 1 and status["lines"][0]["en"] == "words", status["lines"]
+    line = status["lines"][0]
+    assert 0 <= line["start"] < line["end"] <= 3.0, line
+    # Batches and stretches both found by the step's model.
+    assert models and set(models) == {srv._firered}, models
+    folder = os.path.join(cache, os.listdir(cache)[0])
+    for name in os.listdir(folder):
+        if name.endswith(".json"):
+            assert "ことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name
+    srv.clear_dev_cache()
 
 if __name__ == "__main__":
     for name, test in list(globals().items()):

@@ -137,10 +137,14 @@ final class ActivityViewTests: XCTestCase {
         XCTAssertEqual(ActivityView.jobStatus(job), "Job 1a2b3c paused · fetched to 6:52 · captioned to 6:20")
     }
 
-    /// The tab in the real window, with lines from both machines in it.
-    func testTheTabListsBothMachines() throws {
+    /// Dev mode in the real window, its activity unfolded under the
+    /// timeline, with lines from both machines in it.
+    func testTheActivityListsBothMachines() throws {
         let panel = SidePanel()
-        panel.show(.dev)
+        panel.isDev = true
+        let shown = UserDefaults.standard.object(forKey: AppSettings.activityLogShown)
+        UserDefaults.standard.set(true, forKey: AppSettings.activityLogShown)
+        defer { UserDefaults.standard.set(shown, forKey: AppSettings.activityLogShown) }
         let log = ActivityLog()
         log.isEnabled = true
         let start = Date(timeIntervalSince1970: 1_000_000)
@@ -170,21 +174,22 @@ final class ActivityViewTests: XCTestCase {
         func controls(_ v: NSView) -> [NSControl] {
             ((v as? NSControl).map { [$0] } ?? []) + v.subviews.flatMap(controls)
         }
-        let picker = try XCTUnwrap(
-            TestScreen.wait { controls(view).compactMap { $0 as? NSSegmentedControl }.first }, "no panel tab picker"
+        let pickers = try XCTUnwrap(
+            TestScreen.wait { Optional(controls(view).compactMap { $0 as? NSSegmentedControl }).flatMap { $0.count == 2 ? $0 : nil } },
+            "no mode switch and panel tabs"
         )
-        XCTAssertEqual(picker.segmentCount, 3)
-        XCTAssertEqual(picker.selectedSegment, 2)
+        // The header's Production | Dev, on Dev; the panel's Jisho | Analysis.
+        XCTAssertEqual(pickers.map(\.segmentCount), [2, 2])
+        XCTAssertEqual(pickers.map(\.selectedSegment), [1, 0])
 
-        snapshot(view, "dev-tab")
+        snapshot(view, "dev-activity")
     }
 
-    /// The tab has the step's timeline above the list, the host's status
-    /// telling of the step, and no switch of its own: being on it is dev
-    /// mode.
-    func testTheTabShowsTheStepsTimeline() throws {
+    /// Dev mode puts the step's timeline under the captions, with a line
+    /// above it to size it by; the side panel keeps Jisho and the analysis.
+    func testDevModeShowsTheStepsTimelineUnderTheCaptions() throws {
         let panel = SidePanel()
-        panel.show(.dev)
+        panel.isDev = true
         let engine = CaptionEngine()
         let video = ChromeVideo()
         let dev = DevPipeline(engine: engine, video: video)
@@ -212,14 +217,19 @@ final class ActivityViewTests: XCTestCase {
             ((v as? Found).map { [$0] } ?? []) + v.subviews.flatMap { views(type, in: $0) }
         }
         let canvas = try XCTUnwrap(
-            TestScreen.wait { views(TimelineCanvas.CanvasView.self, in: view).first }, "no timeline in the tab"
+            TestScreen.wait { views(TimelineCanvas.CanvasView.self, in: view).first }, "no timeline under the captions"
+        )
+        let tabs = try XCTUnwrap(views(NSSegmentedControl.self, in: view).last, "no panel tabs")
+        XCTAssertLessThan(
+            canvas.convert(canvas.visibleRect, to: nil).maxX, tabs.convert(tabs.bounds, to: nil).minX,
+            "on the captions' side"
         )
         XCTAssertGreaterThan(canvas.frame.width, 0)
         XCTAssertEqual(canvas.speech.count, 5)
         XCTAssertEqual(canvas.selection, 4.0...5.5)
-        XCTAssertEqual(views(NSSegmentedControl.self, in: view).map(\.segmentCount), [3], "the tab picker alone")
-        XCTAssertNotNil(views(RowSplitHandle.HandleView.self, in: view).first, "a divider under the timeline")
-        snapshot(view, "dev-tab-timeline")
+        XCTAssertEqual(views(NSSegmentedControl.self, in: view).map(\.segmentCount), [2, 2], "mode switch and panel tabs")
+        XCTAssertNotNil(views(RowSplitHandle.HandleView.self, in: view).first, "a line above the timeline")
+        snapshot(view, "dev-timeline")
     }
 
     private func snapshot(_ view: NSView, _ name: String) {

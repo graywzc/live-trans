@@ -537,6 +537,94 @@ def sound_events(audio):
 
 _firered = FireRedVad(FIRERED_MODEL, FIRERED_CMVN)
 _firered_events = FireRedVad(FIRERED_EVENTS_MODEL, FIRERED_CMVN)
+
+
+# pyannote's segmentation-3.0, as sherpa-onnx converted it to ONNX (MIT,
+# pyannote_segmentation3.LICENSE), tried in dev mode averaged with
+# FireRedVAD: on one episode the mean missed 16 words where FireRedVAD
+# alone missed 23, for the same time called speech wrongly, though it
+# bridges more short pauses. The model reads 10 s at a time and says, per
+# 270 samples, how likely each of up to three speakers is to be talking.
+SEGMENTATION_MODEL = os.getenv(
+    "LIVETRANS_SEGMENTATION_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyannote_segmentation3.onnx"),
+)
+SEGMENTATION_WINDOW = 160000
+SEGMENTATION_FRAME = 270
+SEGMENTATION_FRAMES = 589
+# The middle of the model's first frame, in samples: its receptive field
+# is 991 samples wide.
+SEGMENTATION_FIRST_CENTRE = 495.5
+# Windows start this far apart, and where they overlap their frames are
+# averaged, the middle of each window weighed most, as pyannote does.
+SEGMENTATION_HOP = SAMPLE_RATE
+SEGMENTATION_BATCH = 32
+
+
+class PyannoteSegmentation:
+    """segmentation-3.0 standing in for Silero in faster_whisper's
+    speech-timestamp code: called with the padded audio, gives one speech
+    probability per 512-sample window, that of anyone talking (1 - P(nobody)
+    of the model's seven classes), read off its frames at the middle of
+    each window."""
+
+    def __init__(self, path):
+        self.path = path
+        self.session = None
+        self.lock = threading.Lock()
+
+    def frames(self, audio):
+        """1 - P(nobody) per model frame, over all of `audio`."""
+        import onnxruntime
+
+        if self.session is None:
+            with self.lock:
+                if self.session is None:
+                    self.session = onnxruntime.InferenceSession(self.path, providers=["CPUExecutionProvider"])
+        count = audio.size // SEGMENTATION_FRAME
+        if not count:
+            return np.zeros(0, dtype=np.float32)
+        starts = list(range(0, max(audio.size - SEGMENTATION_WINDOW, 0) + 1, SEGMENTATION_HOP))
+        if starts[-1] + SEGMENTATION_WINDOW < audio.size:
+            starts.append(audio.size - SEGMENTATION_WINDOW)
+        total = np.zeros(count + SEGMENTATION_FRAMES)
+        weight = np.zeros(count + SEGMENTATION_FRAMES)
+        hamming = np.hamming(SEGMENTATION_FRAMES)
+        for first in range(0, len(starts), SEGMENTATION_BATCH):
+            batch = starts[first:first + SEGMENTATION_BATCH]
+            windows = np.zeros((len(batch), 1, SEGMENTATION_WINDOW), dtype=np.float32)
+            for row, start in enumerate(batch):
+                piece = audio[start:start + SEGMENTATION_WINDOW]
+                windows[row, 0, :piece.size] = piece
+            talking = 1 - np.exp(self.session.run(None, {"x": windows})[0][..., 0])
+            for start, row in zip(batch, talking):
+                at = int(round(start / SEGMENTATION_FRAME))
+                total[at:at + len(row)] += row * hamming[:len(row)]
+                weight[at:at + len(row)] += hamming[:len(row)]
+        return (total / np.maximum(weight, 1e-9))[:count].astype(np.float32)
+
+    def __call__(self, audio, **kwargs):
+        windows = audio.shape[0] // 512
+        frames = self.frames(audio)
+        if not len(frames):
+            return np.zeros(windows, dtype=np.float32)
+        centres = (np.arange(len(frames)) * SEGMENTATION_FRAME + SEGMENTATION_FIRST_CENTRE) / SAMPLE_RATE
+        return np.interp(np.arange(windows) * 512 / SAMPLE_RATE + 0.016, centres, frames).astype(np.float32)
+
+
+class MeanOfModels:
+    """Several speech models standing in for Silero together: per window,
+    the mean of what they say."""
+
+    def __init__(self, *models):
+        self.models = models
+
+    def __call__(self, audio, **kwargs):
+        return np.mean([model(audio) for model in self.models], axis=0).astype(np.float32)
+
+
+_segmentation = PyannoteSegmentation(SEGMENTATION_MODEL)
+_firered_and_segmentation = MeanOfModels(_firered, _segmentation)
 # The model faster_whisper's code scores with on this thread, when not
 # Silero: set for the length of one call.
 _speech_model_here = threading.local()
@@ -855,28 +943,37 @@ def _content(text):
     return "".join(ch for ch in text if ch not in _BOUNDARY_NOISE)
 
 
-def _parse_pairs(response, source):
+def _parse_pairs(response, source, why=None):
     """Parse "ja ||| en" lines. None if the LLM strayed from the format or
     rewrote the transcript instead of copying it. A copy off by a character
     or two (a particle dropped, a word respelled) is still good for where
-    the sentences break: the transcript's own text is put back in them."""
+    the sentences break: the transcript's own text is put back in them.
+    `why`, a list, is given the reason an answer is not used, told in
+    counts and kinds only, never the text."""
+    def refuse(reason):
+        if why is not None:
+            why.append(reason)
+        return None
+
     pairs = []
-    for line in response.splitlines():
-        if not line.strip():
-            continue
+    lines = [line for line in response.splitlines() if line.strip()]
+    for number, line in enumerate(lines, 1):
         ja, sep, en = line.partition(_PAIR_SEPARATOR)
         if not sep or not ja.strip():
-            return None
+            kind = "Japanese" if _has_japanese(line) else "no Japanese"
+            return refuse(f"line {number} of {len(lines)} has no separator ({kind}, {len(line)} characters)")
         pairs.append((ja.strip(), en.strip()))
     copied = "".join(_content(ja) for ja, _ in pairs)
     wanted = _content(source)
     if copied == wanted:
+        if any(not en for _, en in pairs):
+            return refuse(f"{sum(not en for _, en in pairs)} of {len(pairs)} lines have no English")
         return pairs
     import difflib
 
     matcher = difflib.SequenceMatcher(None, copied, wanted, autojunk=False)
     if matcher.ratio() < _COPY_MIN_RATIO:
-        return None
+        return refuse(f"the copy matches {matcher.ratio():.0%} ({len(copied)} characters for {len(wanted)})")
     blocks = matcher.get_opcodes()
 
     def in_source(position):
@@ -893,9 +990,16 @@ def _parse_pairs(response, source):
     # A line with nothing of the transcript in it was made up, and one
     # without English was not translated: neither is a split to trust.
     restored = [(text, en) for text, (_, en) in zip(texts, pairs) if _content(text)]
-    if not restored or any(not en for _, en in restored):
-        return None
+    if not restored:
+        return refuse("no line holds the transcript")
+    if any(not en for _, en in restored):
+        return refuse(f"{sum(not en for _, en in restored)} of {len(restored)} lines have no English")
     return restored
+
+
+def _has_japanese(text):
+    """Whether `text` holds kana or kanji."""
+    return any("\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
 _SENTENCE_END = re.compile(r"[。？！?!]+")
@@ -985,11 +1089,12 @@ def translate_ollama(segments):
         response = _ollama_generate(
             _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_SPLIT_PROMPT
         )
-        pairs = _parse_pairs(response, text)
+        why = []
+        pairs = _parse_pairs(response, text, why)
         if pairs:
             return pairs
-        print(f"ollama split unusable ({len(text)} characters in, {len(response)} out); "
-              "translating per segment", flush=True)
+        print(f"ollama split unusable ({len(text)} characters in, {len(response)} out"
+              f"{', ' + why[0] if why else ''}); translating per segment", flush=True)
         return [
             (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
             for segment in segments
@@ -1096,9 +1201,23 @@ _STOCK_LINE = re.compile(r"ご視聴|ご清聴|チャンネル登録|高評価|�
 PREFETCH_MAX_JOBS = 8
 # The steps of captioning ahead a job can be asked to run on its own, over
 # the whole of its audio, for looking at what the step does: "speech" is
-# the first, Silero finding where the speech is, and "speech-firered" the
-# same step with FireRedVAD in Silero's place. More to come.
-DEV_STEPS = ("speech", "speech-firered")
+# the first, Silero finding where the speech is, "speech-firered" the same
+# step with FireRedVAD in Silero's place, and "speech-mean" with the mean
+# of FireRedVAD and pyannote's segmentation model. More to come.
+DEV_STEPS = ("speech", "speech-firered", "speech-mean")
+# The steps whose finder includes FireRedVAD, which also tell what its
+# event model hears.
+FIRERED_STEPS = ("speech-firered", "speech-mean")
+
+
+def step_speech_model(step):
+    """The model a dev step finds the speech with, in Silero's place (None:
+    Silero itself): the step's own stretches, and where its captions'
+    batches are cut."""
+    return {"speech-firered": _firered, "speech-mean": _firered_and_segmentation}.get(step)
+# Whether a step job also captions the video, as production would with the
+# step's speech finder cutting the batches.
+DEV_CAPTIONS = True
 # A step job looks at the audio again once this much more has arrived.
 DEV_SCAN_STEP = 2.0
 # How much of a job's audio one request may ask for, in seconds.
@@ -1113,7 +1232,12 @@ DEV_AUDIO_LIMIT = 120.0
 DEV_CACHE_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEV_CACHE", "~/livetrans/devcache"))
 # Bumped with a step's code, so findings cached by the old code are not
 # taken for the new one's.
-STEP_VERSIONS = {"speech": "silero-6.2-whole-1", "speech-firered": "firered-vad-whole-2", "speakers": "diarizen-large-v2-1"}
+STEP_VERSIONS = {
+    "speech": "silero-6.2-whole-1",
+    "speech-firered": "firered-vad-whole-2",
+    "speech-mean": "firered-seg30-mean-1",
+    "speakers": "diarizen-large-v2-1",
+}
 
 
 class DevCache:
@@ -1148,20 +1272,40 @@ class DevCache:
         return audio, about.get("duration")
 
     def save_audio(self, audio, duration):
+        """Keeps `audio` for the video, and forgets what the steps found over
+        any audio kept before it."""
         os.makedirs(self.dir, exist_ok=True)
+        for name in os.listdir(self.dir):
+            if name.endswith(".json") and name != "audio.json":
+                os.remove(os.path.join(self.dir, name))
         (np.clip(audio, -1, 1) * 32767).astype("<i2").tofile(os.path.join(self.dir, "audio.s16.part"))
         os.replace(os.path.join(self.dir, "audio.s16.part"), os.path.join(self.dir, "audio.s16"))
         with open(os.path.join(self.dir, "audio.json"), "w", encoding="utf-8") as f:
             json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration}, f)
 
+    def audio_seconds(self):
+        """How long the audio kept for the video is, or None."""
+        try:
+            with open(os.path.join(self.dir, "audio.json"), encoding="utf-8") as f:
+                return json.load(f).get("seconds")
+        except (OSError, ValueError):
+            return None
+
     def load_findings(self, step):
-        """What `step`, at its current version, found over the audio, or None."""
+        """What `step`, at its current version, found over the audio kept
+        now, or None. Findings over other audio (kept before a fetch got the
+        whole video, or by a server that did not say) are not taken."""
         try:
             with open(os.path.join(self.dir, f"{step}.json"), encoding="utf-8") as f:
                 found = json.load(f)
         except (OSError, ValueError):
             return None
-        return found if found.get("version") == STEP_VERSIONS.get(step) else None
+        if found.get("version") != STEP_VERSIONS.get(step):
+            return None
+        seconds = self.audio_seconds()
+        if seconds is None or abs(found.get("audio_seconds", -1) - seconds) > 0.01:
+            return None
+        return found
 
     def save_findings(self, step, findings):
         """Keeps what `step` found, but not the words heard: no text the
@@ -1169,7 +1313,7 @@ class DevCache:
         os.makedirs(self.dir, exist_ok=True)
         kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step == "speakers"}
         with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
-            json.dump({**kept, "version": STEP_VERSIONS.get(step)}, f)
+            json.dump({**kept, "version": STEP_VERSIONS.get(step), "audio_seconds": self.audio_seconds()}, f)
 
 
 def clear_dev_cache():
@@ -1754,6 +1898,13 @@ class PrefetchJob:
         self.lines = []
         self.text = ""
         self.grid = CutGrid()
+        # Where the speech is found, for the batches and a step's findings.
+        self.speech_model = step_speech_model(step)
+        # A step job captions the video too, as production would with its
+        # speech finder, the lines kept in memory only: whether that has
+        # reached the end, or failed (the step goes on without captions).
+        self.captioned = False
+        self.caption_error = None
         # The grid, the audio and `ready` are on the samples' clock; the
         # lines, and the times asked for, are the video's (see PacketClock).
         # A dev step's job keeps the one clock, as its audio may come from
@@ -1793,8 +1944,12 @@ class PrefetchJob:
         self.process = None
         self.started = time.time()
         threading.Thread(target=self._fetch, daemon=True).start()
-        threading.Thread(target=self._analyse if step else self._transcribe, daemon=True).start()
+        if not step or DEV_CAPTIONS:
+            threading.Thread(target=self._transcribe, daemon=True).start()
+        else:
+            self.captioned = True
         if step:
+            threading.Thread(target=self._analyse, daemon=True).start()
             threading.Thread(target=self._hear_words, daemon=True).start()
             threading.Thread(target=self._tell_speakers, daemon=True).start()
 
@@ -1893,7 +2048,6 @@ class PrefetchJob:
         if self.process.returncode not in (0, None) and not self.stop_event.is_set() and self.fetched < 1:
             self.fail(f"ffmpeg: {self.process.stderr.read().decode(errors='replace').strip()[-200:]}")
             return
-        self.fetch_done = True
         if self.duration is None or self.duration <= 0:
             self.duration = self.offset + self.fetched
         print(f"prefetch {self.id}: fetched {self.fetched:.0f}s from {self.offset:.0f}s", flush=True)
@@ -1908,18 +2062,27 @@ class PrefetchJob:
                 self.cache.save_audio(audio, self.duration)
             except OSError as exc:
                 print(f"prefetch {self.id}: not cached: {exc}", flush=True)
+        # Only now, so what the steps find over the whole of it is kept with
+        # the audio it was found over.
+        self.fetch_done = True
 
     def _transcribe(self):
+        """The captions, a batch at a time as the audio comes. A step job's
+        own state is its step's, which may be done before the captions."""
         position = 0.0
         # How far the audio had come when it was last looked at for a batch.
         looked = -1.0
-        while not self.stop_event.is_set() and self.state == "running":
+        while not self.stop_event.is_set() and self.state in (("running", "done") if self.step else ("running",)):
             with self.audio_lock:
                 have = self.fetched
                 done = self.fetch_done
             if done and have <= position + 0.05:
-                self.state = "done"
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
+                if self.step:
+                    self.captioned = True
+                    tell(f"{self.step}: {len(self.lines)} captions, the whole of the audio")
+                else:
+                    self.state = "done"
                 return
             window_end = min(have, position + PREFETCH_SCAN)
             capped = window_end < have
@@ -1929,7 +2092,7 @@ class PrefetchJob:
             looked = window_end
             with self.audio_lock:
                 window = self.audio[int(position * SAMPLE_RATE):int(window_end * SAMPLE_RATE)].copy()
-            speech = speech_stretches(window)
+            speech = speech_stretches(window, model=self.speech_model)
             batch = choose_batch(speech, window.size / SAMPLE_RATE, more=not done, capped=capped)
             if batch is None:
                 time.sleep(0.25)
@@ -1943,6 +2106,11 @@ class PrefetchJob:
                     reason,
                 )
             except Exception as exc:
+                if self.step:
+                    self.caption_error = f"{type(exc).__name__}: {exc}"
+                    print(f"prefetch {self.id}: captions: {self.caption_error}", flush=True)
+                    tell(f"{self.step}: captions stopped, {self.caption_error}")
+                    return
                 self.fail(f"transcription: {type(exc).__name__}: {exc}")
                 return
             if self.stop_event.is_set():
@@ -1955,7 +2123,8 @@ class PrefetchJob:
         """The job's step run over the whole of its audio, from the start,
         and again as more arrives, so what it finds is seen whole rather
         than batch by batch: `speech`, Silero's stretches, as the
-        transcription would have them; `speech-firered`, FireRedVAD's."""
+        transcription would have them; `speech-firered`, FireRedVAD's;
+        `speech-mean`, those of FireRedVAD and segmentation-3.0 averaged."""
         looked = -1.0
         while not self.stop_event.is_set() and self.state == "running":
             with self.audio_lock:
@@ -1997,16 +2166,15 @@ class PrefetchJob:
             try:
                 if not audio.size:
                     found = []
-                elif self.step == "speech-firered":
-                    found = speech_stretches(audio, model=_firered)
-                    events = sound_events(audio)
                 else:
-                    found = speech_stretches(audio)
+                    found = speech_stretches(audio, model=self.speech_model)
+                    if self.step in FIRERED_STEPS:
+                        events = sound_events(audio)
             except Exception as exc:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return
             self.speech = [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in found]
-            if self.step == "speech-firered" and audio.size:
+            if self.step in FIRERED_STEPS and audio.size:
                 self.events = {
                     kind: [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in runs]
                     for kind, runs in events.items()
@@ -2191,6 +2359,10 @@ class PrefetchJob:
             # Whether the audio is still coming: a dev job's is kept for the
             # next step only once its fetch has ended unstopped.
             "fetching": not self.fetch_done,
+            # A step job's captions: "running", "done" (to the end), or
+            # "failed: <why>".
+            "captions": f"failed: {self.caption_error}" if self.caption_error
+            else "done" if self.captioned else "running",
         }
 
     def findings(self):

@@ -51,6 +51,8 @@ enum AppSettings {
     /// The step dev mode runs, by `DevPipeline.Step`.
     static let pipelineStep = "pipelineStep"
     static let activityTimelineHeight = "activityTimelineHeight"
+    /// Whether dev mode's activity list is unfolded under its timeline.
+    static let activityLogShown = "activityLogShown"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -71,6 +73,7 @@ enum AppSettings {
             analysisModel: "",
             pipelineStep: "speech",
             activityTimelineHeight: 180.0,
+            activityLogShown: false,
         ])
     }
 

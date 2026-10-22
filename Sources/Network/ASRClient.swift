@@ -43,6 +43,9 @@ struct PrefetchStatus: Decodable, Equatable {
     /// Whether the audio is still being fetched. A server that does not
     /// say keeps nothing of a fetch it was stopped in.
     var fetching: Bool?
+    /// A dev job's captions, made as production would with its step's
+    /// speech finder: "running", "done", or "failed: <why>".
+    var captions: String?
 }
 
 /// A word Whisper heard over a dev job's audio: sent as
@@ -100,7 +103,7 @@ struct StepFindings: Decodable, Equatable {
     var analysed: Double
     /// Where the speech is, as [start, end] pairs in seconds of the video.
     var speech: [[Double]]
-    /// FireRedVAD's step only: where it hears singing, and music with
+    /// The steps with FireRedVAD in them only: where it hears singing, and music with
     /// neither singing nor speech, by kind ("singing", "music"), as pairs.
     var events: [String: [[Double]]]?
     /// The words Whisper alone hears over the audio, and up to where;
