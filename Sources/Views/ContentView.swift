@@ -256,30 +256,36 @@ struct ContentView: View {
             // In dev mode, Load: the host started and the step run over the
             // Chrome video, from what it kept of it.
             let loading = isDev ? engine.isRunning && !dev.isPaused : engine.isRunning
-            Button {
-                if loading {
-                    if isDev { dev.hold() }
-                    engine.stop()
-                } else if isDev {
-                    if !engine.isRunning { engine.start() }
-                    dev.load()
-                } else {
-                    engine.start()
+            HStack(spacing: 12) {
+                TabPicker()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    if loading {
+                        if isDev { dev.hold() }
+                        engine.stop()
+                    } else if isDev {
+                        if !engine.isRunning { engine.start() }
+                        dev.load()
+                    } else {
+                        engine.start()
+                    }
+                } label: {
+                    Label(
+                        loading ? "Stop" : isDev ? "Load" : "Start",
+                        systemImage: loading ? "stop.fill" : isDev ? "tray.and.arrow.down.fill" : "mic.fill"
+                    )
+                    .font(.headline)
+                    .frame(maxWidth: 240)
+                    .padding(.vertical, 4)
                 }
-            } label: {
-                Label(
-                    loading ? "Stop" : isDev ? "Load" : "Start",
-                    systemImage: loading ? "stop.fill" : isDev ? "tray.and.arrow.down.fill" : "mic.fill"
-                )
-                .font(.headline)
-                .frame(maxWidth: 240)
-                .padding(.vertical, 4)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(loading ? .red : .green)
+                .keyboardShortcut(.return, modifiers: .command)
+                .help(isDev && !loading ? "Show the Chrome video's captions and step from what the host kept of it, making only what is missing" : "")
+                // Keeps the button in the middle.
+                Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(loading ? .red : .green)
-            .keyboardShortcut(.return, modifiers: .command)
-            .help(isDev && !loading ? "Show the Chrome video's captions and step from what the host kept of it, making only what is missing" : "")
         }
         .padding()
     }
@@ -293,7 +299,6 @@ private struct VideoControls: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            TabPicker()
             Button {
                 video.send(.skip(seconds: -5))
             } label: {
@@ -547,29 +552,30 @@ private struct TabPicker: View {
         Button {
             isOpen.toggle()
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: video.pinned == nil ? "sparkle.magnifyingglass" : "pin.fill")
+            HStack(spacing: 6) {
+                Image(systemName: video.pinned == nil ? "sparkle.magnifyingglass" : "play.rectangle.fill")
                 Text(label)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: 160, alignment: .leading)
-                    .fixedSize(horizontal: true, vertical: false)
-                Image(systemName: "chevron.down")
-                    .font(.caption2)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption)
             }
-            .font(.caption)
-            .foregroundStyle(.gray)
+            .font(.callout)
+            .foregroundStyle(.white.opacity(0.85))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.1)))
         }
-        .help("Choose which Chrome tab the video buttons control")
-        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+        .buttonStyle(.plain)
+        .help("The Chrome tab whose video the app captions and controls: it stays on it until you choose another")
+        .popover(isPresented: $isOpen, arrowEdge: .top) {
             TabList { isOpen = false }
         }
     }
 
     private var label: String {
-        if let pinned = video.pinned { return pinned.title }
-        if let linked = video.linked { return "Auto: \(linked.title)" }
-        return "Auto"
+        if let pinned = video.pinned { return pinned.title.isEmpty ? pinned.url : pinned.title }
+        return "Find the video"
     }
 }
 
@@ -584,7 +590,7 @@ private struct TabList: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
                 row(
-                    title: "Automatic", detail: "The front tab of a Chrome window that has a video",
+                    title: "Find the video", detail: "The front tab of a Chrome window that has a video, kept from then on",
                     symbol: "sparkle.magnifyingglass", isChosen: video.pinned == nil, isControlled: false
                 ) {
                     video.pin(nil)

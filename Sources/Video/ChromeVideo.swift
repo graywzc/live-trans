@@ -34,9 +34,12 @@ final class ChromeVideo {
     /// Why the last command did nothing, for the user to fix.
     var problem: String?
 
-    /// The tab the user chose. Nil means automatic: whichever front tab has a
-    /// video.
+    /// The tab the user chose, or the one automatic found: once found, it
+    /// is kept, so the app never moves on to another video by itself. Nil
+    /// until then: whichever front tab has a video.
     private(set) var pinned: ChromeScript.Tab?
+    /// The tab was found rather than chosen.
+    private(set) var pinnedAutomatically = false
     /// The tab the buttons last controlled, whether chosen or found, or in
     /// automatic the one they would control as of the last listing.
     private(set) var linked: ChromeScript.Tab?
@@ -116,14 +119,27 @@ final class ChromeVideo {
         }
         guard let result, let probe = ChromeScript.mediaProbe(fromResult: result) else { return nil }
         hasReachedChrome = true
+        if pinned == nil {
+            keep(tabs.first(where: { $0.id == probe.tabID }) ?? linked.flatMap { $0.id == probe.tabID ? $0 : nil }
+                ?? ChromeScript.Tab(id: probe.tabID, title: probe.page, url: probe.page))
+        }
         return probe
     }
 
-    /// Nil goes back to automatic.
+    /// Nil goes back to automatic, which keeps the next video it finds.
     func pin(_ tab: ChromeScript.Tab?) {
         pinned = tab
+        pinnedAutomatically = false
         linked = tab
         state = tab?.video ?? .unknown
+    }
+
+    /// Automatic found its video: kept from now on, until another tab is
+    /// chosen or this one closes.
+    private func keep(_ tab: ChromeScript.Tab) {
+        guard pinned == nil else { return }
+        pinned = tab
+        pinnedAutomatically = true
     }
 
     /// Lists Chrome's tabs with the front tabs checked, then checks the rest
@@ -156,6 +172,7 @@ final class ChromeVideo {
                     if self.pinned == nil {
                         self.linked = ChromeScript.automaticTarget(in: listed, remembered: self.linked?.id)
                         self.state = self.linked?.video ?? .unknown
+                        if let found = self.linked { self.keep(found) }
                     }
                     self.checkRemaining(listed)
                 case .failure(let failure):
@@ -210,6 +227,7 @@ final class ChromeVideo {
         case .controlled(let tab, let playing):
             hasReachedChrome = true
             linked = tab
+            keep(tab)
             // Keep what the listing knew; the title may have changed with
             // the next episode.
             if pinned?.id == tab.id { pinned?.title = tab.title }
