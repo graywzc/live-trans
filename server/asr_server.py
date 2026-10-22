@@ -1617,7 +1617,7 @@ STEP_VERSIONS = {
     "words": "whisper-large-v3-reazon-aligned-1",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-speaker-cuts-near-same-meaning-2" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-speaker-cuts-near-same-meaning-3" for step in DEV_STEPS},
 }
 
 
@@ -2238,16 +2238,26 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             english.append(None if straddling or not inside else " ".join(inside))
     else:
         english = [None] * len(texts)
+    for k, (text, en) in enumerate(zip(texts, english)):
+        if text and en is None:
+            try:
+                english[k] = translate_text(text)
+            except Exception as exc:
+                print(f"piece not translated: {exc}", flush=True)
+                english[k] = ""
+    if pairs:
+        # Checked again piece by piece: an answer shifted by a line gives a
+        # piece the next one's meaning, which its neighbour, translated
+        # alone where a sentence of the answer straddled two pieces, then
+        # all but repeats.
+        try:
+            english = [en for _, en in _translate_what_is_left(list(zip(texts, english)))]
+        except Exception as exc:
+            print(f"pieces not checked: {exc}", flush=True)
     lines = []
     for (a, b, members), text, en in zip(pieces, texts, english):
         if not text:
             continue
-        if en is None:
-            try:
-                en = translate_text(text)
-            except Exception as exc:
-                print(f"piece not translated: {exc}", flush=True)
-                en = ""
         start, end = grid.bounds(a, b) or (words[members[0]][1], words[members[-1]][2])
         if within is None or (a >= low - 1e-6 and b <= high + 1e-6):
             lines.append({"ja": text, "en": en, "start": round(start, 2), "end": round(end, 2)})

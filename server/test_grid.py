@@ -5,6 +5,15 @@ import numpy as np
 
 import asr_server as srv
 
+
+def _no_translator(*args, **kwargs):
+    raise RuntimeError("no translator in these tests")
+
+
+# The tests' made-up translations are checked as real ones are, but never
+# sent to ollama: one the check would ask again for stays as it was.
+srv._ollama_generate = _no_translator
+
 SR = srv.SAMPLE_RATE
 
 
@@ -104,6 +113,35 @@ def test_sentences_heard_to_end_cut_for_good(monkeypatch=None):
         assert len(grid.cuts) == 4, grid.cuts
     finally:
         srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+
+
+def test_an_answer_shifted_by_a_line_is_caught_piece_by_piece():
+    grid = grid_with([(0.2, 2.0), (2.8, 5.0), (5.8, 7.5)], 0.0, 8.0)  # 0.8 s pauses: hard cuts
+    audio = silence(8.0)
+    whisper = FakeWhisper([("雨", 0.3, 0.8), ("ですか", 0.9, 1.9), ("傘を", 2.9, 3.5), ("借りた", 3.6, 4.2),
+                           ("んだ", 4.3, 4.9), ("明日は", 5.9, 6.5), ("晴れ", 6.6, 7.4)])
+
+    def llm(texts):
+        # Shifted by a line: the first piece given the second's meaning,
+        # the second joined to the third under the third's. The two are
+        # then translated alone, and the second comes out all but the
+        # first's.
+        return [("雨ですか", "是我借来的那把伞。"), ("傘を借りたんだ明日は晴れ", "明天会放晴。")]
+
+    alone = {"傘を借りたんだ": "那是我借来的那把伞。", "明日は晴れ": "明天会放晴。"}
+    asked = []
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = llm, srv.translate_ollama
+    srv.translate_text, real_text = alone.get, srv.translate_text
+    srv._ollama_generate = lambda ja, timeout, prompt=None: asked.append(ja) or f"again:{len(asked)}"
+    try:
+        lines = srv.hear_pieces(grid, audio, 0.0, beam_size=5, prompt="")
+    finally:
+        srv.run_whisper, srv.translate_ollama, srv.translate_text = real_whisper, real_translate, real_text
+        srv._ollama_generate = _no_translator
+    assert [l["ja"] for l in lines] == ["雨ですか", "傘を借りたんだ", "明日は晴れ"], lines
+    assert asked == ["雨ですか", "傘を借りたんだ"], asked
+    assert [l["en"] for l in lines] == ["again:1", "again:2", "明天会放晴。"], lines
 
 
 def test_llm_sentence_ends_cut_and_straddling_ones_are_translated_apart():
