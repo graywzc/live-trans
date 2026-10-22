@@ -161,15 +161,23 @@ def test_two_lines_given_one_translation_are_translated_again_each_alone():
     srv._ollama_generate = lambda text, timeout, prompt=None: asked.append(text) or f"译文{len(asked)}"
     try:
         pairs = srv._translate_what_is_left([
-            ("公害ですかああ", "是罗兰交给我的纸。"),
-            ("ローランから渡された紙だ", "是罗兰交给我的纸。"),
+            ("雨が降るのか", "这是从朋友那里借来的伞。"),
+            ("友達から借りた傘だ", "这是从朋友那里借来的伞。"),
             ("うん", "嗯"), ("うん", "嗯"),
+        ])
+        # All but the same, a word more or less, is one meaning too.
+        alike = srv._translate_what_is_left([
+            ("雨が降るのか", "是从朋友那里借来的伞。"),
+            ("友達から借りた傘だ", "那是从朋友那里借来的伞。"),
+            ("明日は晴れる", "明天会放晴。"),
         ])
     finally:
         srv._ollama_generate = generate
-    assert pairs == [("公害ですかああ", "译文1"), ("ローランから渡された紙だ", "译文2"),
+    assert pairs == [("雨が降るのか", "译文1"), ("友達から借りた傘だ", "译文2"),
                      ("うん", "嗯"), ("うん", "嗯")], pairs
-    assert asked == ["公害ですかああ", "ローランから渡された紙だ"], "the same words may share a translation"
+    assert asked[:2] == ["雨が降るのか", "友達から借りた傘だ"], "the same words may share a translation"
+    assert alike == [("雨が降るのか", "译文3"), ("友達から借りた傘だ", "译文4"), ("明日は晴れる", "明天会放晴。")], alike
+
 
 def test_an_answer_out_of_format_but_one_line_per_segment_is_taken_by_position():
     segments = ["今日は雨だね", "傘持ってきた", "もちろんだよ"]

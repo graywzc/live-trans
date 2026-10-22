@@ -1443,19 +1443,36 @@ def _by_position(response, segments):
     return pairs
 
 
+# Two translations this much alike (difflib's ratio), each at least this
+# long, are one meaning given to two different lines.
+SAME_MEANING = 0.8
+SAME_MEANING_LENGTH = 4
+
+
 def _translate_what_is_left(pairs):
     """`pairs` with any line answered with the Japanese again, or given the
     same translation as a different line (the LLM now and then repeats the
     next sentence's translation for the one before it: two captions with one
     meaning), translated by itself once more. One still Japanese after that
     is left untranslated, rather than shown as its own translation."""
+    import difflib
+
     meanings = collections.defaultdict(set)
     for ja, en in pairs:
         if _content(en):
             meanings[_content(en)].add(_content(ja))
+    # Or all but the same: a word more or less ("是…" and "那是…").
+    alike = set()
+    for i, (ja, en) in enumerate(pairs):
+        for k in range(i + 1, len(pairs)):
+            other_ja, other_en = pairs[k]
+            a, b = _content(en), _content(other_en)
+            if (min(len(a), len(b)) >= SAME_MEANING_LENGTH and _content(ja) != _content(other_ja)
+                    and difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= SAME_MEANING):
+                alike.update((i, k))
     result = []
-    for ja, en in pairs:
-        if _left_in_japanese(en) or len(meanings.get(_content(en), ())) > 1:
+    for i, (ja, en) in enumerate(pairs):
+        if _left_in_japanese(en) or len(meanings.get(_content(en), ())) > 1 or i in alike:
             en = _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)
             if _left_in_japanese(en):
                 en = ""
@@ -1600,7 +1617,7 @@ STEP_VERSIONS = {
     "words": "whisper-large-v3-reazon-aligned-1",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-speaker-cuts-1" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-speaker-cuts-near-same-meaning-2" for step in DEV_STEPS},
 }
 
 
