@@ -42,9 +42,11 @@ final class SidePanelTests: XCTestCase {
         XCTAssertEqual(dev.tab, .dev)
     }
 
-    /// Dev mode is the Dev tab being looked at, and nothing else: an
-    /// ordinary launch is production.
-    func testDevModeIsTheDevTabBeingShown() {
+    /// The Dev tab turns dev mode on, and it stays on while the other tabs
+    /// are used or the panel is closed, so analysing a caption does not
+    /// stop the step; the header's switch turns it off. An ordinary launch
+    /// is production.
+    func testDevModeStaysOnUntilLeft() {
         let panel = SidePanel()
         var told: [Bool] = []
         panel.onDevChange = { told.append($0) }
@@ -53,12 +55,18 @@ final class SidePanelTests: XCTestCase {
         XCTAssertEqual(told, [])
         panel.show(.dev)
         XCTAssertTrue(panel.isDev)
-        panel.isPresented = false
-        XCTAssertFalse(panel.isDev, "closed, the panel shows nothing")
-        panel.isPresented = true
-        XCTAssertTrue(panel.isDev)
+        panel.show(.analysis)
+        XCTAssertTrue(panel.isDev, "analysing a caption keeps the step going")
         panel.tab = .jisho
+        panel.isPresented = false
+        XCTAssertTrue(panel.isDev, "nor does a lookup, or closing the panel")
+        panel.leaveDev()
         XCTAssertFalse(panel.isDev)
+        XCTAssertEqual(panel.tab, .jisho)
+        panel.show(.dev)
+        panel.leaveDev()
+        XCTAssertFalse(panel.isDev)
+        XCTAssertEqual(panel.tab, .jisho, "the Dev tab gives way, or it would turn dev mode on again")
         XCTAssertEqual(told, [true, false, true, false])
     }
 

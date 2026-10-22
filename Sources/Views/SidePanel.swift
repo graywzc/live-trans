@@ -16,25 +16,37 @@ final class SidePanel {
     /// Open from the first frame: the window is captions and a panel, not
     /// captions that a panel joins once something has been looked up.
     var isPresented = true {
-        didSet { devMayHaveChanged() }
+        didSet { enterDevIfShown() }
     }
     var tab = Tab.jisho {
-        didSet { devMayHaveChanged() }
+        didSet { enterDevIfShown() }
     }
 
-    /// Dev mode is the Dev tab being looked at: one step of the pipeline
-    /// run on its own, and the list of what goes on behind it. On any
-    /// other tab, or with the panel closed, the app is in production,
-    /// making captions and keeping no account of how.
-    var isDev: Bool { isPresented && tab == .dev }
+    /// Dev mode: one step of the pipeline run on its own, its captions,
+    /// and the list of what goes on behind it. The Dev tab being shown
+    /// turns it on, and it stays on while Jisho or the analysis is looked
+    /// at, or the panel is closed, so looking a word up or analysing a
+    /// caption does not stop the step; only `leaveDev` (the header's Dev
+    /// switch) turns it off. Off, the app is in production, making captions
+    /// and keeping no account of how.
+    private(set) var isDev = false {
+        didSet {
+            guard isDev != oldValue else { return }
+            onDevChange(isDev)
+        }
+    }
     /// Told when dev mode is entered or left.
     @ObservationIgnored var onDevChange: (Bool) -> Void = { _ in }
-    @ObservationIgnored private var wasDev = false
 
-    private func devMayHaveChanged() {
-        guard isDev != wasDev else { return }
-        wasDev = isDev
-        onDevChange(isDev)
+    private func enterDevIfShown() {
+        if isPresented && tab == .dev { isDev = true }
+    }
+
+    /// Back to production. The Dev tab, if it is in front, gives way to
+    /// Jisho, or it would turn dev mode on again.
+    func leaveDev() {
+        if tab == .dev { tab = .jisho }
+        isDev = false
     }
 
     func show(_ tab: Tab) {

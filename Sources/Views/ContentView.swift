@@ -53,6 +53,19 @@ struct ContentView: View {
     private var header: some View {
         HStack(spacing: 16) {
             StatusPill(status: engine.status)
+            if panel.isDev {
+                Button {
+                    panel.leaveDev()
+                } label: {
+                    Text("Dev")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.orange.opacity(0.85)))
+                        .foregroundStyle(.black)
+                }
+                .help("Dev mode is on: the step goes on while you use Jisho or the analysis. Click to go back to production")
+            }
             Spacer()
             OutputPicker()
             VideoControls()

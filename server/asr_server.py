@@ -943,28 +943,37 @@ def _content(text):
     return "".join(ch for ch in text if ch not in _BOUNDARY_NOISE)
 
 
-def _parse_pairs(response, source):
+def _parse_pairs(response, source, why=None):
     """Parse "ja ||| en" lines. None if the LLM strayed from the format or
     rewrote the transcript instead of copying it. A copy off by a character
     or two (a particle dropped, a word respelled) is still good for where
-    the sentences break: the transcript's own text is put back in them."""
+    the sentences break: the transcript's own text is put back in them.
+    `why`, a list, is given the reason an answer is not used, told in
+    counts and kinds only, never the text."""
+    def refuse(reason):
+        if why is not None:
+            why.append(reason)
+        return None
+
     pairs = []
-    for line in response.splitlines():
-        if not line.strip():
-            continue
+    lines = [line for line in response.splitlines() if line.strip()]
+    for number, line in enumerate(lines, 1):
         ja, sep, en = line.partition(_PAIR_SEPARATOR)
         if not sep or not ja.strip():
-            return None
+            kind = "Japanese" if _has_japanese(line) else "no Japanese"
+            return refuse(f"line {number} of {len(lines)} has no separator ({kind}, {len(line)} characters)")
         pairs.append((ja.strip(), en.strip()))
     copied = "".join(_content(ja) for ja, _ in pairs)
     wanted = _content(source)
     if copied == wanted:
+        if any(not en for _, en in pairs):
+            return refuse(f"{sum(not en for _, en in pairs)} of {len(pairs)} lines have no English")
         return pairs
     import difflib
 
     matcher = difflib.SequenceMatcher(None, copied, wanted, autojunk=False)
     if matcher.ratio() < _COPY_MIN_RATIO:
-        return None
+        return refuse(f"the copy matches {matcher.ratio():.0%} ({len(copied)} characters for {len(wanted)})")
     blocks = matcher.get_opcodes()
 
     def in_source(position):
@@ -981,9 +990,16 @@ def _parse_pairs(response, source):
     # A line with nothing of the transcript in it was made up, and one
     # without English was not translated: neither is a split to trust.
     restored = [(text, en) for text, (_, en) in zip(texts, pairs) if _content(text)]
-    if not restored or any(not en for _, en in restored):
-        return None
+    if not restored:
+        return refuse("no line holds the transcript")
+    if any(not en for _, en in restored):
+        return refuse(f"{sum(not en for _, en in restored)} of {len(restored)} lines have no English")
     return restored
+
+
+def _has_japanese(text):
+    """Whether `text` holds kana or kanji."""
+    return any("\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
 _SENTENCE_END = re.compile(r"[。？！?!]+")
@@ -1073,11 +1089,12 @@ def translate_ollama(segments):
         response = _ollama_generate(
             _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_SPLIT_PROMPT
         )
-        pairs = _parse_pairs(response, text)
+        why = []
+        pairs = _parse_pairs(response, text, why)
         if pairs:
             return pairs
-        print(f"ollama split unusable ({len(text)} characters in, {len(response)} out); "
-              "translating per segment", flush=True)
+        print(f"ollama split unusable ({len(text)} characters in, {len(response)} out"
+              f"{', ' + why[0] if why else ''}); translating per segment", flush=True)
         return [
             (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
             for segment in segments
