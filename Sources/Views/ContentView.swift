@@ -703,17 +703,22 @@ private struct OtherHearingLine: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 6) {
-            Text(label)
-                .font(.system(size: fontSize * 0.5).monospaced())
-                .foregroundStyle(.gray)
-                .frame(width: fontSize * 1.6, alignment: .leading)
-                .padding(.bottom, fontSize * 0.2)
+            Self.name(label, fontSize: fontSize)
             FuriganaText(
                 tokens: ruby, fontSize: fontSize * 0.9, showReadings: showFurigana, selection: $selection, onClick: onClick
             )
             .opacity(0.85)
         }
         .help("What \(label) heard over the same stretch")
+    }
+
+    /// A recognizer's name at the left of its line, on the text's baseline.
+    static func name(_ label: String, fontSize: Double) -> some View {
+        Text(label)
+            .font(.system(size: fontSize * 0.5).monospaced())
+            .foregroundStyle(.gray)
+            .frame(width: fontSize * 1.6, alignment: .leading)
+            .padding(.bottom, fontSize * 0.2)
     }
 }
 
@@ -741,10 +746,18 @@ struct CaptionRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                FuriganaText(
-                    tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
-                    selection: $selection, onClick: onSeek
-                )
+                HStack(alignment: .bottom, spacing: 6) {
+                    // With the other recognizers under it, the caption's own
+                    // line is named too: ReazonSpeech k2's.
+                    if !others.isEmpty {
+                        OtherHearingLine.name("k2", fontSize: fontSize)
+                            .help("What ReazonSpeech k2, the captions' own recognizer, heard")
+                    }
+                    FuriganaText(
+                        tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
+                        selection: $selection, onClick: onSeek
+                    )
+                }
                 ForEach(others, id: \.label) { other in
                     OtherHearingLine(
                         label: other.label, ruby: other.ruby, fontSize: fontSize, showFurigana: showFurigana, onClick: onSeek
