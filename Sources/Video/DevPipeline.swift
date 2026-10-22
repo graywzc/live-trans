@@ -98,6 +98,8 @@ final class DevPipeline {
     private(set) var speakers: [SpeakerTurn] = []
     /// The captions heard again by the other recognizers.
     private(set) var others: [OtherHearing] = []
+    /// Their texts with readings, by text, made once each.
+    @ObservationIgnored private var otherRuby: [String: [RubyToken]] = [:]
     /// Off at launch, like captioning ahead.
     private(set) var isPaused = true
     /// The stretch of the video picked out on the timeline.
@@ -468,8 +470,13 @@ final class DevPipeline {
 
     /// What the other recognizers heard over `caption`, as each is shown:
     /// those that have heard it, in OtherHearing.shown's order.
-    func others(for caption: Caption) -> [(label: String, text: String)] {
-        Self.heard(others, over: caption)
+    func others(for caption: Caption) -> [(label: String, ruby: [RubyToken])] {
+        Self.heard(others, over: caption).map { other in
+            if let ruby = otherRuby[other.text] { return (other.label, ruby) }
+            let ruby = Furigana.annotate(other.text)
+            otherRuby[other.text] = ruby
+            return (other.label, ruby)
+        }
     }
 
     /// The one of `others` heard over `caption`'s own stretch (the host
