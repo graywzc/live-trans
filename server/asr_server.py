@@ -2759,18 +2759,29 @@ class PrefetchJob:
     def _hear_others(self):
         """Each caption heard again by DEV_OTHER_HEARERS, one after another,
         once the captions have reached the end; a recognizer that is not
-        set up or fails is passed over."""
-        while not self.stop_event.is_set() and not self.captioned and not self.caption_error:
+        set up or fails is passed over. What they heard before over a
+        caption cut the same way is given it from the cache as it comes."""
+        kept = {}
+        if self.cache:
+            while not self.stop_event.is_set() and not self.captioned and not self.cache.audio_seconds():
+                time.sleep(1)
+            if (found := self.cache.load_findings("others")):
+                kept = {(a, b): texts for a, b, texts in found.get("others", [])}
+
+        def spans():
+            return [(line["start"], line["end"]) for line in list(self.lines) if line.get("start") is not None and line.get("end") is not None]
+
+        while True:
+            finished = self.captioned
+            for span in spans():
+                if span in kept and span not in self.others:
+                    self.others[span] = dict(kept[span])
+            if finished or self.stop_event.is_set() or self.caption_error:
+                break
             time.sleep(1)
         if self.stop_event.is_set() or self.caption_error:
             return
-        spans = [(line["start"], line["end"]) for line in self.lines if line.get("start") is not None and line.get("end") is not None]
-        kept = {}
-        if self.cache and (found := self.cache.load_findings("others")):
-            kept = {(a, b): texts for a, b, texts in found.get("others", [])}
-        for span in spans:
-            if span in kept:
-                self.others[span] = dict(kept[span])
+        spans = spans()
         with self.audio_lock:
             audio = self.audio.copy()
         for name, tool in DEV_OTHER_HEARERS:
