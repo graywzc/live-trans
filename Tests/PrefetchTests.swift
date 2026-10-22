@@ -139,6 +139,29 @@ final class PrefetchTests: XCTestCase {
         XCTAssertFalse(stretch.holds(9.9))
     }
 
+    /// In dev mode the step's captions are followed as production's are,
+    /// with no job of the prefetcher's own; in production, with none, not.
+    @MainActor
+    func testThePlayingCaptionIsFollowedInDevMode() {
+        let engine = CaptionEngine()
+        let prefetch = Prefetcher(engine: engine, video: ChromeVideo())
+        engine.add([
+            CaptionPair(ja: "あ", en: "a", start: 4, end: 6),
+            CaptionPair(ja: "い", en: "i", start: 7, end: 9),
+        ], tabID: 1, url: "https://example.com/v", heardAgain: false)
+        prefetch.show(playhead: VideoMoment(tabID: 1, url: "https://example.com/v", seconds: 7.5))
+        prefetch.followPlayhead()
+        XCTAssertNil(prefetch.currentCaptionID, "production with nothing fetched ahead follows nothing")
+        var isDev = true
+        prefetch.isDev = { isDev }
+        prefetch.followPlayhead()
+        XCTAssertEqual(prefetch.currentCaptionID, engine.captions.last?.id)
+        XCTAssertEqual(prefetch.playingCaptionID, engine.captions.last?.id)
+        isDev = false
+        prefetch.followPlayhead()
+        XCTAssertNil(prefetch.playingCaptionID)
+    }
+
     func testStatusDecodes() throws {
         let json = #"{"state":"running","error":null,"duration":90.5,"fetched":60,"ready":35.8,"level":1200.5,"count":12,"lines":[{"ja":"あ","en":"a","start":35,"end":36}]}"#
         let status = try JSONDecoder().decode(PrefetchStatus.self, from: Data(json.utf8))
