@@ -103,37 +103,55 @@ OLLAMA_MODEL = os.getenv("LIVETRANS_OLLAMA_MODEL", "qwen3.5:9b")
 OLLAMA_KEEP_ALIVE = os.getenv("LIVETRANS_OLLAMA_KEEP_ALIVE", "30m")
 OLLAMA_TIMEOUT = float(os.getenv("LIVETRANS_OLLAMA_TIMEOUT", "30"))
 
-_OLLAMA_PROMPT = (
-    "Translate this Japanese to natural English. "
-    "Output only the translation, nothing else.\n\n"
-)
+# The language the captions are translated into: "en" (English) or "zh"
+# (Simplified Chinese), set by the app when it starts the server.
+TARGETS = {"en": ("English", "eng_Latn"), "zh": ("Simplified Chinese", "zho_Hans")}
+TARGET = os.getenv("LIVETRANS_TARGET", "en")
+
+
+def _language():
+    return TARGETS[TARGET][0]
+
+
+def _ollama_prompt():
+    return f"Translate this Japanese to natural {_language()}. Output only the translation, nothing else.\n\n"
+
+
 # One VAD segment routinely holds several sentences (often several speakers),
 # and Whisper frequently emits them with no punctuation at all, so there is
 # nothing to split on mechanically. The LLM is translating anyway; have it mark
 # the sentence boundaries in the same pass.
-_OLLAMA_SPLIT_PROMPT = (
-    "Below is a Japanese speech transcript. It may contain several sentences "
-    "run together, often without punctuation, possibly from different speakers.\n"
-    "Split it into individual sentences and translate each into natural English.\n"
-    "Output one sentence per line in exactly this format:\n"
-    "<Japanese sentence> ||| <English translation>\n"
-    "Copy the Japanese characters exactly as given; do not add, drop, or change "
-    "any. Output nothing else.\n\n"
-)
+def _split_prompt(insist=False):
+    return (
+        "Below is a Japanese speech transcript. It may contain several sentences "
+        "run together, often without punctuation, possibly from different speakers.\n"
+        f"Split it into individual sentences and translate each into natural {_language()}.\n"
+        "Output one sentence per line in exactly this format:\n"
+        f"<Japanese sentence> ||| <{_language()} translation>\n"
+        "Copy the Japanese characters exactly as given; do not add, drop, or change "
+        "any. Output nothing else.\n"
+        + (f"After ||| write the {_language()} translation, never the Japanese again.\n" if insist else "")
+        + "\n"
+    )
+
+
 # Whisper now and then returns half a minute of speech as one segment with
 # no punctuation. Among the other lines of a transcript the LLM leaves such
 # a line whole; given it alone and told it is too long, it breaks it up.
-_OLLAMA_LONG_PROMPT = (
-    "Below is one long stretch of Japanese speech, transcribed without sentence breaks.\n"
-    "Break it into short lines, each a sentence or a clause, cutting after sentence "
-    "endings and after connectives such as けど, ので, から, し, て or たら. "
-    "A line should be at most about 40 Japanese characters.\n"
-    "Translate each line into natural English.\n"
-    "Output one line per piece in exactly this format:\n"
-    "<Japanese> ||| <English translation>\n"
-    "Copy the Japanese characters exactly as given, in order; do not add, drop, or "
-    "change any. Output nothing else.\n\n"
-)
+def _long_prompt():
+    return (
+        "Below is one long stretch of Japanese speech, transcribed without sentence breaks.\n"
+        "Break it into short lines, each a sentence or a clause, cutting after sentence "
+        "endings and after connectives such as けど, ので, から, し, て or たら. "
+        "A line should be at most about 40 Japanese characters.\n"
+        f"Translate each line into natural {_language()}.\n"
+        "Output one line per piece in exactly this format:\n"
+        f"<Japanese> ||| <{_language()} translation>\n"
+        "Copy the Japanese characters exactly as given, in order; do not add, drop, or "
+        "change any. Output nothing else.\n\n"
+    )
+
+
 _PAIR_SEPARATOR = "|||"
 # How much of the transcript the LLM's copy must match for its sentence
 # breaks to be used.
@@ -856,8 +874,9 @@ def _is_timeout(exc):
     return isinstance(exc, (TimeoutError, socket.timeout))
 
 
-def _ollama_generate(text, timeout, prompt=_OLLAMA_PROMPT):
+def _ollama_generate(text, timeout, prompt=None):
     global _ollama_supports_think
+    prompt = _ollama_prompt() if prompt is None else prompt
     import urllib.error
     import urllib.request
 
@@ -943,6 +962,26 @@ def _content(text):
     return "".join(ch for ch in text if ch not in _BOUNDARY_NOISE)
 
 
+# A translation this much kana is the Japanese again rather than English or
+# Chinese, neither of which is written in kana. (Kanji alone may be both: a
+# Chinese 天才 for the Japanese 天才 is a translation.)
+LEFT_IN_JAPANESE = 0.3
+
+
+def _left_in_japanese(translation):
+    text = _content(translation)
+    kana = sum("\u3040" <= ch <= "\u30ff" for ch in text)
+    return bool(text) and kana >= LEFT_IN_JAPANESE * len(text)
+
+
+def _japanese_again(pairs):
+    """How many of `pairs` were answered with the Japanese again, when that
+    is a third of them or more (at least two): the LLM copied rather than
+    translated, and the answer is not to be used; else 0."""
+    left = sum(_left_in_japanese(en) for _, en in pairs)
+    return left if left >= max(2, len(pairs) / 3) else 0
+
+
 def _parse_pairs(response, source, why=None):
     """Parse "ja ||| en" lines. None if the LLM strayed from the format or
     rewrote the transcript instead of copying it. A copy off by a character
@@ -968,6 +1007,8 @@ def _parse_pairs(response, source, why=None):
     if copied == wanted:
         if any(not en for _, en in pairs):
             return refuse(f"{sum(not en for _, en in pairs)} of {len(pairs)} lines have no English")
+        if left := _japanese_again(pairs):
+            return refuse(f"{left} of {len(pairs)} lines left in Japanese")
         return pairs
     import difflib
 
@@ -994,6 +1035,8 @@ def _parse_pairs(response, source, why=None):
         return refuse("no line holds the transcript")
     if any(not en for _, en in restored):
         return refuse(f"{sum(not en for _, en in restored)} of {len(restored)} lines have no English")
+    if left := _japanese_again(restored):
+        return refuse(f"{left} of {len(restored)} lines left in Japanese")
     return restored
 
 
@@ -1040,7 +1083,10 @@ def _breaks_only(response, source):
     translate it ("ja ||| ja ||| ja"), each translated by itself. None if
     the answer is not that."""
     fields = [field.strip() for line in response.splitlines() for field in line.split(_PAIR_SEPARATOR)]
-    japanese = [field for field in fields if any(ch > "\u3000" for ch in field)]
+    # The pieces of the transcript, not a translation into another
+    # language written in kanji.
+    whole = _content(source)
+    japanese = [field for field in fields if _content(field) and _content(field) in whole]
     pieces = _parse_pairs("\n".join(f"{field} {_PAIR_SEPARATOR} -" for field in japanese), source)
     if not pieces or len(pieces) < 2:
         return None
@@ -1064,7 +1110,7 @@ def _split_long(pairs, words):
         pieces = None
         size = len(_content(ja))
         if _is_long(ja, span, words) and size >= 2 * SPLIT_MIN_PIECE_CHARS:
-            prompt = _OLLAMA_LONG_PROMPT if size > SPLIT_MIN_CHARS else _OLLAMA_SPLIT_PROMPT
+            prompt = _long_prompt() if size > SPLIT_MIN_CHARS else _split_prompt()
             try:
                 response = _ollama_generate(_for_splitting(ja), timeout=OLLAMA_TIMEOUT, prompt=prompt)
                 pieces = _parse_pairs(response, ja) or _breaks_only(response, ja)
@@ -1087,18 +1133,27 @@ def translate_ollama(segments):
     text = "\n".join(segments)
     try:
         response = _ollama_generate(
-            _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_OLLAMA_SPLIT_PROMPT
+            _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_split_prompt()
         )
         why = []
         pairs = _parse_pairs(response, text, why)
+        if not pairs and why and why[0].endswith("left in Japanese"):
+            # Copied rather than translated, now and then a whole batch:
+            # asked once more, told so.
+            print(f"ollama split {why[0]}; asking again", flush=True)
+            response = _ollama_generate(
+                _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_split_prompt(insist=True)
+            )
+            why = []
+            pairs = _parse_pairs(response, text, why)
         if pairs:
-            return pairs
+            return _translate_what_is_left(pairs)
         print(f"ollama split unusable ({len(text)} characters in, {len(response)} out"
               f"{', ' + why[0] if why else ''}); translating per segment", flush=True)
-        return [
+        return _translate_what_is_left([
             (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
             for segment in segments
-        ]
+        ])
     except Exception as exc:
         if _is_timeout(exc):
             # Slow this once (the GPU shared, a long answer): the rest of the
@@ -1112,6 +1167,20 @@ def translate_ollama(segments):
         return None
 
 
+def _translate_what_is_left(pairs):
+    """`pairs` with any line answered with the Japanese again translated by
+    itself once more; one still Japanese after that is left untranslated,
+    rather than shown as its own translation."""
+    result = []
+    for ja, en in pairs:
+        if _left_in_japanese(en):
+            en = _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)
+            if _left_in_japanese(en):
+                en = ""
+        result.append((ja, en))
+    return result
+
+
 def translate_nllb(text):
     stripped = text.strip()
     if _nllb is None or _is_untranslatable(stripped):
@@ -1119,10 +1188,10 @@ def translate_nllb(text):
     with _nllb_lock:
         tokens = _nllb_tok.convert_ids_to_tokens(_nllb_tok.encode(stripped))
         results = _nllb.translate_batch(
-            [tokens], target_prefix=[["eng_Latn"]], beam_size=2, max_decoding_length=256
+            [tokens], target_prefix=[[TARGETS[TARGET][1]]], beam_size=2, max_decoding_length=256
         )
     hyp = results[0].hypotheses[0]
-    if hyp and hyp[0] == "eng_Latn":
+    if hyp and hyp[0] == TARGETS[TARGET][1]:
         hyp = hyp[1:]
     return _nllb_tok.decode(_nllb_tok.convert_tokens_to_ids(hyp)).strip()
 
@@ -1146,9 +1215,10 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
         else:
             pairs = translate_ollama(segments) if _ollama_ok else None
             if pairs is None:
+                # Whisper translates into English only.
                 pairs = [(ja, " ".join(run_whisper(
                     audio, beam_size=beam_size, task="translate"
-                )))]
+                )) if TARGET == "en" else "")]
             else:
                 pairs = _split_long(pairs, words)
     lines = []
@@ -2431,6 +2501,7 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "ollama_model": OLLAMA_MODEL if _ollama_ok else None,
                 "prefetch": True,
+                "target": TARGET,
             })
         elif self.path.startswith("/events"):
             from urllib.parse import parse_qs, urlparse
@@ -2580,6 +2651,7 @@ def start_idle_watchdog(timeout):
 
 
 def main():
+    global TARGET
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
@@ -2589,7 +2661,13 @@ def main():
         default=float(os.getenv("LIVETRANS_IDLE_TIMEOUT", "0")),
         help="exit after this many idle seconds (0 disables)",
     )
+    parser.add_argument(
+        "--target", choices=sorted(TARGETS), default=TARGET,
+        help="the language captions are translated into",
+    )
     args = parser.parse_args()
+    TARGET = args.target
+    print(f"translating into {_language()}", flush=True)
 
     load_models()
     # A plain `kill` should release the LLM too, not just this process.

@@ -8,14 +8,34 @@ struct ServerConfig: Equatable {
     var remoteDir: String
     var remotePython: String
     var idleTimeout: Int
+    var target = Target.english
+
+    /// The language the captions are translated into, as the server's
+    /// `--target` names it.
+    enum Target: String, CaseIterable, Identifiable {
+        case english = "en"
+        case chinese = "zh"
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .english: "English"
+            case .chinese: "Chinese (Simplified)"
+            }
+        }
+    }
 
     var launchCommand: String {
         let log = "\(remoteDir)/server.log"
+        // English is the server's own default: left unsaid, so a server from
+        // before the option still starts.
+        let target = target == .english ? "" : "--target \(target.rawValue) "
         // setsid plus redirecting all three fds fully detaches the server, so
         // dropping the ssh connection cannot take it down.
         return "cd \(remoteDir) && "
             + "setsid nohup \(remotePython) asr_server.py --host 0.0.0.0 --port \(port) "
-            + "--idle-timeout \(idleTimeout) < /dev/null > \(log) 2>&1 & "
+            + "--idle-timeout \(idleTimeout) \(target)< /dev/null > \(log) 2>&1 & "
             + "disown; echo started"
     }
 }
@@ -108,9 +128,18 @@ actor ServerSession {
         self.client = client
 
         if let health = await client.health(timeout: 3) {
-            // Someone else (another Mac, say) started it; theirs to stop.
-            startHeartbeat(client)
-            return (client, health)
+            if health.translatesInto == config.target {
+                // Someone else (another Mac, say) started it; theirs to stop.
+                startHeartbeat(client)
+                return (client, health)
+            }
+            // Translating into another language: started again with this one.
+            onProgress("Restarting GPU server for \(config.target.title)…")
+            await client.shutdown()
+            let gone = Date().addingTimeInterval(15)
+            while Date() < gone, await client.health(timeout: 1) != nil {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
         }
 
         onProgress("Starting GPU server on \(host)…")

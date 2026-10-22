@@ -152,6 +152,22 @@ final class ServerConfigTests: XCTestCase {
                 + "< /dev/null > ~/livetrans/server.log 2>&1 & disown; echo started"
         )
     }
+
+    /// Chinese is asked for; English, the server's default, is left unsaid
+    /// so a server from before the option still starts.
+    func testLaunchCommandNamesAChineseTarget() {
+        var config = ServerConfig(
+            sshHost: "gpubox", port: 8770, remoteDir: "~/livetrans",
+            remotePython: "~/venvs/livetrans/bin/python", idleTimeout: 180
+        )
+        XCTAssertFalse(config.launchCommand.contains("--target"))
+        config.target = .chinese
+        XCTAssertTrue(config.launchCommand.contains("--idle-timeout 180 --target zh < /dev/null"), config.launchCommand)
+        let old = try? JSONDecoder().decode(ServerHealth.self, from: Data(#"{"status":"ok"}"#.utf8))
+        XCTAssertEqual(old?.translatesInto, .english, "a server that doesn't say translates into English")
+        let chinese = try? JSONDecoder().decode(ServerHealth.self, from: Data(#"{"status":"ok","target":"zh"}"#.utf8))
+        XCTAssertEqual(chinese?.translatesInto, .chinese)
+    }
 }
 
 final class FrameChunkerTests: XCTestCase {

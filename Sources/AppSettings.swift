@@ -53,6 +53,8 @@ enum AppSettings {
     static let activityTimelineHeight = "activityTimelineHeight"
     /// Whether dev mode's activity list is unfolded under its timeline.
     static let activityLogShown = "activityLogShown"
+    /// The language captions are translated into, by `ServerConfig.Target`.
+    static let translationTarget = "translationTarget"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -74,6 +76,7 @@ enum AppSettings {
             pipelineStep: "speech",
             activityTimelineHeight: 180.0,
             activityLogShown: false,
+            translationTarget: ServerConfig.Target.english.rawValue,
         ])
     }
 
@@ -84,7 +87,8 @@ enum AppSettings {
             port: defaults.integer(forKey: asrPort),
             remoteDir: defaults.string(forKey: remoteDir) ?? "",
             remotePython: defaults.string(forKey: remotePython) ?? "",
-            idleTimeout: defaults.integer(forKey: idleTimeout)
+            idleTimeout: defaults.integer(forKey: idleTimeout),
+            target: ServerConfig.Target(rawValue: defaults.string(forKey: translationTarget) ?? "") ?? .english
         )
     }
 

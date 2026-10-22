@@ -8,9 +8,15 @@ struct ServerHealth: Decodable, Equatable {
     var ollamaModel: String?
     /// The server can fetch a video's audio ahead and caption it.
     var prefetch: Bool?
+    /// The language it translates into; a server that doesn't say, English.
+    var target: String?
+
+    var translatesInto: ServerConfig.Target {
+        target.flatMap(ServerConfig.Target.init(rawValue:)) ?? .english
+    }
 
     enum CodingKeys: String, CodingKey {
-        case status, asr, device, prefetch
+        case status, asr, device, prefetch, target
         case translationBackend = "translation_backend"
         case ollamaModel = "ollama_model"
     }
