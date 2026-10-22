@@ -38,36 +38,30 @@ final class SidePanelTests: XCTestCase {
 
         let dev = SidePanel()
         dev.applyLaunchArgument(defaults: defaults(sidePanel: "dev"))
+        XCTAssertTrue(dev.isDev, "dev mode, the panel as it was")
         XCTAssertTrue(dev.isPresented)
-        XCTAssertEqual(dev.tab, .dev)
+        XCTAssertEqual(dev.tab, .jisho)
     }
 
-    /// The Dev tab turns dev mode on, and it stays on while the other tabs
-    /// are used or the panel is closed, so analysing a caption does not
-    /// stop the step; the header's switch turns it off. An ordinary launch
-    /// is production.
-    func testDevModeStaysOnUntilLeft() {
+    /// Dev mode is the header's switch alone: the panel's tabs, and closing
+    /// it, leave it as it is, so analysing a caption does not stop the
+    /// step. An ordinary launch is production.
+    func testDevModeIsTheSwitchNotATab() {
         let panel = SidePanel()
         var told: [Bool] = []
         panel.onDevChange = { told.append($0) }
         XCTAssertFalse(panel.isDev)
         panel.show(.analysis)
         XCTAssertEqual(told, [])
-        panel.show(.dev)
-        XCTAssertTrue(panel.isDev)
+        panel.isDev = true
         panel.show(.analysis)
-        XCTAssertTrue(panel.isDev, "analysing a caption keeps the step going")
-        panel.tab = .jisho
+        panel.show(.jisho)
         panel.isPresented = false
-        XCTAssertTrue(panel.isDev, "nor does a lookup, or closing the panel")
-        panel.leaveDev()
+        XCTAssertTrue(panel.isDev, "analysing, looking up and closing the panel keep the step going")
+        panel.isDev = true
+        panel.isDev = false
         XCTAssertFalse(panel.isDev)
-        XCTAssertEqual(panel.tab, .jisho)
-        panel.show(.dev)
-        panel.leaveDev()
-        XCTAssertFalse(panel.isDev)
-        XCTAssertEqual(panel.tab, .jisho, "the Dev tab gives way, or it would turn dev mode on again")
-        XCTAssertEqual(told, [true, false, true, false])
+        XCTAssertEqual(told, [true, false], "told of changes only")
     }
 
     func testAnUnknownValueIsIgnored() {

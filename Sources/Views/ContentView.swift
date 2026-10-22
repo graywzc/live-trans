@@ -29,6 +29,9 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     header
                     captionList
+                    if panel.isDev {
+                        ActivityView()
+                    }
                     footer
                 }
                 .frame(minWidth: Self.minCaptionsWidth, maxWidth: .infinity)
@@ -50,23 +53,32 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
     }
 
+    /// The header as it fits: whole, or with the mode switch's labels
+    /// short and the version left out, on a narrow caption side.
     private var header: some View {
-        HStack(spacing: 16) {
+        ViewThatFits(in: .horizontal) {
+            headerRow(compact: false)
+            headerRow(compact: true)
+        }
+        .font(.body)
+        .buttonStyle(.borderless)
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+    }
+
+    private func headerRow(compact: Bool) -> some View {
+        HStack(spacing: compact ? 10 : 16) {
             StatusPill(status: engine.status)
-            if panel.isDev {
-                Button {
-                    panel.leaveDev()
-                } label: {
-                    Text("Dev")
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.orange.opacity(0.85)))
-                        .foregroundStyle(.black)
-                }
-                .help("Dev mode is on: the step goes on while you use Jisho or the analysis. Click to go back to production")
+            Picker("Mode", selection: Binding(get: { panel.isDev }, set: { panel.isDev = $0 })) {
+                Text(compact ? "Prod" : "Production").tag(false)
+                Text("Dev").tag(true)
             }
-            Spacer()
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .controlSize(.small)
+            .help("Production captions what you watch; Dev runs one step of the pipeline over the whole video, its timeline under the captions")
+            Spacer(minLength: 0)
             OutputPicker()
             VideoControls()
             if !engine.captions.isEmpty {
@@ -84,18 +96,16 @@ struct ContentView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .help("Clear everything and restart")
-            Text(AppVersion.display)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.gray.opacity(0.7))
-                .help("LiveTrans version")
+            if !compact {
+                Text(AppVersion.display)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.gray.opacity(0.7))
+                    .help("LiveTrans version")
+            }
             SettingsLink {
                 Image(systemName: "gearshape")
             }
         }
-        .font(.body)
-        .buttonStyle(.borderless)
-        .padding(.horizontal)
-        .padding(.vertical, 10)
     }
 
     private var captionList: some View {

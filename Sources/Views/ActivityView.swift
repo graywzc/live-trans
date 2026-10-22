@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// The Dev tab: how this Mac and the GPU server stand now, the timeline
-/// of the step being run, and under that what each machine has done,
-/// newest at the bottom. Looking at it is what puts the app in dev mode.
+/// Dev mode's view, under the captions: the timeline of the step being
+/// run, its height dragged at the line above it, and under that, folded
+/// away until asked for, how this Mac and the GPU server stand and what
+/// each has done, newest at the bottom.
 struct ActivityView: View {
     static let symbol = "waveform.path.ecg"
 
@@ -16,51 +17,78 @@ struct ActivityView: View {
     @Environment(Prefetcher.self) private var prefetch
     @Environment(DevPipeline.self) private var dev
     @AppStorage(AppSettings.activityTimelineHeight) private var timelineHeight = 180.0
+    @AppStorage(AppSettings.activityLogShown) private var logShown = false
 
     static let minimumTimelineHeight = 80.0
     static let maximumTimelineHeight = 600.0
+    static let logHeight = 180.0
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 6) {
-                StatusRow(name: macName, color: Self.macColor(engine.status), text: macStatus)
-                StatusRow(
-                    name: hostName, color: Self.hostColor(engine.status),
-                    text: Self.hostStatus(engine.status, job: prefetch.job, step: dev.job)
-                )
+            RowSplitHandle { delta in
+                // The line is above the timeline: down makes it shorter.
+                timelineHeight = min(max(timelineHeight - delta, Self.minimumTimelineHeight), Self.maximumTimelineHeight)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal)
-            .padding(.bottom, 10)
-            Divider()
             StepTimeline()
                 .padding(.horizontal)
-                .padding(.top, 8)
+                .padding(.top, 4)
                 .frame(height: timelineHeight)
-            RowSplitHandle { delta in
-                timelineHeight = min(max(timelineHeight + delta, Self.minimumTimelineHeight), Self.maximumTimelineHeight)
-            }
-            if log.entries.isEmpty {
-                ContentUnavailableView(
-                    "Nothing yet", systemImage: Self.symbol,
-                    description: Text("What a step does, on this Mac and on the GPU server, is listed here as it happens.")
-                )
-            } else {
-                GeometryReader { viewport in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(log.entries) { entry in
-                                EntryRow(entry: entry, name: entry.machine == .mac ? macName : hostName)
-                            }
-                        }
-                        .padding()
-                        // A few lines start at the top, not at the bottom
-                        // the scroll is anchored to.
-                        .frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .topLeading)
-                    }
-                    // Follows the newest line until scrolled away from it.
-                    .defaultScrollAnchor(.bottom)
+            Divider()
+            HStack(spacing: 8) {
+                Button {
+                    logShown.toggle()
+                } label: {
+                    Label("Activity", systemImage: logShown ? "chevron.down" : "chevron.right")
+                        .font(.caption)
                 }
+                .help(logShown ? "Hide what each machine is doing" : "Show what each machine is doing")
+                Spacer(minLength: 0)
+                if logShown {
+                    ActivityControls()
+                }
+            }
+            .buttonStyle(.borderless)
+            .padding(.horizontal)
+            .padding(.vertical, 4)
+            if logShown {
+                VStack(alignment: .leading, spacing: 6) {
+                    StatusRow(name: macName, color: Self.macColor(engine.status), text: macStatus)
+                    StatusRow(
+                        name: hostName, color: Self.hostColor(engine.status),
+                        text: Self.hostStatus(engine.status, job: prefetch.job, step: dev.job)
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+                .padding(.bottom, 6)
+                entries
+                    .frame(height: Self.logHeight)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var entries: some View {
+        if log.entries.isEmpty {
+            ContentUnavailableView(
+                "Nothing yet", systemImage: Self.symbol,
+                description: Text("What a step does, on this Mac and on the GPU server, is listed here as it happens.")
+            )
+        } else {
+            GeometryReader { viewport in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(log.entries) { entry in
+                            EntryRow(entry: entry, name: entry.machine == .mac ? macName : hostName)
+                        }
+                    }
+                    .padding(.horizontal)
+                    // A few lines start at the top, not at the bottom
+                    // the scroll is anchored to.
+                    .frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .topLeading)
+                }
+                // Follows the newest line until scrolled away from it.
+                .defaultScrollAnchor(.bottom)
             }
         }
     }
@@ -167,7 +195,6 @@ struct ActivityControls: View {
     @Environment(ActivityLog.self) private var log
 
     var body: some View {
-        Spacer(minLength: 0)
         Button(action: log.clear) {
             Image(systemName: "trash")
         }
