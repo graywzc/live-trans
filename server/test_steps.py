@@ -589,7 +589,7 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     try:
         url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
         status, found = run("https://example.com/o")
-        names, clip = [a[0] for a in asked], asked[0][1][0]
+        names, clip = [a[0] for a in asked], asked[1][1][0]
         del asked[:]
         # Again over the same video: what was heard is taken from the cache,
         # and only the recognizer that failed is asked again.
@@ -604,7 +604,7 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     assert found["others"][0] == {"start": line["start"], "end": line["end"],
                                   "nemo": "hear_nemoのことば", "vibevoice": "hear_vibevoiceのことば"}, found["others"]
     assert status["others"] == 2 * len(status["lines"]), status["others"]
-    assert [a[0] for a in asked] == ["hear_qwen"], asked
+    assert [a[0] for a in asked] == ["unload", "hear_qwen"], asked
     assert found_again["others"] == found["others"], found_again
     srv.clear_dev_cache()
 
