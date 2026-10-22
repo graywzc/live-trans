@@ -597,7 +597,7 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     finally:
         (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,
          srv.run_devtool_lines, srv.unload_ollama) = original
-    assert names[:4] == ["hear_nemo", "hear_qwen", "unload", "hear_vibevoice"], names
+    assert names[:4] == ["unload", "hear_nemo", "hear_qwen", "hear_vibevoice"], names
     line = status["lines"][0]
     # From half a second before the caption (or the audio's start) to 0.3 s after.
     assert abs(clip[0] - max(line["start"] - 0.5, 0)) < 0.01 and abs(clip[1] - (line["end"] + 0.3)) < 0.01, (clip, line)

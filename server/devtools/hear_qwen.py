@@ -14,7 +14,8 @@ import sys
 import numpy as np
 
 MODEL = "Qwen/Qwen3-ASR-1.7B"
-BATCH = 16
+# Eight at a time: about 5 GB beside the server and its other workers.
+BATCH = 8
 
 
 def main():

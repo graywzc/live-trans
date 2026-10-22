@@ -598,7 +598,7 @@ def run_devtool_lines(name, header, audio, on_line):
 # Dev mode's other recognizers, each caption's stretch heard again by each
 # to set beside the caption's own text (k2's): the name the app shows,
 # and the dev tool that hears it. VibeVoice needs most of the GPU, so the
-# translator is let go before it. What they heard is kept in the dev
+# translator is let go before they run. What they heard is kept in the dev
 # cache by the caption's times, so a caption cut the same way next time
 # is not heard again.
 DEV_OTHER_HEARERS = [("nemo", "hear_nemo"), ("qwen", "hear_qwen"), ("vibevoice", "hear_vibevoice")]
@@ -2937,14 +2937,18 @@ class PrefetchJob:
         spans = spans()
         with self.audio_lock:
             audio = self.audio.copy()
+        unloaded = False
         for name, tool in DEV_OTHER_HEARERS:
             todo = [span for span in spans if name not in self.others.get(span, {})]
             if self.stop_event.is_set():
                 return
             if not todo:
                 continue
-            if name == "vibevoice":
+            if not unloaded:
+                # The captions are made: the translator's GPU memory is the
+                # recognizers' now (VibeVoice needs most of the card).
                 unload_ollama()
+                unloaded = True
             t0 = time.time()
             clips = [[max(self._samples(a - OTHER_LEAD) - self.offset, 0), max(self._samples(b + OTHER_TAIL) - self.offset, 0)] for a, b in todo]
 
