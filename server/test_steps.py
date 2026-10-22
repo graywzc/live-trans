@@ -347,7 +347,7 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_off_disk():
     # piece keeps its head, each its middle, the last its tail.
     assert starts == [0.1, 1.1, 2.1, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1], starts
     assert [w[2] for w in job.words] == ["w0", "w1", "w2", "w1", "w2", "w1", "w2", "w1", "w2"], job.words
-    assert abs(job.worded - 8.5) < 0.01 and job.status()["worded"] == job.worded
+    assert abs(job.worded - 8.5) < 0.01 and job.status()["worded"] == round(job.worded, 2), (job.worded, job.status()["worded"])
     found = job.findings()
     assert found["words"][0] == [0.1, 0.5, "w0", 0.9]
     with open(os.path.join(cache, os.listdir(cache)[0], "speech.json"), encoding="utf-8") as f:
@@ -524,6 +524,28 @@ def test_the_official_subtitles_of_a_page_are_found_by_its_index():
         assert srv.reference_lines("https://example.com/play/2.html") is None
     finally:
         srv.REFERENCE_DIR = kept
+
+def test_a_dev_job_is_timed_on_the_video_s_clock_and_its_cache_keeps_it():
+    fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = lambda audio, model=None: loud_stretches(audio)
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        first = srv.PrefetchJob(url, "https://example.com/clock", {}, 3.0, step="speech")
+        wait_for(first, "done")
+        assert first.clock and first.clock.at, "the fetch timed its packets"
+        kept = srv.DevCache("https://example.com/clock", url).load_audio()
+        assert kept and kept[2]["at"] == first.clock.at, "the cache keeps the clock"
+        again = srv.PrefetchJob(url + ".gone", "https://example.com/clock", {}, 3.0, step="speech")
+        wait_for(again, "done", seconds=5)
+        assert again.cached and again.clock.at == first.clock.at
+        # Audio kept with no clock (by an older server) is fetched again.
+        older = srv.DevCache("https://example.com/older", url)
+        older.save_audio(srv.np.zeros(3 * srv.SAMPLE_RATE, srv.np.float32), 3.0)
+        assert older.load_audio() is None
+    finally:
+        srv.speech_stretches = original
+    srv.clear_dev_cache()
 
 if __name__ == "__main__":
     for name, test in list(globals().items()):

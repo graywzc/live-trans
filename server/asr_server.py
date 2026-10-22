@@ -1536,8 +1536,9 @@ class DevCache:
         self.dir = os.path.join(DEV_CACHE_DIR, hashlib.sha256((page or url).encode("utf-8")).hexdigest()[:16])
 
     def load_audio(self):
-        """The whole audio kept for the video, from its start, and the
-        video's length, or None."""
+        """The whole audio kept for the video, from its start, the video's
+        length, and where its packets lie in the video (PacketClock.state),
+        or None."""
         try:
             with open(os.path.join(self.dir, "audio.json"), encoding="utf-8") as f:
                 about = json.load(f)
@@ -1550,9 +1551,13 @@ class DevCache:
             # A fetch that ended early, kept as if whole by an older server:
             # every step after it ran over its first minutes only.
             return None
-        return audio, about.get("duration")
+        if not about.get("clock"):
+            # Kept by a server that timed a step on the samples' clock: on an
+            # HLS stream a second or more off the video's by the end.
+            return None
+        return audio, about.get("duration"), about["clock"]
 
-    def save_audio(self, audio, duration):
+    def save_audio(self, audio, duration, clock=None):
         """Keeps `audio` for the video, and forgets what the steps found over
         any audio kept before it."""
         os.makedirs(self.dir, exist_ok=True)
@@ -1562,7 +1567,7 @@ class DevCache:
         (np.clip(audio, -1, 1) * 32767).astype("<i2").tofile(os.path.join(self.dir, "audio.s16.part"))
         os.replace(os.path.join(self.dir, "audio.s16.part"), os.path.join(self.dir, "audio.s16"))
         with open(os.path.join(self.dir, "audio.json"), "w", encoding="utf-8") as f:
-            json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration}, f)
+            json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration, "clock": clock}, f)
 
     def audio_seconds(self):
         """How long the audio kept for the video is, or None."""
@@ -2151,6 +2156,18 @@ class PacketClock:
         except OSError:
             pass
 
+    def state(self):
+        """The packets' times, to keep with the audio (numbers only)."""
+        with self.lock:
+            return {"offset": self.offset, "video": self.video, "at": self.at, "length": self.length}
+
+    @classmethod
+    def restored(cls, state):
+        """A clock from `state`, for audio kept from an earlier fetch."""
+        clock = cls("", state["offset"])
+        clock.video, clock.at, clock.length = state["video"], state["at"], state["length"]
+        return clock
+
     def finish(self):
         """The fetch is over: what is left of the list read, the file gone."""
         with self.lock:
@@ -2164,7 +2181,7 @@ class PacketClock:
         """The packet that `t` lies in, on the clock of `times`."""
         import bisect
 
-        if os.path.exists(self.path):
+        if self.path and os.path.exists(self.path):
             self._read()
         return max(bisect.bisect_right(times, t) - 1, 0) if times else None
 
@@ -2216,10 +2233,10 @@ class PrefetchJob:
         self.captioned = False
         self.caption_error = None
         # The grid, the audio and `ready` are on the samples' clock; the
-        # lines, and the times asked for, are the video's (see PacketClock).
-        # A dev step's job keeps the one clock, as its audio may come from
-        # the cache.
-        self.clock = None if step else PacketClock(
+        # lines, a step's findings, and the times asked for, are the
+        # video's (see PacketClock). A dev step's audio taken from the cache
+        # brings its clock with it.
+        self.clock = PacketClock(
             os.path.join(tempfile.gettempdir(), f"livetrans-clock-{uuid.uuid4().hex}.crc"), self.offset)
         self.ready = self.offset
         # The speech step's findings: where the speech is, in seconds of
@@ -2278,6 +2295,9 @@ class PrefetchJob:
     def _video(self, t):
         return self.clock.to_video(t) if self.clock else t
 
+    def _samples(self, v):
+        return self.clock.to_samples(v) if self.clock else v
+
     def _on_video_clock(self, lines):
         for line in lines:
             line["start"], line["end"] = round(self._video(line["start"]), 2), round(self._video(line["end"]), 2)
@@ -2288,7 +2308,7 @@ class PrefetchJob:
         can still be heard again; the audio past that is let go."""
         self.stop()
         with self.audio_lock:
-            kept = max(self.ready, self.analysed) - self.offset
+            kept = max(self.ready, self._samples(self.analysed)) - self.offset
             self.audio = self.audio[:int(max(kept, 0) * SAMPLE_RATE)].copy()
         if self.state == "running":
             self.state = "stopped"
@@ -2301,7 +2321,8 @@ class PrefetchJob:
 
     def _fetch(self):
         if self.cache and (kept := self.cache.load_audio()):
-            audio, duration = kept
+            audio, duration, clock = kept
+            self.clock = PacketClock.restored(clock)
             with self.audio_lock:
                 self.audio = audio
             self.cached = True
@@ -2369,7 +2390,7 @@ class PrefetchJob:
             try:
                 with self.audio_lock:
                     audio = self.audio.copy()
-                self.cache.save_audio(audio, self.duration)
+                self.cache.save_audio(audio, self.duration, self.clock.state() if self.clock else None)
             except OSError as exc:
                 print(f"prefetch {self.id}: not cached: {exc}", flush=True)
         # Only now, so what the steps find over the whole of it is kept with
@@ -2483,13 +2504,13 @@ class PrefetchJob:
             except Exception as exc:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return
-            self.speech = [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in found]
+            self.speech = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3)) for a, b in found]
             if self.step in FIRERED_STEPS and audio.size:
                 self.events = {
-                    kind: [(round(self.offset + a, 3), round(self.offset + b, 3)) for a, b in runs]
+                    kind: [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3)) for a, b in runs]
                     for kind, runs in events.items()
                 }
-            self.analysed = self.offset + audio.size / SAMPLE_RATE
+            self.analysed = self._video(self.offset + audio.size / SAMPLE_RATE)
             looked = have
             # Looking again takes longer the more there is; let the fetch
             # get ahead rather than look all the time.
@@ -2524,9 +2545,9 @@ class PrefetchJob:
             self.word_pieces.append((start, piece.size / SAMPLE_RATE, heard))
             for k, (a, b, text, p) in enumerate(heard):
                 if low <= a < high:
-                    self.words.append((round(self.offset + start + a, 3), round(self.offset + start + b, 3), text, p))
+                    self.words.append((round(self._video(self.offset + start + a), 3), round(self._video(self.offset + start + b), 3), text, p))
                     self.word_refs.append((len(self.word_pieces) - 1, k))
-            self.worded = self.offset + (end if last else start + high)
+            self.worded = self._video(self.offset + (end if last else start + high))
             if last:
                 self._align_words()
                 return
@@ -2548,7 +2569,7 @@ class PrefetchJob:
             new = timed[piece][k] if piece < len(timed) and k < len(timed[piece]) else None
             if new:
                 start = self.word_pieces[piece][0]
-                words[i] = (round(self.offset + start + new[0], 3), round(self.offset + start + new[1], 3), *words[i][2:])
+                words[i] = (round(self._video(self.offset + start + new[0]), 3), round(self._video(self.offset + start + new[1]), 3), *words[i][2:])
         self.words = words
         self.aligned = True
         print(f"prefetch {self.id}: words re-timed", flush=True)
@@ -2574,7 +2595,7 @@ class PrefetchJob:
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             print(f"prefetch {self.id}: speakers: {exc}", flush=True)
             return
-        self.speakers = [(round(self.offset + a, 3), round(self.offset + b, 3), who) for a, b, who in found]
+        self.speakers = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3), who) for a, b, who in found]
         print(f"prefetch {self.id}: {len({s[2] for s in self.speakers})} speakers told apart", flush=True)
         if self.cache:
             try:
@@ -2589,8 +2610,8 @@ class PrefetchJob:
         import io
         import wave
 
-        start = max(float(start), self.offset)
-        end = min(float(end), start + DEV_AUDIO_LIMIT)
+        start = max(self._samples(float(start)), self.offset)
+        end = min(self._samples(float(end)), start + DEV_AUDIO_LIMIT)
         with self.audio_lock:
             samples = self.audio[int((start - self.offset) * SAMPLE_RATE):int(max(end - self.offset, 0) * SAMPLE_RATE)]
             pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
