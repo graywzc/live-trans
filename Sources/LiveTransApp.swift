@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         activity.follow { [engine] in engine.client }
         panel.restoreMode()
+        video.remember()
         panel.applyLaunchArgument()
     }
 

@@ -48,6 +48,9 @@ enum AppSettings {
     static let analysisModel = "analysisModel"
     static let demoAudioPath = "demoAudioPath"
     static let autoStart = "autoStart"
+    /// The Chrome tab last chosen or found, {"id", "url"}, to go back to at
+    /// the next launch.
+    static let lastVideoTab = "lastVideoTab"
     /// Whether the app was last in dev mode, to open in it again.
     static let devMode = "devMode"
     /// The step dev mode runs, by `DevPipeline.Step`.
