@@ -1617,7 +1617,7 @@ STEP_VERSIONS = {
     "words": "whisper-large-v3-reazon-aligned-1",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-speaker-cuts-near-same-meaning-3" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-floor-speaker-cuts-5" for step in DEV_STEPS},
 }
 
 
@@ -2057,19 +2057,41 @@ def _content_offsets(texts):
     return offsets
 
 
-# How far a cut at a change of speaker may move to the widest gap between
-# words, in seconds.
+# How far from where one speaker's turn ends a cut at a change of speaker
+# may go to find a break between two words, in seconds.
 SPEAKER_SNAP = 0.4
+# A piece cut off at a change of speaker may be this short: a reply such
+# as はい or ああ is a line of its own.
+SPEAKER_MIN_PIECE_CHARS = 2
 
 
 def speaker_at(turns, t):
-    """Who speaks at `t` among `turns` [(start, end, who)]: the one whose
-    turn holds it (the latest begun, where turns overlap), else None."""
-    who = None
-    for start, end, speaker in turns:
+    """Who has the floor at `t` among `turns` [(start, end, who)] (see
+    floor_turns), else None."""
+    for start, end, speaker in floor_turns(turns):
         if start <= t <= end:
-            who = speaker
-    return who
+            return speaker
+    return None
+
+
+def floor_turns(turns):
+    """`turns` [(start, end, who)] as who has the floor, one at a time: a
+    voice heard over someone still speaking does not take it from them,
+    and one that goes on after they stop takes it only from there."""
+    floor = []
+    for start, end, speaker in sorted(turns):
+        if floor and start < floor[-1][1]:
+            if end <= floor[-1][1]:
+                continue  # heard over the speaker, and gone before they stop
+            if speaker == floor[-1][2]:
+                floor[-1] = (floor[-1][0], end, speaker)
+                continue
+            start = floor[-1][1]
+        if floor and floor[-1][2] == speaker and start - floor[-1][1] < 1e-9:
+            floor[-1] = (floor[-1][0], end, speaker)
+        else:
+            floor.append((start, end, speaker))
+    return floor
 
 
 def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None):
@@ -2167,9 +2189,10 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             score += 0.3  # Whisper writes a space where the speaker broke off
         return score
 
-    def cut_after(i, heard, why):
+    def cut_after(i, heard, why, min_chars=SPLIT_MIN_PIECE_CHARS):
         """A cut after word i, asked for by `why`, when the pieces either
-        side can stand alone and the cut falls in `within`."""
+        side can stand alone (`min_chars` each) and the cut falls in
+        `within`."""
         if not (low <= words[i][2] and words[i + 1][1] <= high) or heard_in[i] != heard_in[i + 1]:
             return False
         for _, _, members in grouped():
@@ -2177,7 +2200,7 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
                 k = members.index(i)
                 before = "".join(words[j][0] for j in members[:k + 1])
                 after = "".join(words[j][0] for j in members[k + 1:])
-                if len(_content(before)) < SPLIT_MIN_PIECE_CHARS or len(_content(after)) < SPLIT_MIN_PIECE_CHARS:
+                if len(_content(before)) < min_chars or len(_content(after)) < min_chars:
                     return False
                 if before.count("「") + before.count("『") > before.count("」") + before.count("』"):
                     return False  # a sentence being quoted ends inside the one quoting it
@@ -2194,24 +2217,28 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             cut_after(i, heard=True, why="Whisper's sentence end")
         elif i + 1 in breaks:
             cut_after(i, heard=False, why="Whisper's segment")
-    # Where the speaker changes: a cut before the first word of the new
-    # one. Words between two speakers' turns (a short pause) belong to
-    # neither, so a word is set against the last word that had a speaker.
-    # The two clocks (the speakers' turns, the words' times) can differ by
-    # a word, so the cut goes in the widest gap between words within
-    # SPEAKER_SNAP of the change: a speaker's first word placed a little
-    # early would otherwise be cut in two (え|え).
+    # Where the speaker changes: one turn ends and the next speaker's
+    # begins (a voice heard over someone still speaking is not a change).
+    # The cut goes at the break between words nearest where the first
+    # turn ends, within SPEAKER_SNAP of it: the recognizer times a word
+    # from its first sound, a speaker's first word a little early, so the
+    # break nearest the turn's end is the speakers' own (父上がまだ来ない⁉｜
+    # ええ, not ⁉え｜え); and a cut only between two words heard on either
+    # side of it as the two speakers'.
     if turns:
-        last = None
-        for i, (_, start, end) in enumerate(words):
-            speaker = speaker_at(turns, (start + end) / 2)
-            if speaker is None:
+        floor = floor_turns(turns)
+        for (_, end, before), (start, _, after) in zip(floor, floor[1:]):
+            if before == after:
                 continue
-            if last is not None and speaker != last and i > 0:
-                near = [k for k in range(len(words) - 1) if abs(words[k + 1][1] - start) <= SPEAKER_SNAP]
-                k = max(near, key=lambda k: words[k + 1][1] - words[k][2]) if near else i - 1
-                cut_after(k, heard=True, why="a change of speaker")
-            last = speaker
+            breaks = [
+                k for k in range(len(words) - 1)
+                if end - SPEAKER_SNAP <= words[k + 1][1] <= start + SPEAKER_SNAP
+                and speaker_at(floor, (words[k][1] + words[k][2]) / 2) in (before, None)
+                and speaker_at(floor, (words[k + 1][1] + words[k + 1][2]) / 2) in (after, None)
+            ]
+            if breaks:
+                k = min(breaks, key=lambda k: abs(words[k + 1][1] - end))
+                cut_after(k, heard=True, why="a change of speaker", min_chars=SPEAKER_MIN_PIECE_CHARS)
 
     pieces = grouped()
     texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
@@ -2603,6 +2630,13 @@ class PrefetchJob:
                 done = self.fetch_done
             if done and have <= position + 0.05:
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
+                if self.step and self.turns:
+                    # Where the speaker cuts went, in seconds of the video
+                    # (no text), for measuring them.
+                    at = sorted(self._video(cut) for cut, why in list(self.grid.reasons.items())
+                                if why.startswith("a change of speaker"))
+                    print(f"prefetch {self.id}: {len(at)} cuts at speaker changes: "
+                          + " ".join(f"{t:.2f}" for t in at), flush=True)
                 if self.step:
                     if self.cache and self.cache.audio_seconds():
                         try:
