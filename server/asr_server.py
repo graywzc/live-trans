@@ -258,6 +258,102 @@ def decode_pcm(pcm_bytes):
     return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
 
+# The speech recognizer that writes the Japanese: "whisper" (faster-whisper,
+# ASR_MODEL) or "reazon": ReazonSpeech k2 (a zipformer trained on Japanese
+# TV, run by sherpa-onnx on the CPU), which on two episodes heard the words
+# right more often (227 of 287 subtitle lines against 200), mostly where
+# Whisper wrote a word that sounds the same with the wrong kanji. It writes
+# no punctuation and takes no prompt; Whisper still translates, when asked
+# to, and hears the dev step's words.
+ASR_BACKEND = os.getenv("LIVETRANS_ASR", "whisper").lower()
+REAZON_DIR = os.path.expanduser(os.getenv("LIVETRANS_REAZON_DIR", "~/livetrans/reazonspeech"))
+# ReazonSpeech is given a clip of speech at a time, none longer than this:
+# a 30 s stretch with a long quiet part in it came out as two characters,
+# where 15 s pieces of it were heard whole. A longer clip is cut at its
+# quietest moment.
+REAZON_PIECE = 15.0
+# Silence put either side of each piece: without it the first or last word
+# of a clip is now and then lost.
+REAZON_PAD = 0.5
+# A gap this long between two characters starts a new segment. Shorter
+# gaps come inside words: the times of a word's characters can lie more
+# than half a second apart (頭 0.0 s, 痛 1.7 s).
+REAZON_SEGMENT_GAP = 1.0
+_reazon = None
+_reazon_lock = threading.Lock()
+
+
+def _reazon_recognizer():
+    global _reazon
+    if _reazon is None:
+        import sherpa_onnx
+
+        _reazon = sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=os.path.join(REAZON_DIR, "encoder-epoch-99-avg-1.onnx"),
+            decoder=os.path.join(REAZON_DIR, "decoder-epoch-99-avg-1.onnx"),
+            joiner=os.path.join(REAZON_DIR, "joiner-epoch-99-avg-1.onnx"),
+            tokens=os.path.join(REAZON_DIR, "tokens.txt"),
+            num_threads=8, decoding_method="modified_beam_search",
+        )
+    return _reazon
+
+
+def _reazon_pieces(audio, start, end):
+    """`start`..`end` (seconds into `audio`) in pieces of at most
+    REAZON_PIECE, each long one cut at the quietest tenth of a second in the
+    second half of its first REAZON_PIECE."""
+    pieces = []
+    while end - start > REAZON_PIECE:
+        low, high = start + REAZON_PIECE / 2, start + REAZON_PIECE
+        steps = np.arange(low, high - 0.1, 0.1)
+        energy = [float(np.mean(audio[int(t * SAMPLE_RATE):int((t + 0.1) * SAMPLE_RATE)] ** 2)) for t in steps]
+        cut = float(steps[int(np.argmin(energy))]) + 0.05
+        pieces.append((start, cut))
+        start = cut
+    pieces.append((start, end))
+    return pieces
+
+
+def run_reazon(audio, words=None, breaks=None, clips=None, vad=False):
+    """run_whisper's transcription with ReazonSpeech in Whisper's place:
+    the same segments, `words` (here each character, from its time to the
+    next one's) and `breaks`. `clips` are [(start, end), ...] in seconds;
+    without them the speech is found first, or with `vad` off the whole of
+    the audio is taken."""
+    if audio.size == 0:
+        return []
+    length = audio.size / SAMPLE_RATE
+    if clips is None:
+        found = speech_clips(audio) if vad else [0.0, length]
+        clips = list(zip(found[::2], found[1::2]))
+    pieces = [p for a, b in clips for p in _reazon_pieces(audio, max(a, 0.0), min(b, length)) if p[1] - p[0] > 0.05]
+    pad = np.zeros(int(REAZON_PAD * SAMPLE_RATE), dtype=np.float32)
+    texts = []
+    with _reazon_lock:
+        recognizer = _reazon_recognizer()
+        for a, b in pieces:
+            stream = recognizer.create_stream()
+            stream.accept_waveform(SAMPLE_RATE, np.concatenate([pad, audio[int(a * SAMPLE_RATE):int(b * SAMPLE_RATE)], pad]))
+            recognizer.decode_stream(stream)
+            tokens = list(stream.result.tokens)
+            times = [min(max(a + t - REAZON_PAD, a), b) for t in stream.result.timestamps]
+            segment = ""
+            for k, (token, at) in enumerate(zip(tokens, times)):
+                if k == 0 or at - times[k - 1] >= REAZON_SEGMENT_GAP:
+                    if segment:
+                        texts.append(segment)
+                    segment = ""
+                    if breaks is not None:
+                        breaks.append((len(words), at))
+                segment += token
+                if words is not None:
+                    after = times[k + 1] if k + 1 < len(times) else b
+                    words.append((token, at, max(min(after, at + 1.0), at + 0.02)))
+            if segment:
+                texts.append(segment)
+    return texts
+
+
 def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False, breaks=None, clips=None):
     """task="transcribe" -> Japanese, task="translate" -> English.
 
@@ -287,6 +383,8 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
     """
     if audio.size == 0:
         return []
+    if ASR_BACKEND == "reazon" and task == "transcribe":
+        return run_reazon(audio, words=words, breaks=breaks, clips=clips, vad=vad)
     if clips is not None:
         clips = [t for clip in clips for t in clip]
         if not clips:
@@ -2491,7 +2589,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             self._send(200, {
                 "status": "ok",
-                "asr": ASR_MODEL,
+                "asr": "reazonspeech-k2" if ASR_BACKEND == "reazon" else ASR_MODEL,
                 "device": DEVICE,
                 "translation": TRANSLATE_BACKEND != "nllb" or _nllb is not None,
                 "translation_backend": (
