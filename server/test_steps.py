@@ -547,6 +547,21 @@ def test_a_dev_job_is_timed_on_the_video_s_clock_and_its_cache_keeps_it():
         srv.speech_stretches = original
     srv.clear_dev_cache()
 
+def test_a_failed_fetch_falls_back_to_audio_kept_without_a_clock():
+    fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = lambda audio, model=None: loud_stretches(audio)
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        kept = srv.DevCache("https://example.com/stale", url)
+        kept.save_audio(noise_and_silence([(1, False), (1, True), (1, False)]), 3.0)
+        job = srv.PrefetchJob(url + ".gone", "https://example.com/stale", {}, 3.0, step="speech")
+        wait_for(job, "done", seconds=10)
+        assert job.cached and job.clock is None and job.speech == [(1.0, 2.0)], (job.cached, job.speech)
+    finally:
+        srv.speech_stretches = original
+    srv.clear_dev_cache()
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

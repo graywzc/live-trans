@@ -1535,10 +1535,11 @@ class DevCache:
     def __init__(self, page, url):
         self.dir = os.path.join(DEV_CACHE_DIR, hashlib.sha256((page or url).encode("utf-8")).hexdigest()[:16])
 
-    def load_audio(self):
+    def load_audio(self, unclocked=False):
         """The whole audio kept for the video, from its start, the video's
         length, and where its packets lie in the video (PacketClock.state),
-        or None."""
+        or None. `unclocked` takes audio kept with no clock too (the clock
+        then None)."""
         try:
             with open(os.path.join(self.dir, "audio.json"), encoding="utf-8") as f:
                 about = json.load(f)
@@ -1551,11 +1552,11 @@ class DevCache:
             # A fetch that ended early, kept as if whole by an older server:
             # every step after it ran over its first minutes only.
             return None
-        if not about.get("clock"):
+        if not about.get("clock") and not unclocked:
             # Kept by a server that timed a step on the samples' clock: on an
             # HLS stream a second or more off the video's by the end.
             return None
-        return audio, about.get("duration"), about["clock"]
+        return audio, about.get("duration"), about.get("clock")
 
     def save_audio(self, audio, duration, clock=None):
         """Keeps `audio` for the video, and forgets what the steps found over
@@ -2319,24 +2320,40 @@ class PrefetchJob:
         self.state = "failed"
         self.stop()
 
+    def _from_cache(self, kept):
+        audio, duration, clock = kept
+        self.clock = PacketClock.restored(clock) if clock else None
+        with self.audio_lock:
+            self.audio = audio
+        self.cached = True
+        self.fetch_done = True
+        if self.duration is None or self.duration <= 0:
+            self.duration = duration or self.fetched
+        print(f"prefetch {self.id}: {self.fetched:.0f}s of audio from the cache", flush=True)
+
+    def _fail_fetch(self, message):
+        """The fetch failed: a dev step goes on over the audio kept from an
+        older server, timed on its samples' clock, rather than over
+        nothing (a page's stream link is short-lived; one read from a tab
+        left open for hours is gone)."""
+        if self.cache and (kept := self.cache.load_audio(unclocked=True)):
+            print(f"prefetch {self.id}: {message}; the audio kept before taken instead", flush=True)
+            tell(f"{self.step}: the video could not be fetched again ({message[:80]}); the audio kept before is "
+                 "used, timed less exactly. Reload the page for a fresh fetch")
+            self._from_cache(kept)
+            return
+        self.fail(message)
+
     def _fetch(self):
         if self.cache and (kept := self.cache.load_audio()):
-            audio, duration, clock = kept
-            self.clock = PacketClock.restored(clock)
-            with self.audio_lock:
-                self.audio = audio
-            self.cached = True
-            self.fetch_done = True
-            if self.duration is None or self.duration <= 0:
-                self.duration = duration or self.fetched
-            print(f"prefetch {self.id}: {self.fetched:.0f}s of audio from the cache", flush=True)
+            self._from_cache(kept)
             return
         try:
             media, error = resolve_media_url(self.url, self.page)
         except Exception as exc:
             media, error = None, f"{type(exc).__name__}: {exc}"
         if not media:
-            self.fail(error or "no media")
+            self._fail_fetch(error or "no media")
             return
         header_lines = "".join(f"{k}: {v}\r\n" for k, v in self.headers.items())
         command = [
@@ -2364,7 +2381,7 @@ class PrefetchJob:
         try:
             self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as exc:
-            self.fail(f"ffmpeg: {exc}")
+            self._fail_fetch(f"ffmpeg: {exc}")
             return
         while not self.stop_event.is_set():
             chunk = self.process.stdout.read(SAMPLE_RATE * 2)  # one second
@@ -2377,7 +2394,7 @@ class PrefetchJob:
         if self.clock:
             self.clock.finish()
         if self.process.returncode not in (0, None) and not self.stop_event.is_set() and self.fetched < 1:
-            self.fail(f"ffmpeg: {self.process.stderr.read().decode(errors='replace').strip()[-200:]}")
+            self._fail_fetch(f"ffmpeg: {self.process.stderr.read().decode(errors='replace').strip()[-200:]}")
             return
         if self.duration is None or self.duration <= 0:
             self.duration = self.offset + self.fetched
