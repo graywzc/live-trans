@@ -60,6 +60,52 @@ def test_whispers_stock_lines_are_known_and_speech_is_not():
         assert not srv._STOCK_LINE.search(speech), speech
 
 
+def test_the_prompts_and_the_health_name_the_target_language():
+    kept = srv.TARGET
+    try:
+        srv.TARGET = "zh"
+        for prompt in (srv._ollama_prompt(), srv._split_prompt(), srv._long_prompt()):
+            assert "Simplified Chinese" in prompt and "English" not in prompt, prompt
+        srv.TARGET = "en"
+        assert "natural English" in srv._split_prompt()
+    finally:
+        srv.TARGET = kept
+
+
+def test_a_chinese_translation_is_not_taken_for_a_piece_of_the_transcript():
+    source = "今日は雨だね傘持ってきた"
+    asked = []
+    generate = srv._ollama_generate
+    srv._ollama_generate = lambda text, timeout, prompt=None: asked.append(text) or "译文"
+    try:
+        # Broken up but left untranslated: each piece asked for alone.
+        pieces = srv._breaks_only("今日は雨だね ||| 傘持ってきた", source)
+        assert pieces == [("今日は雨だね", "译文"), ("傘持ってきた", "译文")], pieces
+        # A Chinese translation, in kanji too, is not one of the pieces.
+        assert srv._breaks_only("今日は雨だね ||| 今天下雨了\n傘持ってきた ||| 带伞了", source) == pieces
+    finally:
+        srv._ollama_generate = generate
+
+
+def test_whisper_english_is_not_the_fallback_for_chinese():
+    kept = srv.TARGET, srv.run_whisper, srv.translate_ollama, srv._ollama_ok, srv.TRANSLATE_BACKEND
+    asked = []
+
+    def whisper(audio, beam_size, prompt="", words=None, vad=False, task="transcribe"):
+        asked.append(task)
+        return ["雨だね"] if task == "transcribe" else ["It's raining."]
+
+    srv.run_whisper, srv.translate_ollama, srv._ollama_ok, srv.TRANSLATE_BACKEND = whisper, lambda segments: None, True, "ollama"
+    try:
+        srv.TARGET = "zh"
+        _, pairs, _ = srv.transcribe_and_translate(srv.np.zeros(16000, srv.np.float32), beam_size=1)
+        assert pairs == [("雨だね", "")] and asked == ["transcribe"], (pairs, asked)
+        srv.TARGET = "en"
+        _, pairs, _ = srv.transcribe_and_translate(srv.np.zeros(16000, srv.np.float32), beam_size=1)
+        assert pairs == [("雨だね", "It's raining.")], pairs
+    finally:
+        srv.TARGET, srv.run_whisper, srv.translate_ollama, srv._ollama_ok, srv.TRANSLATE_BACKEND = kept
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
