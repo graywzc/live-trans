@@ -189,7 +189,7 @@ struct StepTimeline: View {
         selection: ClosedRange<Double>?, speech: [ClosedRange<Double>], job: DevPipeline.Job?,
         events: DevPipeline.SoundEvents = DevPipeline.SoundEvents()
     ) -> String {
-        guard let job else { return "Press Run step under the captions to fetch the Chrome video" }
+        guard let job else { return "Press Load under the captions to show the Chrome video's step" }
         guard let selection else {
             let count = speech.count == 1 ? "1 stretch" : "\(speech.count) stretches"
             let state = job.state == "running" && !job.paused ? "so far" : job.state == "done" ? "in all" : job.state

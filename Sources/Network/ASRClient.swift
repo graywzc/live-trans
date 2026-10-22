@@ -313,9 +313,11 @@ struct ASRClient {
     }
 
     /// Empties the host's cache of videos fetched and findings made in dev
-    /// mode; how many videos it held.
-    func clearDevCache() async throws -> Int {
-        var request = URLRequest(url: baseURL.appending(path: "devcache/clear"))
+    /// mode, or only the video at `page`; how many videos it held.
+    func clearDevCache(page: String? = nil) async throws -> Int {
+        var components = URLComponents(url: baseURL.appending(path: "devcache/clear"), resolvingAgainstBaseURL: false)!
+        if let page { components.queryItems = [URLQueryItem(name: "page", value: page)] }
+        var request = URLRequest(url: components.url!)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         let (data, response) = try await session.data(for: request)

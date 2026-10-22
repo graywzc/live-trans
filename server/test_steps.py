@@ -319,7 +319,7 @@ def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
     assert srv.clear_dev_cache() == 0
 
 
-def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_off_disk():
+def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_for_next_time():
     cache = fresh_cache()
     original = srv.speech_stretches, srv.heard_words, srv.WORDS_PIECE, srv.WORDS_OVERLAP
     srv.speech_stretches = loud_stretches
@@ -353,7 +353,23 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_off_disk():
     found = job.findings()
     assert found["words"][0] == [0.1, 0.5, "w0", 0.9]
     with open(os.path.join(cache, os.listdir(cache)[0], "speech.json"), encoding="utf-8") as f:
-        assert "words" not in json.load(f), "no text on disk"
+        assert "words" not in json.load(f), "the words are kept apart from the step's findings"
+    # Run again over the same video, the words come from the cache, unheard.
+    heard_before = len(pieces)
+    srv.heard_words = heard
+    try:
+        again = srv.PrefetchJob(url, "https://example.com/x", {}, 8.5, step="speech")
+        deadline = time.time() + 10
+        while not again.words and time.time() < deadline:
+            time.sleep(0.1)
+    finally:
+        srv.heard_words = original[1]
+    assert again.cached and len(pieces) == heard_before, (again.cached, pieces)
+    assert [list(w) for w in again.words] == found["words"] and abs(again.worded - job.worded) < 0.01
+    # Forgetting one video leaves the others.
+    os.makedirs(srv.DevCache("https://example.com/y", None).dir)
+    assert srv.clear_dev_cache("https://example.com/x") == 1
+    assert os.listdir(cache) == [os.path.basename(srv.DevCache("https://example.com/y", None).dir)], os.listdir(cache)
     srv.clear_dev_cache()
 
 
@@ -379,8 +395,8 @@ def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
         deadline = time.time() + 15
         while not (job.aligned and job.speakers is not None) and time.time() < deadline:
             time.sleep(0.1)
-        # Taken from the cache again, the speakers come with no worker run
-        # (the words, never kept, are re-timed again).
+        # Taken from the cache again, the speakers and the re-timed words
+        # come with no worker run.
         def again_tool(name, header, audio):
             asked.append((name, header, audio.size))
             return _not_set_up(name, header, audio)
@@ -389,7 +405,7 @@ def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
         again = srv.PrefetchJob(url + ".gone", "https://example.com/y", {}, 7.0, step="speech")
         deadline = time.time() + 15
         # Both come once the audio is in, in either order.
-        while (again.speakers is None or [a[0] for a in asked].count("align") < 2) and time.time() < deadline:
+        while (again.speakers is None or not again.aligned) and time.time() < deadline:
             time.sleep(0.1)
     finally:
         srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.WORDS_PIECE, srv.WORDS_OVERLAP = original
@@ -399,13 +415,13 @@ def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
     assert [w[:2] for w in job.words][:2] == [(0.6, 0.8), (2.6, 3.4)], job.words
     assert job.findings()["speakers"] == [[1.0, 2.0, "S1"], [4.0, 5.5, "S2"]]
     assert again.speakers == [(1.0, 2.0, "S1"), (4.0, 5.5, "S2")]
+    assert again.words == job.words, (again.words, job.words)
     names = [a[0] for a in asked]
-    assert sorted(set(names)) == ["align", "diarize"] and names.count("diarize") == 1, names
-    assert names.count("align") == 2, names
+    assert sorted(set(names)) == ["align", "diarize"], names
     align = next(h for n, h, _ in asked if n == "align")
     assert align["pieces"][0]["words"][0] == [0.5, 0.9, "w", 0.9]
     folder = os.path.join(cache, os.listdir(cache)[0])
-    assert sorted(os.listdir(folder)) == ["audio.json", "audio.s16", "speakers.json", "speech.json"], os.listdir(folder)
+    assert sorted(os.listdir(folder)) == ["audio.json", "audio.s16", "speakers.json", "speech.json", "words.json"], os.listdir(folder)
     for name in ("speakers.json", "speech.json"):
         with open(os.path.join(folder, name), encoding="utf-8") as f:
             kept = json.load(f)
@@ -446,7 +462,7 @@ def test_the_firered_step_finds_the_speech_with_firered_and_keeps_it_apart():
     assert again.findings()["events"] == {"singing": [[1.2, 1.8]], "music": []}
     assert "events" not in silero.findings(), "Silero hears no events"
     kept = sorted(os.listdir(os.path.join(cache, os.listdir(cache)[0])))
-    assert kept == ["audio.json", "audio.s16", "speech-firered.json", "speech.json"], kept
+    assert [k for k in kept if k != "words.json"] == ["audio.json", "audio.s16", "speech-firered.json", "speech.json"], kept
     srv.clear_dev_cache()
 
 

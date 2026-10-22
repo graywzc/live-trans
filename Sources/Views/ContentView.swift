@@ -17,6 +17,7 @@ struct ContentView: View {
 
     /// One selection for the whole window, as in any text view.
     @State private var selection: CaptionSelection?
+    @State private var confirmRerun = false
 
     private static let minCaptionsWidth: CGFloat = 420
 
@@ -183,7 +184,11 @@ struct ContentView: View {
         case .idle:
             ContentUnavailableView(
                 "LiveTrans", systemImage: "captions.bubble",
-                description: Text("Press Start to caption and translate Japanese speech.")
+                description: Text(
+                    panel.isDev
+                        ? "Press Load to show the Chrome video's captions, made before or made now."
+                        : "Press Start to caption and translate Japanese speech."
+                )
             )
         }
     }
@@ -195,22 +200,22 @@ struct ContentView: View {
             if canCaptionAhead || prefetch.playhead != nil {
                 HStack(spacing: 10) {
                     if canCaptionAhead && isDev {
-                        // Dev mode: the step, run over the whole video.
+                        // Dev mode: Load and Stop below run the step; this
+                        // makes it all again.
                         Button {
-                            dev.toggle()
+                            confirmRerun = true
                         } label: {
-                            Label(
-                                dev.isPaused ? "Run step" : "Pause",
-                                systemImage: dev.isPaused ? "play.fill" : "pause.fill"
-                            )
-                            .frame(minWidth: 104)
+                            Label("Re-run", systemImage: "arrow.clockwise")
+                                .frame(minWidth: 104)
                         }
                         .controlSize(.small)
-                        .help(
-                            dev.isPaused
-                                ? "Fetch the whole Chrome video's audio and run step \(dev.step.title) over it, for the Dev panel's timeline"
-                                : "Hold the step; what it found stays"
-                        )
+                        .disabled(dev.job == nil)
+                        .help("Forget what the host kept of this video and make it all again: the audio, step \(dev.step.title), speakers, words, captions and the other recognizers")
+                        .confirmationDialog("Make this video's dev results again?", isPresented: $confirmRerun) {
+                            Button("Re-run", role: .destructive) { dev.rerun() }
+                        } message: {
+                            Text("The host forgets what it kept of this video and fetches and makes it all again, which takes several minutes.")
+                        }
                     } else if canCaptionAhead {
                         Button {
                             prefetch.toggle()
@@ -248,16 +253,23 @@ struct ContentView: View {
                     isSpeaking: engine.isSpeaking
                 )
             }
+            // In dev mode, Load: the host started and the step run over the
+            // Chrome video, from what it kept of it.
+            let loading = isDev ? engine.isRunning && !dev.isPaused : engine.isRunning
             Button {
-                if engine.isRunning {
+                if loading {
+                    if isDev { dev.hold() }
                     engine.stop()
+                } else if isDev {
+                    if !engine.isRunning { engine.start() }
+                    dev.load()
                 } else {
                     engine.start()
                 }
             } label: {
                 Label(
-                    engine.isRunning ? "Stop" : "Start",
-                    systemImage: engine.isRunning ? "stop.fill" : "mic.fill"
+                    loading ? "Stop" : isDev ? "Load" : "Start",
+                    systemImage: loading ? "stop.fill" : isDev ? "tray.and.arrow.down.fill" : "mic.fill"
                 )
                 .font(.headline)
                 .frame(maxWidth: 240)
@@ -265,8 +277,9 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .tint(engine.isRunning ? .red : .green)
+            .tint(loading ? .red : .green)
             .keyboardShortcut(.return, modifiers: .command)
+            .help(isDev && !loading ? "Show the Chrome video's captions and step from what the host kept of it, making only what is missing" : "")
         }
         .padding()
     }

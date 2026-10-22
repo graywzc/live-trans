@@ -69,7 +69,7 @@ final class StepTimelineTests: XCTestCase {
     func testWhatTheControlRowSays() {
         XCTAssertEqual(
             StepTimeline.summary(selection: nil, speech: [], job: nil),
-            "Press Run step under the captions to fetch the Chrome video"
+            "Press Load under the captions to show the Chrome video's step"
         )
         var job = DevPipeline.Job(id: "a", tabID: 1, page: "https://example.com/v", step: .speech, duration: 600)
         job.fetched = 130

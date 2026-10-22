@@ -169,6 +169,46 @@ final class DevPipeline {
         Task { await tick() }
     }
 
+    /// Dev mode's Load: runs the step over the Chrome video, which takes
+    /// from the host's cache whatever it made before over the video, and
+    /// makes only what is missing.
+    func load() {
+        isPaused = false
+        lastProbe = .distantPast
+        Task { await tick() }
+    }
+
+    /// Holds the step, as when captioning stops.
+    func hold() {
+        isPaused = true
+    }
+
+    /// Dev mode's Re-run: has the host forget what it kept of the job's
+    /// video, then makes all of it again from a fresh fetch.
+    func rerun() {
+        guard let client = engine.client, let current = job else { return }
+        Task {
+            do {
+                _ = try await client.clearDevCache(page: current.page)
+            } catch {
+                ActivityLog.tell("Could not forget this video's cache: \(error.localizedDescription)")
+                return
+            }
+            await stopJob()
+            engine.clear()
+            speech = []
+            events = SoundEvents()
+            words = []
+            speakers = []
+            others = []
+            selection = nil
+            ActivityLog.tell("Forgot this video's cache: making all of it again")
+            isPaused = false
+            lastProbe = .distantPast
+            await tick()
+        }
+    }
+
     /// The audio the job holds, when the video at `playhead` is its own.
     func fetched(on playhead: VideoMoment?) -> ClosedRange<Double>? {
         guard let job, let playhead, playhead.tabID == job.tabID, playhead.url == job.page, job.fetched > 0 else {

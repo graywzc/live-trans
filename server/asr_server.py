@@ -1597,6 +1597,7 @@ STEP_VERSIONS = {
     "speech-mean": "firered-seg30-mean-1",
     "speakers": "diarizen-large-v2-1",
     "others": "nemo-v2-qwen3-asr-1.7b-vibevoice-hf-1",
+    "words": "whisper-large-v3-reazon-aligned-1",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
     **{f"captions-{step}": "k2-speaker-cuts-1" for step in DEV_STEPS},
@@ -1679,12 +1680,13 @@ class DevCache:
     def save_findings(self, step, findings):
         """Keeps what `step` found, but not the words heard: no text the
         server hears is kept on disk, but for a step job's captions
-        ("captions-<step>") and what the other recognizers heard over each
-        ("others"), kept so dev mode can show them again at once, to look
-        at against the video, rather than making them all again; POST
-        /devcache/clear forgets them with the rest."""
+        ("captions-<step>"), what the other recognizers heard over each
+        ("others") and the words Whisper heard ("words"), kept so dev mode
+        can show them again at once, to look at against the video, rather
+        than making them all again; POST /devcache/clear forgets them with
+        the rest."""
         os.makedirs(self.dir, exist_ok=True)
-        kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step == "speakers"}
+        kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step in ("speakers", "words")}
         with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
             json.dump({**kept, "version": STEP_VERSIONS.get(step), "audio_seconds": self.audio_seconds()}, f)
 
@@ -1718,8 +1720,15 @@ def reference_lines(page):
         return None
 
 
-def clear_dev_cache():
-    """Forgets every video dev mode kept; how many there were."""
+def clear_dev_cache(page=None):
+    """Forgets every video dev mode kept, or the one at `page` alone; how
+    many there were."""
+    if page:
+        folder = DevCache(page, None).dir
+        if not os.path.isdir(folder):
+            return 0
+        shutil.rmtree(folder, ignore_errors=True)
+        return 1
     try:
         kept = [d for d in os.listdir(DEV_CACHE_DIR) if os.path.isdir(os.path.join(DEV_CACHE_DIR, d))]
     except OSError:
@@ -2681,7 +2690,10 @@ class PrefetchJob:
 
     def _hear_words(self):
         """Whisper over all the audio, a piece at a time as it arrives, for
-        the words on the timeline; the GPU is let go between pieces."""
+        the words on the timeline; the GPU is let go between pieces. Or the
+        words heard before over the same audio, from the dev cache."""
+        if self._words_from_cache():
+            return
         start = 0.0
         while not self.stop_event.is_set() and self.state in ("running", "done"):
             with self.audio_lock:
@@ -2713,8 +2725,30 @@ class PrefetchJob:
             self.worded = self._video(self.offset + (end if last else start + high))
             if last:
                 self._align_words()
+                if self.cache and self.cache.audio_seconds():
+                    try:
+                        self.cache.save_findings("words", {
+                            "words": [list(w) for w in self.words], "worded": self.worded, "aligned": self.aligned})
+                    except OSError as exc:
+                        print(f"prefetch {self.id}: words not cached: {exc}", flush=True)
                 return
             start += WORDS_PIECE - WORDS_OVERLAP
+
+    def _words_from_cache(self):
+        """Whether the words came from the dev cache: heard before over the
+        same audio, which this job took from the cache."""
+        if not self.cache or not self.cache.audio_seconds():
+            return False
+        while not self.stop_event.is_set() and not self.fetch_done:
+            time.sleep(0.2)
+        kept = self.cache.load_findings("words") if self.cached else None
+        if not kept or "words" not in kept:
+            return False
+        self.words = [tuple(w) for w in kept["words"]]
+        self.aligned = kept.get("aligned", False)
+        self.worded = kept.get("worded", self.worded)
+        print(f"prefetch {self.id}: {len(self.words)} words from the cache", flush=True)
+        return True
 
     def _align_words(self):
         """The words re-timed by the aligner, once all are heard; Whisper's
@@ -3107,7 +3141,10 @@ class Handler(BaseHTTPRequestHandler):
             self._do_prefetch()
             return
         if self.path.startswith("/devcache/clear"):
-            self._send(200, {"cleared": clear_dev_cache()})
+            from urllib.parse import parse_qs, urlparse
+
+            page = parse_qs(urlparse(self.path).query).get("page", [""])[0]
+            self._send(200, {"cleared": clear_dev_cache(page or None)})
             return
         if not self.path.startswith("/transcribe"):
             self._send(404, {"error": "not found"})
