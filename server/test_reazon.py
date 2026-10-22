@@ -91,6 +91,41 @@ def test_whisper_still_translates_and_reazon_is_off_by_default():
     assert asked == ["translate"] and recognizer.given == [], (asked, recognizer.given)
 
 
+def test_the_hybrid_takes_whisper_where_reazon_heard_much_less():
+    class Segment:
+        def __init__(self, text, start, words):
+            self.text, self.start = text, start
+            self.words = [type("W", (), {"word": w, "start": a, "end": b})() for w, a, b in words]
+
+    class FakeWhisper:
+        def transcribe(self, audio, **kwargs):
+            return [
+                Segment("今日は雨だ。", 1.0, [("今日", 1.0, 1.4), ("は", 1.4, 1.5), ("雨だ。", 1.6, 2.0)]),
+                Segment("大きな声で叫んでいる。", 5.0, [("大きな", 5.0, 5.4), ("声で", 5.4, 5.8), ("叫んでいる。", 5.8, 6.5)]),
+            ], None
+
+    class TwoAnswers(FakeRecognizer):
+        """Hears the first clip whole, the second hardly at all."""
+
+        def decode_stream(self, stream):
+            self.answer = [("今", 0.6), ("日", 0.7), ("は", 0.9), ("雨", 1.1), ("だ", 1.3)] if not self.given else [("あ", 0.6)]
+            super().decode_stream(stream)
+
+    kept = srv._asr
+    srv._asr = FakeWhisper()
+    words, breaks = [], []
+    try:
+        kept_backend = srv.ASR_BACKEND
+        texts = with_recognizer(TwoAnswers([]), lambda: (
+            setattr(srv, "ASR_BACKEND", "hybrid"),
+            srv.run_whisper(np.zeros(8 * srv.SAMPLE_RATE, np.float32), words=words, breaks=breaks, clips=[(0.9, 2.5), (4.9, 7.0)]),
+        )[1])
+    finally:
+        srv._asr = kept
+    assert texts == ["今日は雨だ", "大きな声で叫んでいる。"], texts
+    assert [w[0] for w in words] == ["今", "日", "は", "雨", "だ", "大きな", "声で", "叫んでいる。"], words
+    assert breaks == [(0, words[0][1]), (5, 5.0)], breaks
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

@@ -354,7 +354,75 @@ def run_reazon(audio, words=None, breaks=None, clips=None, vad=False):
     return texts
 
 
-def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False, breaks=None, clips=None):
+# "hybrid": both, clip by clip: ReazonSpeech's words, except in a clip
+# where it heard much less than Whisper. It now and then hears next to
+# nothing in a loud, fast scene (9 characters for eight lines of shouting,
+# at any window size) that Whisper hears whole.
+HYBRID_RATIO = 0.6
+HYBRID_MIN_CHARS = 4
+
+
+def run_hybrid(audio, beam_size, prompt, words=None, breaks=None, clips=None, vad=False):
+    """run_whisper's transcription by both recognizers: Whisper over all
+    the clips, as it would alone, and ReazonSpeech over each; each clip's
+    words, segments and breaks those of ReazonSpeech, unless it heard fewer
+    than HYBRID_RATIO of Whisper's characters there (Whisper having heard
+    HYBRID_MIN_CHARS or more), when they are Whisper's."""
+    if audio.size == 0:
+        return []
+    words = [] if words is None else words
+    length = audio.size / SAMPLE_RATE
+    if clips is None:
+        found = speech_clips(audio) if vad else [0.0, length]
+        clips = list(zip(found[::2], found[1::2]))
+    clips = [(max(a, 0.0), min(b, length)) for a, b in clips if min(b, length) - max(a, 0.0) > 0.05]
+    if not clips:
+        return []
+    heard, heard_breaks = [], []
+    whisper_texts = run_whisper(audio, beam_size=beam_size, prompt=prompt, words=heard, breaks=heard_breaks,
+                                clips=clips, recognizer="whisper")
+    # Whisper's segments, each with its words, by the clip its start is in.
+    segments = []
+    for k, (index, _) in enumerate(heard_breaks):
+        end = heard_breaks[k + 1][0] if k + 1 < len(heard_breaks) else len(heard)
+        members = heard[index:end]
+        at = members[0][1] if members else heard_breaks[k][1]
+        segments.append((at, whisper_texts[k] if k < len(whisper_texts) else "", members))
+
+    def clip_of(at):
+        return min(range(len(clips)), key=lambda c: 0 if clips[c][0] <= at <= clips[c][1] else min(abs(at - clips[c][0]), abs(at - clips[c][1])))
+
+    by_clip = [[] for _ in clips]
+    for segment in segments:
+        by_clip[clip_of(segment[0])].append(segment)
+    texts, from_whisper = [], 0
+    for c, clip in enumerate(clips):
+        said, said_breaks = [], []
+        reazon_texts = run_reazon(audio, words=said, breaks=said_breaks, clips=[clip])
+        whisper_chars = sum(len(_content(text)) for _, text, _ in by_clip[c])
+        reazon_chars = sum(len(_content(text)) for text in reazon_texts)
+        if whisper_chars >= HYBRID_MIN_CHARS and reazon_chars < HYBRID_RATIO * whisper_chars:
+            from_whisper += 1
+            for at, text, members in by_clip[c]:
+                if breaks is not None:
+                    breaks.append((len(words), at))
+                if words is not None:
+                    words.extend(members)
+                texts.append(text)
+        else:
+            for index, at in said_breaks:
+                if breaks is not None:
+                    breaks.append((len(words) + index, at))
+            if words is not None:
+                words.extend(said)
+            texts.extend(reazon_texts)
+    if from_whisper:
+        print(f"hybrid: {from_whisper} of {len(clips)} clips from Whisper", flush=True)
+    return texts
+
+
+def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, vad=False, breaks=None, clips=None,
+                recognizer=None):
     """task="transcribe" -> Japanese, task="translate" -> English.
 
     `vad` finds the speech in the audio first (Silero), and Whisper is
@@ -383,8 +451,11 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
     """
     if audio.size == 0:
         return []
-    if ASR_BACKEND == "reazon" and task == "transcribe":
+    recognizer = recognizer or ASR_BACKEND
+    if recognizer == "reazon" and task == "transcribe":
         return run_reazon(audio, words=words, breaks=breaks, clips=clips, vad=vad)
+    if recognizer == "hybrid" and task == "transcribe":
+        return run_hybrid(audio, beam_size, prompt, words=words, breaks=breaks, clips=clips, vad=vad)
     if clips is not None:
         clips = [t for clip in clips for t in clip]
         if not clips:
@@ -2589,7 +2660,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             self._send(200, {
                 "status": "ok",
-                "asr": "reazonspeech-k2" if ASR_BACKEND == "reazon" else ASR_MODEL,
+                "asr": {"reazon": "reazonspeech-k2", "hybrid": f"reazonspeech-k2+{ASR_MODEL}"}.get(ASR_BACKEND, ASR_MODEL),
                 "device": DEVICE,
                 "translation": TRANSLATE_BACKEND != "nllb" or _nllb is not None,
                 "translation_backend": (
