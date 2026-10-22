@@ -130,7 +130,8 @@ def _split_prompt(insist=False):
         f"<Japanese sentence> ||| <{_language()} translation>\n"
         "Copy the Japanese characters exactly as given; do not add, drop, or change "
         "any. Output nothing else.\n"
-        + (f"After ||| write the {_language()} translation, never the Japanese again.\n" if insist else "")
+        + (f"Before ||| copy the Japanese as given, never translated; after ||| write the "
+           f"{_language()} translation, never the Japanese again.\n" if insist else "")
         + "\n"
     )
 
@@ -1322,16 +1323,18 @@ def translate_ollama(segments):
             _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_split_prompt()
         )
         why = []
-        pairs = _parse_pairs(response, text, why)
-        if not pairs and why and why[0].endswith("left in Japanese"):
-            # Copied rather than translated, now and then a whole batch:
-            # asked once more, told so.
-            print(f"ollama split {why[0]}; asking again", flush=True)
+        pairs = _parse_pairs(response, text, why) or _by_position(response, segments)
+        if not pairs:
+            # Answered out of the format, now and then a whole batch: the
+            # Japanese copied rather than translated, or translated where it
+            # was to be copied, or the translations alone. Asked once more,
+            # told both.
+            print(f"ollama split unusable ({why[0] if why else 'no reason'}); asking again", flush=True)
             response = _ollama_generate(
                 _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_split_prompt(insist=True)
             )
             why = []
-            pairs = _parse_pairs(response, text, why)
+            pairs = _parse_pairs(response, text, why) or _by_position(response, segments)
         if pairs:
             return _translate_what_is_left(pairs)
         print(f"ollama split unusable ({len(text)} characters in, {len(response)} out"
@@ -1351,6 +1354,22 @@ def translate_ollama(segments):
         print(f"ollama translation failed ({exc}); "
               "falling back to whisper task=translate", flush=True)
         return None
+
+
+def _by_position(response, segments):
+    """An answer that kept to one line per segment but not to the format
+    (the translation alone, or translated where the Japanese was to be
+    copied), taken line by line: each segment with its line's last field.
+    None when the lines are not one per segment. The LLM's sentence breaks
+    within a segment are lost, its translation in context kept."""
+    lines = [line for line in response.splitlines() if line.strip()]
+    if len(lines) != len(segments) or len(segments) < 2:
+        return None
+    pairs = [(segment, line.split(_PAIR_SEPARATOR)[-1].strip()) for segment, line in zip(segments, lines)]
+    if any(not en for _, en in pairs) or _japanese_again(pairs):
+        return None
+    print(f"ollama answer out of its format; taken line by line ({len(lines)} lines)", flush=True)
+    return pairs
 
 
 def _translate_what_is_left(pairs):

@@ -171,6 +171,35 @@ def test_two_lines_given_one_translation_are_translated_again_each_alone():
                      ("うん", "嗯"), ("うん", "嗯")], pairs
     assert asked == ["公害ですかああ", "ローランから渡された紙だ"], "the same words may share a translation"
 
+def test_an_answer_out_of_format_but_one_line_per_segment_is_taken_by_position():
+    segments = ["今日は雨だね", "傘持ってきた", "もちろんだよ"]
+    generate = srv._ollama_generate
+    asked = []
+
+    def answers(*replies):
+        def fake(text, timeout, prompt=None):
+            asked.append(prompt)
+            return replies[min(len(asked), len(replies)) - 1]
+        return fake
+
+    try:
+        # The translations alone, one line each.
+        srv._ollama_generate = answers("今天下雨了\n带伞了吗\n当然")
+        assert srv.translate_ollama(segments) == list(zip(segments, ["今天下雨了", "带伞了吗", "当然"]))
+        assert len(asked) == 1
+        # Translated where the Japanese was to be copied.
+        asked.clear()
+        srv._ollama_generate = answers("今天下雨 ||| 今天下雨了\n带伞 ||| 带伞了吗\n当然 ||| 当然")
+        assert [en for _, en in srv.translate_ollama(segments)] == ["今天下雨了", "带伞了吗", "当然"]
+        # Lines not one per segment: asked once more, told the format.
+        asked.clear()
+        srv._ollama_generate = answers("今天下雨了，带伞了吗\n当然",
+                                       "今日は雨だね ||| 今天下雨了\n傘持ってきた ||| 带伞了吗\nもちろんだよ ||| 当然")
+        assert [en for _, en in srv.translate_ollama(segments)] == ["今天下雨了", "带伞了吗", "当然"]
+        assert len(asked) == 2 and "never translated" in asked[1]
+    finally:
+        srv._ollama_generate = generate
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
