@@ -56,6 +56,8 @@ final class DevPipeline {
         var aligned = false
         /// Whether the speakers have been told apart.
         var spoken = false
+        /// How many texts the other recognizers have given.
+        var others = 0
         var state = "running"
         /// Whether the host was told to hold the step.
         var paused = false
@@ -94,6 +96,8 @@ final class DevPipeline {
     private(set) var words: [HeardWord] = []
     /// Who speaks when, as DiariZen tells the voices apart.
     private(set) var speakers: [SpeakerTurn] = []
+    /// The captions heard again by the other recognizers.
+    private(set) var others: [OtherHearing] = []
     /// Off at launch, like captioning ahead.
     private(set) var isPaused = true
     /// The stretch of the video picked out on the timeline.
@@ -303,6 +307,7 @@ final class DevPipeline {
             events = SoundEvents()
             words = []
             speakers = []
+            others = []
             selection = nil
             return
         }
@@ -343,13 +348,15 @@ final class DevPipeline {
             let worded = status.worded ?? 0
             if analysed > updated.analysed || status.state == "done" && analysed != updated.analysed
                 || worded > updated.worded || (status.aligned ?? false) != updated.aligned
-                || (status.speakers ?? false) != updated.spoken {
+                || (status.speakers ?? false) != updated.spoken || (status.others ?? 0) != updated.others {
                 let findings = try await client.stepFindings(job: current.id)
                 guard job?.id == current.id else { return }
                 speech = findings.stretches
                 events = findings.soundEvents
                 words = findings.words ?? []
                 speakers = findings.speakers ?? []
+                others = findings.others ?? []
+                updated.others = status.others ?? 0
                 updated.analysed = findings.analysed
                 updated.worded = findings.worded ?? 0
                 updated.aligned = findings.aligned ?? false
@@ -389,6 +396,7 @@ final class DevPipeline {
             events = SoundEvents()
             words = []
             speakers = []
+            others = []
             selection = nil
             cursor = nil
             cursorArmed = false
@@ -416,6 +424,21 @@ final class DevPipeline {
             matched = (key, Self.match(reference, to: engine.captions))
         }
         return matched.lines[caption.id].map { $0.joined(separator: " ") }
+    }
+
+    /// What the other recognizers heard over `caption`, as each is shown:
+    /// those that have heard it, in OtherHearing.shown's order.
+    func others(for caption: Caption) -> [(label: String, text: String)] {
+        Self.heard(others, over: caption)
+    }
+
+    /// The one of `others` heard over `caption`'s own stretch (the host
+    /// tells each by the caption's times), as `others(for:)` gives it.
+    nonisolated static func heard(_ others: [OtherHearing], over caption: Caption) -> [(label: String, text: String)] {
+        guard let moment = caption.moment, let end = moment.end,
+              let heard = others.first(where: { abs($0.start - moment.seconds) < 0.01 && abs($0.end - end) < 0.01 })
+        else { return [] }
+        return OtherHearing.shown.compactMap { shown in heard[keyPath: shown.text].map { (shown.label, $0) } }
     }
 
     /// Each official line given to the caption it overlaps most in time,

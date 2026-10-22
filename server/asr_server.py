@@ -558,6 +558,54 @@ def run_devtool(name, header, audio):
     return json.loads(done.stdout)
 
 
+def run_devtool_lines(name, header, audio, on_line):
+    """Runs the dev tool `name` as run_devtool does, for a tool that
+    answers a line of JSON at a time: `on_line` is given each as it comes.
+    Raises RuntimeError when it is not set up or fails."""
+    python = os.path.join(DEVTOOLS_DIR, name, "bin", "python")
+    script = os.path.join(DEVTOOLS_DIR, f"{name}.py")
+    if not (os.path.exists(python) and os.path.exists(script)):
+        raise RuntimeError(f"{name} is not set up in {DEVTOOLS_DIR} (devtools/setup.sh)")
+    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+    request = json.dumps({**header, "samples": audio.size}).encode("utf-8") + b"\n" + pcm
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen([python, "-I", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+
+        def feed():
+            try:
+                process.stdin.write(request)
+                process.stdin.close()
+            except OSError:
+                pass
+
+        threading.Thread(target=feed, daemon=True).start()
+        timer = threading.Timer(DEVTOOL_TIMEOUT, process.kill)
+        timer.start()
+        try:
+            for line in process.stdout:
+                on_line(json.loads(line))
+            process.wait()
+        finally:
+            timer.cancel()
+            if process.poll() is None:
+                process.kill()
+        if process.returncode != 0:
+            errors.seek(0)
+            last = errors.read().decode("utf-8", "replace").strip().splitlines()[-1:] or ["no message"]
+            raise RuntimeError(f"{name} failed: {last[0][:300]}")
+
+
+# Dev mode's other recognizers, each caption's stretch heard again by each
+# to set beside the caption's own text (k2's): the name the app shows,
+# and the dev tool that hears it. VibeVoice needs most of the GPU, so the
+# translator is let go before it.
+DEV_OTHER_HEARERS = [("nemo", "hear_nemo"), ("qwen", "hear_qwen"), ("vibevoice", "hear_vibevoice")]
+DEV_OTHER_HEARING = os.getenv("LIVETRANS_OTHER_HEARERS", "1") != "0"
+# Each caption is heard from a little before its start to a little after
+# its end, as a click on it plays it.
+OTHER_LEAD, OTHER_TAIL = 0.5, 0.3
+
+
 # Silero VAD, the authors' own v6.2 ONNX file (MIT, silero_vad.LICENSE),
 # in place of the one faster_whisper bundles: that is a re-export of the
 # v6.0 weights, whose memory goes dull after half a minute or so of music
@@ -2326,6 +2374,10 @@ class PrefetchJob:
         # speaker changes; [] when DiariZen could not run, None until it has.
         self.speakers = None
         self.turns = None
+        # Each caption heard again by the other recognizers, once all are
+        # made: by the caption's (start, end), {name: text}. In memory only,
+        # as every text the server hears.
+        self.others = {}
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
         self.cache = DevCache(page, url) if step and self.offset == 0 else None
@@ -2345,6 +2397,8 @@ class PrefetchJob:
             threading.Thread(target=self._analyse, daemon=True).start()
             threading.Thread(target=self._hear_words, daemon=True).start()
             threading.Thread(target=self._tell_speakers, daemon=True).start()
+            if DEV_OTHER_HEARING:
+                threading.Thread(target=self._hear_others, daemon=True).start()
 
     @property
     def fetched(self):
@@ -2696,6 +2750,34 @@ class PrefetchJob:
             except OSError as exc:
                 print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
 
+    def _hear_others(self):
+        """Each caption heard again by DEV_OTHER_HEARERS, one after another,
+        once the captions have reached the end; a recognizer that is not
+        set up or fails is passed over."""
+        while not self.stop_event.is_set() and not self.captioned and not self.caption_error:
+            time.sleep(1)
+        if self.stop_event.is_set() or self.caption_error:
+            return
+        spans = [(line["start"], line["end"]) for line in self.lines if line.get("start") is not None and line.get("end") is not None]
+        with self.audio_lock:
+            audio = self.audio.copy()
+        clips = [[max(self._samples(a - OTHER_LEAD) - self.offset, 0), max(self._samples(b + OTHER_TAIL) - self.offset, 0)] for a, b in spans]
+        for name, tool in DEV_OTHER_HEARERS:
+            if self.stop_event.is_set():
+                return
+            if name == "vibevoice":
+                unload_ollama()
+            t0 = time.time()
+
+            def heard(answer, name=name):
+                self.others.setdefault(spans[answer["i"]], {})[name] = answer["text"]
+
+            try:
+                run_devtool_lines(tool, {"clips": clips}, audio, heard)
+                print(f"prefetch {self.id}: {len(spans)} captions heard by {name} in {time.time() - t0:.0f}s", flush=True)
+            except (RuntimeError, OSError, ValueError, KeyError, IndexError) as exc:
+                print(f"prefetch {self.id}: {name}: {exc}", flush=True)
+
     def wav(self, start, end):
         """The fetched audio from `start` to `end` of the video, as a WAV
         file, 16 kHz mono; at most DEV_AUDIO_LIMIT seconds of it. Empty
@@ -2781,6 +2863,8 @@ class PrefetchJob:
             "worded": round(self.worded, 2),
             "aligned": self.aligned,
             "speakers": self.speakers is not None,
+            # How many texts the other recognizers have given so far.
+            "others": sum(len(texts) for texts in list(self.others.values())),
             "cached": self.cached,
             # Whether the audio is still coming: a dev job's is kept for the
             # next step only once its fetch has ended unstopped.
@@ -2803,6 +2887,8 @@ class PrefetchJob:
             found["aligned"] = self.aligned
         if self.speakers is not None:
             found["speakers"] = [list(s) for s in self.speakers]
+        if self.others:
+            found["others"] = [{"start": a, "end": b, **texts} for (a, b), texts in list(self.others.items())]
         return found
 
 

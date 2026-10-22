@@ -162,6 +162,20 @@ final class PrefetchTests: XCTestCase {
         XCTAssertNil(prefetch.playingCaptionID)
     }
 
+    /// The other recognizers' texts go under the caption with the same
+    /// times, in the order shown, those not yet in left out.
+    func testOtherRecognizersTextsGoToTheCaptionWithTheirTimes() throws {
+        var moment = VideoMoment(tabID: 1, url: "p", seconds: 4.2)
+        moment.end = 8
+        let caption = Caption(id: 1, japanese: "あ", ruby: [], english: "a", moment: moment)
+        let data = Data(#"{"analysed": 3, "speech": [], "others": [{"start": 0, "end": 4, "nemo": "甲"}, {"start": 4.2, "end": 8, "vibevoice": "乙", "nemo": "丙"}]}"#.utf8)
+        let others = try XCTUnwrap(JSONDecoder().decode(StepFindings.self, from: data).others)
+        let heard = DevPipeline.heard(others, over: caption)
+        XCTAssertEqual(heard.map(\.label), ["nemo", "vv"])
+        XCTAssertEqual(heard.map(\.text), ["丙", "乙"])
+        XCTAssertTrue(DevPipeline.heard(Array(others.prefix(1)), over: caption).isEmpty)
+    }
+
     /// Each official line goes to the caption it overlaps most; one too
     /// slight an overlap, or none, is left out; a caption may take several.
     func testOfficialSubtitlesAreMatchedToTheCaptionTheyOverlapMost() {

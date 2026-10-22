@@ -122,7 +122,8 @@ struct ContentView: View {
                 onAnalyze: { analyze(caption) },
                 onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
                 isCurrent: prefetch.currentCaptionID == caption.id,
-                official: panel.isDev ? dev.official(for: caption) : nil
+                official: panel.isDev ? dev.official(for: caption) : nil,
+                others: panel.isDev ? dev.others(for: caption) : []
             )
         }
         .selectionActions(onLookUp: lookUp)
@@ -685,6 +686,9 @@ struct CaptionRow: View {
     var isCurrent = false
     /// The episode's official subtitle for the same moment, in dev mode.
     var official: String?
+    /// What other recognizers heard over the same stretch, in dev mode,
+    /// each under the caption's own Japanese with its name.
+    var others: [(label: String, text: String)] = []
 
     @State private var isHovered = false
 
@@ -695,6 +699,16 @@ struct CaptionRow: View {
                     tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
                     selection: $selection, onClick: onSeek
                 )
+                ForEach(others, id: \.label) { other in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(other.label)
+                            .font(.system(size: fontSize * 0.5).monospaced())
+                            .foregroundStyle(.gray)
+                            .frame(width: fontSize * 1.6, alignment: .leading)
+                        SelectableText(other.text, size: fontSize * 0.9, color: NSColor(white: 0.8, alpha: 1), onClick: onSeek)
+                    }
+                    .help("What \(other.label) heard over the same stretch")
+                }
                 if !caption.english.isEmpty {
                     // Not SwiftUI's selectable text, which keeps its clicks.
                     SelectableText(caption.english, size: fontSize * 0.82, color: .systemGreen, onClick: onSeek)

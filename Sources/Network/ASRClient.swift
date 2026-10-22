@@ -52,6 +52,24 @@ struct PrefetchStatus: Decodable, Equatable {
     /// A dev job's captions, made as production would with its step's
     /// speech finder: "running", "done", or "failed: <why>".
     var captions: String?
+    /// How many texts the other recognizers have given a dev job's
+    /// captions so far.
+    var others: Int?
+}
+
+/// A dev job's caption heard again by the other recognizers, to set beside
+/// its own text: the caption's times, and each one's text once it is in.
+struct OtherHearing: Decodable, Equatable {
+    var start: Double
+    var end: Double
+    var nemo: String?
+    var qwen: String?
+    var vibevoice: String?
+
+    /// The recognizers, in the order shown, with the names they are shown by.
+    static let shown: [(label: String, text: KeyPath<OtherHearing, String?>)] = [
+        ("nemo", \.nemo), ("qwen", \.qwen), ("vv", \.vibevoice),
+    ]
 }
 
 /// A word Whisper heard over a dev job's audio: sent as
@@ -119,6 +137,8 @@ struct StepFindings: Decodable, Equatable {
     var aligned: Bool?
     /// Who speaks when, as DiariZen tells the voices apart.
     var speakers: [SpeakerTurn]?
+    /// The captions heard again by the other recognizers.
+    var others: [OtherHearing]?
 
     var stretches: [ClosedRange<Double>] { Self.ranges(speech) }
 
