@@ -121,7 +121,7 @@ def _ollama_prompt():
 # and Whisper frequently emits them with no punctuation at all, so there is
 # nothing to split on mechanically. The LLM is translating anyway; have it mark
 # the sentence boundaries in the same pass.
-def _split_prompt():
+def _split_prompt(insist=False):
     return (
         "Below is a Japanese speech transcript. It may contain several sentences "
         "run together, often without punctuation, possibly from different speakers.\n"
@@ -129,7 +129,9 @@ def _split_prompt():
         "Output one sentence per line in exactly this format:\n"
         f"<Japanese sentence> ||| <{_language()} translation>\n"
         "Copy the Japanese characters exactly as given; do not add, drop, or change "
-        "any. Output nothing else.\n\n"
+        "any. Output nothing else.\n"
+        + (f"After ||| write the {_language()} translation, never the Japanese again.\n" if insist else "")
+        + "\n"
     )
 
 
@@ -960,6 +962,26 @@ def _content(text):
     return "".join(ch for ch in text if ch not in _BOUNDARY_NOISE)
 
 
+# A translation this much kana is the Japanese again rather than English or
+# Chinese, neither of which is written in kana. (Kanji alone may be both: a
+# Chinese 天才 for the Japanese 天才 is a translation.)
+LEFT_IN_JAPANESE = 0.3
+
+
+def _left_in_japanese(translation):
+    text = _content(translation)
+    kana = sum("\u3040" <= ch <= "\u30ff" for ch in text)
+    return bool(text) and kana >= LEFT_IN_JAPANESE * len(text)
+
+
+def _japanese_again(pairs):
+    """How many of `pairs` were answered with the Japanese again, when that
+    is a third of them or more (at least two): the LLM copied rather than
+    translated, and the answer is not to be used; else 0."""
+    left = sum(_left_in_japanese(en) for _, en in pairs)
+    return left if left >= max(2, len(pairs) / 3) else 0
+
+
 def _parse_pairs(response, source, why=None):
     """Parse "ja ||| en" lines. None if the LLM strayed from the format or
     rewrote the transcript instead of copying it. A copy off by a character
@@ -985,6 +1007,8 @@ def _parse_pairs(response, source, why=None):
     if copied == wanted:
         if any(not en for _, en in pairs):
             return refuse(f"{sum(not en for _, en in pairs)} of {len(pairs)} lines have no English")
+        if left := _japanese_again(pairs):
+            return refuse(f"{left} of {len(pairs)} lines left in Japanese")
         return pairs
     import difflib
 
@@ -1011,6 +1035,8 @@ def _parse_pairs(response, source, why=None):
         return refuse("no line holds the transcript")
     if any(not en for _, en in restored):
         return refuse(f"{sum(not en for _, en in restored)} of {len(restored)} lines have no English")
+    if left := _japanese_again(restored):
+        return refuse(f"{left} of {len(restored)} lines left in Japanese")
     return restored
 
 
@@ -1111,14 +1137,23 @@ def translate_ollama(segments):
         )
         why = []
         pairs = _parse_pairs(response, text, why)
+        if not pairs and why and why[0].endswith("left in Japanese"):
+            # Copied rather than translated, now and then a whole batch:
+            # asked once more, told so.
+            print(f"ollama split {why[0]}; asking again", flush=True)
+            response = _ollama_generate(
+                _for_splitting(text), timeout=OLLAMA_TIMEOUT, prompt=_split_prompt(insist=True)
+            )
+            why = []
+            pairs = _parse_pairs(response, text, why)
         if pairs:
-            return pairs
+            return _translate_what_is_left(pairs)
         print(f"ollama split unusable ({len(text)} characters in, {len(response)} out"
               f"{', ' + why[0] if why else ''}); translating per segment", flush=True)
-        return [
+        return _translate_what_is_left([
             (segment, _ollama_generate(segment, timeout=OLLAMA_TIMEOUT))
             for segment in segments
-        ]
+        ])
     except Exception as exc:
         if _is_timeout(exc):
             # Slow this once (the GPU shared, a long answer): the rest of the
@@ -1130,6 +1165,20 @@ def translate_ollama(segments):
         print(f"ollama translation failed ({exc}); "
               "falling back to whisper task=translate", flush=True)
         return None
+
+
+def _translate_what_is_left(pairs):
+    """`pairs` with any line answered with the Japanese again translated by
+    itself once more; one still Japanese after that is left untranslated,
+    rather than shown as its own translation."""
+    result = []
+    for ja, en in pairs:
+        if _left_in_japanese(en):
+            en = _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)
+            if _left_in_japanese(en):
+                en = ""
+        result.append((ja, en))
+    return result
 
 
 def translate_nllb(text):

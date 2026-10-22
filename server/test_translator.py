@@ -106,6 +106,55 @@ def test_whisper_english_is_not_the_fallback_for_chinese():
     finally:
         srv.TARGET, srv.run_whisper, srv.translate_ollama, srv._ollama_ok, srv.TRANSLATE_BACKEND = kept
 
+def test_a_translation_still_in_kana_is_the_japanese_again():
+    assert srv._left_in_japanese("今日は雨だね")
+    assert srv._left_in_japanese("うっ")
+    assert not srv._left_in_japanese("今天下雨了")
+    assert not srv._left_in_japanese("It's raining.")
+    assert not srv._left_in_japanese("天才"), "kanji alone may be Chinese for the same word"
+    assert not srv._left_in_japanese("")
+
+
+def test_a_batch_copied_rather_than_translated_is_asked_again_then_line_by_line():
+    source = ["今日は雨だね", "傘持ってきた", "もちろんだよ"]
+    copied = "\n".join(f"{ja} ||| {ja}" for ja in source)
+    translated = "今日は雨だね ||| 今天下雨了\n傘持ってきた ||| 带伞了吗\nもちろんだよ ||| 当然"
+    why = []
+    assert srv._parse_pairs(copied, "\n".join(source), why) is None
+    assert why == ["3 of 3 lines left in Japanese"], why
+    asked = []
+    generate = srv._ollama_generate
+
+    def answers(*replies):
+        def fake(text, timeout, prompt=None):
+            asked.append(prompt)
+            return replies[min(len(asked), len(replies)) - 1]
+        return fake
+
+    try:
+        # Asked again, told to translate: the second answer is used.
+        srv._ollama_generate = answers(copied, translated)
+        pairs = srv.translate_ollama(source)
+        assert [en for _, en in pairs] == ["今天下雨了", "带伞了吗", "当然"], pairs
+        assert len(asked) == 2 and "never the Japanese again" in asked[1]
+        # Copied twice: line by line, each line's own translation.
+        asked.clear()
+        srv._ollama_generate = answers(copied, copied, "译一", "译二", "译三")
+        assert [en for _, en in srv.translate_ollama(source)] == ["译一", "译二", "译三"]
+    finally:
+        srv._ollama_generate = generate
+
+
+def test_one_line_left_in_japanese_is_translated_alone_or_left_empty():
+    generate = srv._ollama_generate
+    replies = iter(["呃", "うっ"])
+    srv._ollama_generate = lambda text, timeout, prompt=None: next(replies)
+    try:
+        pairs = srv._translate_what_is_left([("今日は雨だね", "今天下雨了"), ("うっ", "うっ"), ("あっ", "あっ")])
+        assert pairs == [("今日は雨だね", "今天下雨了"), ("うっ", "呃"), ("あっ", "")], pairs
+    finally:
+        srv._ollama_generate = generate
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
