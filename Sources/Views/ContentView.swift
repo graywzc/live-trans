@@ -691,7 +691,7 @@ private struct CaptionSelection: Equatable {
 }
 
 /// One other recognizer's text under a caption in dev mode: its name, then
-/// the text with readings, like the caption's own but a little smaller.
+/// the text with readings, as the caption's own.
 private struct OtherHearingLine: View {
     let label: String
     let ruby: [RubyToken]
@@ -705,9 +705,8 @@ private struct OtherHearingLine: View {
         HStack(alignment: .bottom, spacing: 6) {
             Self.name(label, fontSize: fontSize)
             FuriganaText(
-                tokens: ruby, fontSize: fontSize * 0.9, showReadings: showFurigana, selection: $selection, onClick: onClick
+                tokens: ruby, fontSize: fontSize, showReadings: showFurigana, selection: $selection, onClick: onClick
             )
-            .opacity(0.85)
         }
         .help("What \(label) heard over the same stretch")
     }
