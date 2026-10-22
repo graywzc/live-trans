@@ -258,15 +258,32 @@ def decode_pcm(pcm_bytes):
     return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-# The speech recognizer that writes the Japanese: "whisper" (faster-whisper,
-# ASR_MODEL) or "reazon": ReazonSpeech k2 (a zipformer trained on Japanese
+# The speech recognizer that writes the Japanese, LIVETRANS_ASR, else
+# ReazonSpeech when it is installed (see _installed_recognizer): "whisper"
+# (faster-whisper, ASR_MODEL) or "reazon": ReazonSpeech k2 (a zipformer trained on Japanese
 # TV, run by sherpa-onnx on the CPU), which on two episodes heard the words
 # right more often (227 of 287 subtitle lines against 200), mostly where
 # Whisper wrote a word that sounds the same with the wrong kanji. It writes
 # no punctuation and takes no prompt; Whisper still translates, when asked
 # to, and hears the dev step's words.
-ASR_BACKEND = os.getenv("LIVETRANS_ASR", "whisper").lower()
 REAZON_DIR = os.path.expanduser(os.getenv("LIVETRANS_REAZON_DIR", "~/livetrans/reazonspeech"))
+
+
+def _installed_recognizer():
+    """ReazonSpeech where its model files and sherpa-onnx are on the host,
+    else Whisper. With them, ReazonSpeech alone left the fewest captions
+    wrong on both episodes measured (9% of subtitle lines against Whisper's
+    15-16%), though on one it heard next to nothing in a loud, fast scene
+    ("hybrid" keeps Whisper for those)."""
+    import importlib.util
+
+    files = ("encoder-epoch-99-avg-1.onnx", "decoder-epoch-99-avg-1.onnx", "joiner-epoch-99-avg-1.onnx", "tokens.txt")
+    if all(os.path.exists(os.path.join(REAZON_DIR, f)) for f in files) and importlib.util.find_spec("sherpa_onnx"):
+        return "reazon"
+    return "whisper"
+
+
+ASR_BACKEND = (os.getenv("LIVETRANS_ASR") or _installed_recognizer()).lower()
 # ReazonSpeech is given a clip of speech at a time, none longer than this:
 # a 30 s stretch with a long quiet part in it came out as two characters,
 # where 15 s pieces of it were heard whole. A longer clip is cut at its
@@ -2837,6 +2854,7 @@ def main():
     args = parser.parse_args()
     TARGET = args.target
     print(f"translating into {_language()}", flush=True)
+    print(f"speech recognizer: {ASR_BACKEND}", flush=True)
 
     load_models()
     # A plain `kill` should release the LLM too, not just this process.
