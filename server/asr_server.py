@@ -598,7 +598,9 @@ def run_devtool_lines(name, header, audio, on_line):
 # Dev mode's other recognizers, each caption's stretch heard again by each
 # to set beside the caption's own text (k2's): the name the app shows,
 # and the dev tool that hears it. VibeVoice needs most of the GPU, so the
-# translator is let go before it.
+# translator is let go before it. What they heard is kept in the dev
+# cache by the caption's times, so a caption cut the same way next time
+# is not heard again.
 DEV_OTHER_HEARERS = [("nemo", "hear_nemo"), ("qwen", "hear_qwen"), ("vibevoice", "hear_vibevoice")]
 DEV_OTHER_HEARING = os.getenv("LIVETRANS_OTHER_HEARERS", "1") != "0"
 # Each caption is heard from a little before its start to a little after
@@ -1594,6 +1596,7 @@ STEP_VERSIONS = {
     "speech-firered": "firered-vad-whole-2",
     "speech-mean": "firered-seg30-mean-1",
     "speakers": "diarizen-large-v2-1",
+    "others": "nemo-v2-qwen3-asr-1.7b-vibevoice-hf-1",
 }
 
 
@@ -1672,7 +1675,10 @@ class DevCache:
 
     def save_findings(self, step, findings):
         """Keeps what `step` found, but not the words heard: no text the
-        server hears is kept on disk."""
+        server hears is kept on disk, but for what the other recognizers
+        heard over each caption ("others"), kept so dev mode can set them
+        beside the captions without hearing them all again; POST
+        /devcache/clear forgets them with the rest."""
         os.makedirs(self.dir, exist_ok=True)
         kept = {k: v for k, v in findings.items() if k not in ("words", "worded", "aligned", "speakers") or step == "speakers"}
         with open(os.path.join(self.dir, f"{step}.json"), "w", encoding="utf-8") as f:
@@ -2375,8 +2381,8 @@ class PrefetchJob:
         self.speakers = None
         self.turns = None
         # Each caption heard again by the other recognizers, once all are
-        # made: by the caption's (start, end), {name: text}. In memory only,
-        # as every text the server hears.
+        # made: by the caption's (start, end), {name: text}. Kept in the dev
+        # cache (DEV_OTHER_HEARERS).
         self.others = {}
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
@@ -2759,24 +2765,39 @@ class PrefetchJob:
         if self.stop_event.is_set() or self.caption_error:
             return
         spans = [(line["start"], line["end"]) for line in self.lines if line.get("start") is not None and line.get("end") is not None]
+        kept = {}
+        if self.cache and (found := self.cache.load_findings("others")):
+            kept = {(a, b): texts for a, b, texts in found.get("others", [])}
+        for span in spans:
+            if span in kept:
+                self.others[span] = dict(kept[span])
         with self.audio_lock:
             audio = self.audio.copy()
-        clips = [[max(self._samples(a - OTHER_LEAD) - self.offset, 0), max(self._samples(b + OTHER_TAIL) - self.offset, 0)] for a, b in spans]
         for name, tool in DEV_OTHER_HEARERS:
+            todo = [span for span in spans if name not in self.others.get(span, {})]
             if self.stop_event.is_set():
                 return
+            if not todo:
+                continue
             if name == "vibevoice":
                 unload_ollama()
             t0 = time.time()
+            clips = [[max(self._samples(a - OTHER_LEAD) - self.offset, 0), max(self._samples(b + OTHER_TAIL) - self.offset, 0)] for a, b in todo]
 
-            def heard(answer, name=name):
-                self.others.setdefault(spans[answer["i"]], {})[name] = answer["text"]
+            def heard(answer, name=name, todo=todo):
+                self.others.setdefault(todo[answer["i"]], {})[name] = answer["text"]
 
             try:
                 run_devtool_lines(tool, {"clips": clips}, audio, heard)
-                print(f"prefetch {self.id}: {len(spans)} captions heard by {name} in {time.time() - t0:.0f}s", flush=True)
+                print(f"prefetch {self.id}: {len(todo)} captions heard by {name} in {time.time() - t0:.0f}s", flush=True)
             except (RuntimeError, OSError, ValueError, KeyError, IndexError) as exc:
                 print(f"prefetch {self.id}: {name}: {exc}", flush=True)
+            if self.cache:
+                try:
+                    every = {**kept, **self.others}
+                    self.cache.save_findings("others", {"others": [[a, b, texts] for (a, b), texts in every.items()]})
+                except OSError as exc:
+                    print(f"prefetch {self.id}: others not cached: {exc}", flush=True)
 
     def wav(self, start, end):
         """The fetched audio from `start` to `end` of the video, as a WAV

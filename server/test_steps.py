@@ -512,7 +512,7 @@ def test_a_step_job_captions_the_video_with_its_speech_finder_and_keeps_no_text(
             assert "ことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name
     srv.clear_dev_cache()
 
-def test_each_caption_is_heard_again_by_the_other_recognizers_in_memory_only():
+def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_time():
     cache = fresh_cache()
     original = (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,
                 srv.run_devtool_lines, srv.unload_ollama)
@@ -528,34 +528,38 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_in_memory_only():
         for i, _ in enumerate(header["clips"]):
             on_line({"i": i, "text": f"{name}のことば"})
 
+    def run(page_url):
+        job = srv.PrefetchJob(url, page_url, {}, 3.0, step="speech")
+        # (Jobs of tests before may still be about, asking too.)
+        deadline = time.time() + 15
+        while time.time() < deadline and not (job.captioned and job.status()["others"] >= 2 * job.status()["count"] > 0):
+            time.sleep(0.1)
+        time.sleep(0.3)
+        return job.status(), job.findings()
+
     srv.speech_stretches, srv.hear_pieces, srv.DEV_CAPTIONS = (lambda audio, model=None: loud_stretches(audio)), heard, True
     srv.sound_events = lambda audio: {"singing": [], "music": []}
     srv.run_devtool_lines, srv.unload_ollama = other, lambda: asked.append(("unload", None))
     try:
         url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
-        job = srv.PrefetchJob(url, "https://example.com/o", {}, 3.0, step="speech")
-        # (Jobs of tests before may still be about, asking too.)
-        deadline = time.time() + 15
-        while time.time() < deadline and not (job.captioned and job.status()["others"] >= 2 * job.status()["count"] > 0):
-            time.sleep(0.1)
-        status, found = job.status(), job.findings()
+        status, found = run("https://example.com/o")
+        names, clip = [a[0] for a in asked], asked[0][1][0]
+        del asked[:]
+        # Again over the same video: what was heard is taken from the cache,
+        # and only the recognizer that failed is asked again.
+        status_again, found_again = run("https://example.com/o")
     finally:
         (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,
          srv.run_devtool_lines, srv.unload_ollama) = original
-    names = [a[0] for a in asked]
     assert names[:4] == ["hear_nemo", "hear_qwen", "unload", "hear_vibevoice"], names
     line = status["lines"][0]
-    clip = asked[0][1][0]
     # From half a second before the caption (or the audio's start) to 0.3 s after.
     assert abs(clip[0] - max(line["start"] - 0.5, 0)) < 0.01 and abs(clip[1] - (line["end"] + 0.3)) < 0.01, (clip, line)
-    # A recognizer that fails is passed over; the others' texts are there.
     assert found["others"][0] == {"start": line["start"], "end": line["end"],
                                   "nemo": "hear_nemoのことば", "vibevoice": "hear_vibevoiceのことば"}, found["others"]
     assert status["others"] == 2 * len(status["lines"]), status["others"]
-    folder = os.path.join(cache, os.listdir(cache)[0])
-    for name in os.listdir(folder):
-        if name.endswith(".json"):
-            assert "のことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name
+    assert [a[0] for a in asked] == ["hear_qwen"], asked
+    assert found_again["others"] == found["others"], found_again
     srv.clear_dev_cache()
 
 
