@@ -174,6 +174,10 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(heard.map(\.label), ["nemo", "vv"])
         XCTAssertEqual(heard.map(\.text), ["丙", "乙"])
         XCTAssertTrue(DevPipeline.heard(Array(others.prefix(1)), over: caption).isEmpty)
+        // Analysed as captions of their own: ids no caption has, and none shared.
+        let ids = (1...50).flatMap { id in (0..<OtherHearing.shown.count).map { DevPipeline.otherID(of: id, $0) } }
+        XCTAssertTrue(ids.allSatisfy { $0 < 0 })
+        XCTAssertEqual(Set(ids).count, ids.count)
     }
 
     /// Each official line goes to the caption it overlaps most; one too

@@ -124,7 +124,9 @@ struct ContentView: View {
                 onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
                 isCurrent: prefetch.currentCaptionID == caption.id,
                 official: panel.isDev ? dev.official(for: caption) : nil,
-                others: panel.isDev ? dev.others(for: caption) : []
+                others: panel.isDev ? dev.others(for: caption) : [],
+                isOtherAnalyzed: { panel.isPresented && panel.tab == .analysis && analyzer.hasAnalyzed($0) },
+                onAnalyzeOther: { analyze($0) }
             )
         }
         .selectionActions(onLookUp: lookUp)
@@ -698,6 +700,11 @@ private struct OtherHearingLine: View {
     let fontSize: Double
     let showFurigana: Bool
     var onClick: (() -> Void)?
+    /// The row is hovered: the analysis button shows.
+    var isRowHovered = false
+    /// The side panel has this line's analysis.
+    var isAnalyzed = false
+    var onAnalyze: () -> Void = {}
 
     @State private var selection: Range<Int>?
 
@@ -707,8 +714,17 @@ private struct OtherHearingLine: View {
             FuriganaText(
                 tokens: ruby, fontSize: fontSize, showReadings: showFurigana, selection: $selection, onClick: onClick
             )
+            .help("What \(label) heard over the same stretch")
+            Button(action: onAnalyze) {
+                Image(systemName: AnalysisView.symbol)
+                    .font(.system(size: fontSize * 0.7))
+                    .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
+            }
+            .buttonStyle(.plain)
+            .help("Explain what \(label) heard")
+            .padding(.bottom, fontSize * 0.1)
+            .opacity(isRowHovered || isAnalyzed ? 1 : 0)
         }
-        .help("What \(label) heard over the same stretch")
     }
 
     /// A recognizer's name at the left of its line, on the text's baseline.
@@ -738,7 +754,11 @@ struct CaptionRow: View {
     var official: String?
     /// What other recognizers heard over the same stretch, in dev mode,
     /// each under the caption's own Japanese with its name and readings.
-    var others: [(label: String, ruby: [RubyToken])] = []
+    var others: [(label: String, sentence: Caption)] = []
+    /// Whether the side panel has the analysis of one of `others`, and
+    /// asking for it.
+    var isOtherAnalyzed: (Caption) -> Bool = { _ in false }
+    var onAnalyzeOther: (Caption) -> Void = { _ in }
 
     @State private var isHovered = false
 
@@ -759,7 +779,9 @@ struct CaptionRow: View {
                 }
                 ForEach(others, id: \.label) { other in
                     OtherHearingLine(
-                        label: other.label, ruby: other.ruby, fontSize: fontSize, showFurigana: showFurigana, onClick: onSeek
+                        label: other.label, ruby: other.sentence.ruby, fontSize: fontSize, showFurigana: showFurigana,
+                        onClick: onSeek, isRowHovered: isHovered, isAnalyzed: isOtherAnalyzed(other.sentence),
+                        onAnalyze: { onAnalyzeOther(other.sentence) }
                     )
                 }
                 if !caption.english.isEmpty {

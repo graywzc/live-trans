@@ -470,13 +470,23 @@ final class DevPipeline {
 
     /// What the other recognizers heard over `caption`, as each is shown:
     /// those that have heard it, in OtherHearing.shown's order.
-    func others(for caption: Caption) -> [(label: String, ruby: [RubyToken])] {
-        Self.heard(others, over: caption).map { other in
-            if let ruby = otherRuby[other.text] { return (other.label, ruby) }
-            let ruby = Furigana.annotate(other.text)
+    /// Each as a caption of its own, for analysing: the caption's moment,
+    /// and an id of its own no caption has (below zero).
+    func others(for caption: Caption) -> [(label: String, sentence: Caption)] {
+        Self.heard(others, over: caption).enumerated().map { index, other in
+            let ruby = otherRuby[other.text] ?? Furigana.annotate(other.text)
             otherRuby[other.text] = ruby
-            return (other.label, ruby)
+            let sentence = Caption(
+                id: Self.otherID(of: caption.id, index), japanese: other.text, ruby: ruby, english: "", moment: caption.moment
+            )
+            return (other.label, sentence)
         }
+    }
+
+    /// The id the `index`th other recognizer's line under caption `id` is
+    /// analysed by: below zero, apart from every caption's and each other's.
+    nonisolated static func otherID(of id: Int, _ index: Int) -> Int {
+        -(id * (OtherHearing.shown.count + 1) + index + 1)
     }
 
     /// The one of `others` heard over `caption`'s own stretch (the host
