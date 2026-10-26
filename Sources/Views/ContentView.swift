@@ -709,12 +709,13 @@ private struct OtherHearingLine: View {
     @State private var selection: Range<Int>?
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            Self.name(label, fontSize: fontSize)
+        HStack(alignment: .top, spacing: 6) {
+            Self.name(label, fontSize: fontSize, showFurigana: showFurigana)
             FuriganaText(
                 tokens: ruby, fontSize: fontSize, showReadings: showFurigana, selection: $selection, onClick: onClick
             )
             .help("What \(label) heard over the same stretch")
+            Spacer(minLength: 8)
             Button(action: onAnalyze) {
                 Image(systemName: AnalysisView.symbol)
                     .font(.system(size: fontSize * 0.7))
@@ -722,18 +723,20 @@ private struct OtherHearingLine: View {
             }
             .buttonStyle(.plain)
             .help("Explain what \(label) heard")
-            .padding(.bottom, fontSize * 0.1)
+            // Level with its first line, below the row of readings.
+            .padding(.top, showFurigana ? fontSize * 0.6 : 0)
             .opacity(isRowHovered || isAnalyzed ? 1 : 0)
         }
     }
 
-    /// A recognizer's name at the left of its line, on the text's baseline.
-    static func name(_ label: String, fontSize: Double) -> some View {
+    /// A recognizer's name at the left of its line, on the baseline of its
+    /// first line, below the row of readings.
+    static func name(_ label: String, fontSize: Double, showFurigana: Bool) -> some View {
         Text(label)
             .font(.system(size: fontSize * 0.5).monospaced())
             .foregroundStyle(.gray)
             .frame(width: fontSize * 1.6, alignment: .leading)
-            .padding(.bottom, fontSize * 0.2)
+            .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
     }
 }
 
@@ -765,17 +768,37 @@ struct CaptionRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .bottom, spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
                     // With the other recognizers under it, the caption's own
                     // line is named too: ReazonSpeech k2's.
                     if !others.isEmpty {
-                        OtherHearingLine.name("k2", fontSize: fontSize)
+                        OtherHearingLine.name("k2", fontSize: fontSize, showFurigana: showFurigana)
                             .help("What ReazonSpeech k2, the captions' own recognizer, heard")
                     }
                     FuriganaText(
                         tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
                         selection: $selection, onClick: onSeek
                     )
+                    Spacer(minLength: 8)
+                    if onSeek != nil, let moment = caption.moment {
+                        Text(Self.span(of: moment))
+                            .font(.system(size: fontSize * 0.55).monospacedDigit())
+                            .foregroundStyle(.gray)
+                            // On the Japanese's baseline, below the row of readings.
+                            .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
+                            // Clicks go through it to the row.
+                            .allowsHitTesting(false)
+                    }
+                    Button(action: onAnalyze) {
+                        Image(systemName: AnalysisView.symbol)
+                            .font(.system(size: fontSize * 0.7))
+                            .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Explain this sentence")
+                    // Level with the Japanese, below the row of readings.
+                    .padding(.top, showFurigana ? fontSize * 0.6 : 0)
+                    .opacity(isHovered || isAnalyzed ? 1 : 0)
                 }
                 ForEach(others, id: \.label) { other in
                     OtherHearingLine(
@@ -794,25 +817,6 @@ struct CaptionRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if onSeek != nil, let moment = caption.moment {
-                Text(Self.span(of: moment))
-                    .font(.system(size: fontSize * 0.55).monospacedDigit())
-                    .foregroundStyle(.gray)
-                    // On the Japanese's baseline, below the row of readings.
-                    .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
-                    // Clicks go through it to the row.
-                    .allowsHitTesting(false)
-            }
-            Button(action: onAnalyze) {
-                Image(systemName: AnalysisView.symbol)
-                    .font(.system(size: fontSize * 0.7))
-                    .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
-            }
-            .buttonStyle(.plain)
-            .help("Explain this sentence")
-            // Level with the Japanese, below the row of readings.
-            .padding(.top, showFurigana ? fontSize * 0.6 : 0)
-            .opacity(isHovered || isAnalyzed ? 1 : 0)
         }
         .foregroundStyle(.white)
         // The highlight reaches a little past the text, without moving it.
