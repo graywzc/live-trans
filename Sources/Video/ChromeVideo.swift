@@ -44,12 +44,19 @@ final class ChromeVideo {
     /// the one kept last time, until it has been looked for in Chrome.
     @ObservationIgnored private var store: UserDefaults?
     @ObservationIgnored private var remembered: (id: Int, url: String)?
+    /// Whether the tab is kept for the next launch: in dev mode only, as
+    /// production keeps nothing of what was watched.
+    @ObservationIgnored var keepsTab: @MainActor () -> Bool = { true }
 
     /// Goes back to the tab of the last launch, when Chrome still has it,
     /// the first time it is asked about; keeps each tab chosen or found in
     /// `defaults` for the next.
     func remember(in defaults: UserDefaults = .standard) {
         store = defaults
+        guard keepsTab() else {
+            defaults.removeObject(forKey: AppSettings.lastVideoTab)
+            return
+        }
         if let kept = defaults.dictionary(forKey: AppSettings.lastVideoTab),
            let id = kept["id"] as? Int, let url = kept["url"] as? String {
             remembered = (id, url)
@@ -58,11 +65,17 @@ final class ChromeVideo {
 
     private func save(_ tab: ChromeScript.Tab?) {
         guard let store else { return }
-        if let tab {
+        if let tab, keepsTab() {
             store.set(["id": tab.id, "url": tab.url], forKey: AppSettings.lastVideoTab)
         } else {
             store.removeObject(forKey: AppSettings.lastVideoTab)
         }
+    }
+
+    /// Forgets the tab kept for the next launch, on leaving dev mode.
+    func forgetKeptTab() {
+        remembered = nil
+        store?.removeObject(forKey: AppSettings.lastVideoTab)
     }
 
     /// Chosen again from `listed`, if it holds the tab of the last launch.

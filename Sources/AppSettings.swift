@@ -51,6 +51,11 @@ enum AppSettings {
     /// The Chrome tab last chosen or found, {"id", "url"}, to go back to at
     /// the next launch.
     static let lastVideoTab = "lastVideoTab"
+    /// Whether production also listens to the Mac's audio, where the host
+    /// cannot fetch the video itself. Off for now, to see which videos the
+    /// host cannot fetch; `defaults write <app> listenToMacInProduction -bool
+    /// true` turns it back on.
+    static let listenToMacInProduction = "listenToMacInProduction"
     /// Whether the app was last in dev mode, to open in it again.
     static let devMode = "devMode"
     /// The step dev mode runs, by `DevPipeline.Step`.

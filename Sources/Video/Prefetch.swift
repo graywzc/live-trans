@@ -88,6 +88,9 @@ final class Prefetcher {
     var isActive: Bool { job != nil }
     /// Off at launch: the video is only fetched ahead once asked to.
     private(set) var isPaused = true
+    /// Why the host could not fetch the video it was to caption ahead, for
+    /// the viewer; nil while it can, or before it has tried.
+    private(set) var problem: String?
 
     /// Where the video is now, carried on from the last answer.
     var position: Double? {
@@ -337,8 +340,14 @@ final class Prefetcher {
                     await stopJob()
                     finished = []
                     self.finishedIn = nil
+                    problem = nil
                 }
                 lastMedia = probe
+                if !isPaused, !probe.isFetchable {
+                    problem = probe.encrypted
+                        ? "This video is under DRM: the host can't fetch it."
+                        : "The host can't fetch this video: the page gives no way to its audio."
+                }
                 if job == nil, !isPaused, probe.isFetchable, !failedPages.contains(probe.page) {
                     await startJob(for: probe, client: client)
                 }
@@ -389,6 +398,7 @@ final class Prefetcher {
             }
             if status.state == "failed" {
                 print("prefetch failed: \(status.error ?? "unknown")")
+                problem = "The host couldn't fetch this video: \(status.error ?? "no reason given")"
                 failedPages.insert(current.page)
                 retire()
             }
@@ -432,8 +442,10 @@ final class Prefetcher {
                 start: start, fetched: start, ready: start
             )
             print("prefetch \(id) from \(Int(start))s: \(probe.mediaURL ?? probe.page)")
+            problem = nil
         } catch {
             print("prefetch could not start: \(error.localizedDescription)")
+            problem = "The host couldn't start fetching this video: \(error.localizedDescription)"
             failedPages.insert(probe.page)
         }
     }

@@ -9,6 +9,10 @@ struct ServerConfig: Equatable {
     var remotePython: String
     var idleTimeout: Int
     var target = Target.english
+    /// Whether the server writes its log, server.log on the host: in dev
+    /// mode. In production it writes none and the last one is deleted, so
+    /// nothing of a session is left there.
+    var keepsLog = true
 
     /// The language the captions are translated into, as the server's
     /// `--target` names it.
@@ -27,13 +31,14 @@ struct ServerConfig: Equatable {
     }
 
     var launchCommand: String {
-        let log = "\(remoteDir)/server.log"
+        let log = keepsLog ? "\(remoteDir)/server.log" : "/dev/null"
         // English is the server's own default: left unsaid, so a server from
         // before the option still starts.
         let target = target == .english ? "" : "--target \(target.rawValue) "
         // setsid plus redirecting all three fds fully detaches the server, so
         // dropping the ssh connection cannot take it down.
         return "cd \(remoteDir) && "
+            + (keepsLog ? "" : "rm -f server.log && ")
             + "setsid nohup \(remotePython) asr_server.py --host 0.0.0.0 --port \(port) "
             + "--idle-timeout \(idleTimeout) \(target)< /dev/null > \(log) 2>&1 & "
             + "disown; echo started"

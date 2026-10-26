@@ -248,7 +248,15 @@ struct ContentView: View {
                     }
                 }
             }
-            if engine.isRunning {
+            if !isDev, let problem = prefetch.problem {
+                // With the Mac's audio not heard, a video the host can't fetch
+                // gets no captions: said here, not left to look like silence.
+                Label(problem, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if engine.isRunning && engine.listensToMac {
                 LevelMeter(
                     level: engine.inputLevel,
                     threshold: engine.speechThreshold,

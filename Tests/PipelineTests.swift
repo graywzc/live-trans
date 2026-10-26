@@ -163,6 +163,10 @@ final class ServerConfigTests: XCTestCase {
         XCTAssertFalse(config.launchCommand.contains("--target"))
         config.target = .chinese
         XCTAssertTrue(config.launchCommand.contains("--idle-timeout 180 --target zh < /dev/null"), config.launchCommand)
+        // In production, no log, and the last one gone.
+        config.keepsLog = false
+        XCTAssertTrue(config.launchCommand.hasPrefix("cd ~/livetrans && rm -f server.log && setsid nohup"), config.launchCommand)
+        XCTAssertTrue(config.launchCommand.contains("< /dev/null > /dev/null 2>&1 &"), config.launchCommand)
         let old = try? JSONDecoder().decode(ServerHealth.self, from: Data(#"{"status":"ok"}"#.utf8))
         XCTAssertEqual(old?.translatesInto, .english, "a server that doesn't say translates into English")
         let chinese = try? JSONDecoder().decode(ServerHealth.self, from: Data(#"{"status":"ok","target":"zh"}"#.utf8))
