@@ -607,6 +607,11 @@ DEV_OTHER_HEARING = os.getenv("LIVETRANS_OTHER_HEARERS", "1") != "0"
 # apart, cuts its captions where they change, and has the other recognizers
 # hear each (see PrefetchJob._finish).
 PRODUCTION_FINISH = os.getenv("LIVETRANS_PRODUCTION_FINISH", "1") != "0"
+# The other recognizers a production job's captions are heard by: not
+# VibeVoice, which on a blind judging of a whole episode was never better
+# than all three others on any caption, for most of the GPU and the
+# translator let go.
+PRODUCTION_HEARERS = ("nemo", "qwen")
 # Each caption is heard from a little before its start to a little after
 # its end, as a click on it plays it.
 OTHER_LEAD, OTHER_TAIL = 0.5, 0.3
@@ -2968,14 +2973,12 @@ class PrefetchJob:
 
     def _finish(self):
         """A production job's other recognizers and speakers, each given to
-        the client as it is done: nemo and qwen hear the captions in rounds
-        as they are made, beside the translator; once all are made, the
-        speakers are told apart over all the audio (DiariZen), each caption
-        a change of speaker falls inside is heard again and cut there, the
-        new pieces are heard by nemo and qwen, and VibeVoice hears every
-        caption last (it needs the translator's GPU memory). Nothing of it
-        is kept."""
-        early = [name for name, _ in DEV_OTHER_HEARERS if name != "vibevoice"]
+        the client as it is done: PRODUCTION_HEARERS hear the captions in
+        rounds as they are made, beside the translator; once all are made,
+        the speakers are told apart over all the audio (DiariZen), each
+        caption a change of speaker falls inside is heard again and cut
+        there, and the new pieces are heard too. Nothing of it is kept."""
+        early = list(PRODUCTION_HEARERS)
         while not self.stop_event.is_set() and self.state == "running":
             if not self._hear_round(early):
                 time.sleep(2)
@@ -3018,7 +3021,6 @@ class PrefetchJob:
             print(f"prefetch {self.id}: {len(self.speakers)} speaker turns in {time.time() - t0:.0f}s, "
                   f"{recut} captions cut where the speaker changes", flush=True)
         self._hear_round(early)
-        self._hear_round(["vibevoice"], unload=True)
 
     def _captions_from_cache(self):
         """Whether the captions came from the dev cache: made before by the
