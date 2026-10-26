@@ -2,19 +2,19 @@ import XCTest
 @testable import LiveTrans
 
 final class SessionTracesTests: XCTestCase {
-    func testTheAppsCachesAndCookiesAreErasedAndNothingElse() throws {
+    func testTheAppsCachesCookiesAndSavedWindowsAreErasedAndNothingElse() throws {
         let library = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: library) }
         let manager = FileManager.default
         let kept = [library.appending(path: "Caches/com.other.app"), library.appending(path: "Preferences")]
-        for folder in SessionTraces.folders(bundleID: "com.example.livetrans", library: library) + kept {
+        for folder in SessionTraces.folders(bundleID: "com.example.livetrans", library: library, temporary: library.appending(path: "T")) + kept {
             try manager.createDirectory(at: folder, withIntermediateDirectories: true)
             try Data("heard".utf8).write(to: folder.appending(path: "Cache.db"))
         }
 
-        SessionTraces.erase(bundleID: "com.example.livetrans", library: library)
+        SessionTraces.erase(bundleID: "com.example.livetrans", library: library, temporary: library.appending(path: "T"))
 
-        for folder in SessionTraces.folders(bundleID: "com.example.livetrans", library: library) {
+        for folder in SessionTraces.folders(bundleID: "com.example.livetrans", library: library, temporary: library.appending(path: "T")) {
             XCTAssertFalse(manager.fileExists(atPath: folder.path), folder.path)
         }
         for folder in kept {
