@@ -1207,8 +1207,39 @@ def unload_ollama():
         print(f"could not unload ollama {OLLAMA_MODEL} ({exc})", flush=True)
 
 
+# Files a server leaves in the temporary folder while it runs, each named
+# with its process id: a fetch's packet clock, and the empty log a library
+# opens on loading. Its own are erased as it exits, and those of a server
+# no longer running (one that crashed) as the next starts.
+TEMP_TRACES = ("livetrans-clock-{pid}-*.crc", "mat-debug-{pid}.log")
+# The same, looked for whoever made them (and a clock named before the
+# process id was in the name).
+TEMP_TRACES_ANY = ("livetrans-clock-*.crc", "mat-debug-*.log")
+
+
+def erase_temp_traces(pid=None):
+    """Erases the temporary files of server `pid`, or with None of every
+    server that is no longer running; how many."""
+    import glob
+
+    erased = 0
+    patterns = TEMP_TRACES_ANY if pid is None else [pattern.format(pid=pid) for pattern in TEMP_TRACES]
+    for pattern in patterns:
+        for path in glob.glob(os.path.join(tempfile.gettempdir(), pattern)):
+            owner = re.search(r"-(\d+)[-.]", os.path.basename(path))
+            if pid is None and owner and os.path.exists(f"/proc/{owner.group(1)}"):
+                continue
+            try:
+                os.remove(path)
+                erased += 1
+            except OSError:
+                pass
+    return erased
+
+
 def exit_releasing_gpu():
     unload_ollama()
+    erase_temp_traces(os.getpid())
     # Nothing of the session is kept: the log, which the app starts afresh
     # with each launch, is emptied too. A crash leaves it for a look.
     try:
@@ -2457,7 +2488,7 @@ class PrefetchJob:
         # video's (see PacketClock). A dev step's audio taken from the cache
         # brings its clock with it.
         self.clock = PacketClock(
-            os.path.join(tempfile.gettempdir(), f"livetrans-clock-{uuid.uuid4().hex}.crc"), self.offset)
+            os.path.join(tempfile.gettempdir(), f"livetrans-clock-{os.getpid()}-{uuid.uuid4().hex}.crc"), self.offset)
         self.ready = self.offset
         # The speech step's findings: where the speech is, in seconds of
         # the video, and up to where in it Silero (or FireRedVAD) has looked.
@@ -2902,17 +2933,55 @@ class PrefetchJob:
             except OSError as exc:
                 print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
 
+    def _hear_round(self, names, unload=False):
+        """The captions not yet heard by the recognizers `names` (of
+        DEV_OTHER_HEARERS), heard by each in turn; with `unload`, the
+        translator let go first. Whether any were heard."""
+        spans = [(line["start"], line["end"]) for line in list(self.lines)
+                 if line.get("start") is not None and line.get("end") is not None]
+        heard_any = False
+        for name, tool in DEV_OTHER_HEARERS:
+            if name not in names or self.stop_event.is_set():
+                continue
+            todo = [span for span in spans if name not in self.others.get(span, {})]
+            if not todo:
+                continue
+            if unload:
+                unload_ollama()
+                unload = False
+            with self.audio_lock:
+                audio = self.audio.copy()
+            clips = [[max(self._samples(a - OTHER_LEAD) - self.offset, 0), max(self._samples(b + OTHER_TAIL) - self.offset, 0)]
+                     for a, b in todo]
+            t0 = time.time()
+
+            def heard(answer, name=name, todo=todo):
+                self.others.setdefault(todo[answer["i"]], {})[name] = answer["text"]
+
+            try:
+                run_devtool_lines(tool, {"clips": clips}, audio, heard)
+                print(f"prefetch {self.id}: {len(todo)} captions heard by {name} in {time.time() - t0:.0f}s", flush=True)
+                heard_any = True
+            except (RuntimeError, OSError, ValueError, KeyError, IndexError) as exc:
+                print(f"prefetch {self.id}: {name}: {exc}", flush=True)
+        return heard_any
+
     def _finish(self):
-        """A production job's work once its captions are made, each step
-        given to the client as it is done: the speakers told apart over all
-        the audio (DiariZen), each caption a change of speaker falls inside
-        heard again and cut there, then each caption heard by the other
-        recognizers, VibeVoice last (it needs the translator's GPU memory).
-        Nothing of it is kept."""
+        """A production job's other recognizers and speakers, each given to
+        the client as it is done: nemo and qwen hear the captions in rounds
+        as they are made, beside the translator; once all are made, the
+        speakers are told apart over all the audio (DiariZen), each caption
+        a change of speaker falls inside is heard again and cut there, the
+        new pieces are heard by nemo and qwen, and VibeVoice hears every
+        caption last (it needs the translator's GPU memory). Nothing of it
+        is kept."""
+        early = [name for name, _ in DEV_OTHER_HEARERS if name != "vibevoice"]
         while not self.stop_event.is_set() and self.state == "running":
-            time.sleep(1)
+            if not self._hear_round(early):
+                time.sleep(2)
         if self.stop_event.is_set() or self.state != "done":
             return
+        self._hear_round(early)
         with self.audio_lock:
             audio = self.audio.copy()
         t0 = time.time()
@@ -2942,12 +3011,14 @@ class PrefetchJob:
                 if len(new) > 1 and line in self.lines:
                     at = self.lines.index(line)
                     self.lines[at:at + 1] = new
+                    # What was heard over it whole is no caption's now.
+                    self.others.pop((line["start"], line["end"]), None)
                     self.feed.extend(new)
                     recut += 1
             print(f"prefetch {self.id}: {len(self.speakers)} speaker turns in {time.time() - t0:.0f}s, "
                   f"{recut} captions cut where the speaker changes", flush=True)
-        self.captioned = True
-        self._hear_others()
+        self._hear_round(early)
+        self._hear_round(["vibevoice"], unload=True)
 
     def _captions_from_cache(self):
         """Whether the captions came from the dev cache: made before by the
@@ -3366,6 +3437,8 @@ def main():
     )
     args = parser.parse_args()
     TARGET = args.target
+    # What a server that is no longer running left behind.
+    erase_temp_traces()
     print(f"translating into {_language()}", flush=True)
     print(f"speech recognizer: {ASR_BACKEND}", flush=True)
     print(f"speech finder: {'FireRedVAD + segmentation-3.0' if PRODUCTION_SPEECH_MODEL else 'Silero'}", flush=True)

@@ -38,6 +38,7 @@ struct LiveTransApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var windowObserver: NSObjectProtocol?
     let engine = CaptionEngine()
     let jisho = JishoBrowser()
     let analyzer = SentenceAnalyzer()
@@ -89,6 +90,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         SessionTraces.erase()
     }
+
+    /// No window is kept by macOS to restore: what it would keep of them
+    /// outlives the app.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+        SessionTraces.erase()
+        windowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeMainNotification, object: nil, queue: .main
+        ) { note in
+            (note.object as? NSWindow)?.isRestorable = false
+        }
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard engine.isRunning else { return .terminateNow }

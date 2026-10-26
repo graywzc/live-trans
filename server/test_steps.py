@@ -651,10 +651,34 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
     # The line as first made, then the two it was cut into, which take its place.
     assert [l["ja"] for l in status["lines"]] == ["ことばはい", "ことば", "はい"], status["lines"]
     assert [l["ja"] for l in job.lines] == ["ことば", "はい"], job.lines
-    assert asked[:5] == ["diarize", "unload", "hear_nemo", "hear_qwen", "hear_vibevoice"], asked
+    # nemo and qwen as the captions come, the speakers once all are made,
+    # nemo and qwen again for the pieces cut, VibeVoice last.
+    assert asked[:7] == ["hear_nemo", "hear_qwen", "diarize", "hear_nemo", "hear_qwen", "unload", "hear_vibevoice"], asked
     assert [o["nemo"] for o in found["others"]] == ["hear_nemoのことば"] * 2, found["others"]
     assert found["speakers"], "the speakers are told, for the timeline"
     assert not os.listdir(cache), "a production job keeps nothing"
+
+
+def test_a_server_s_temporary_files_are_erased_at_its_exit_and_by_the_next_after_a_crash():
+    tmp = tempfile.gettempdir()
+    mine, gone, running = os.getpid(), 999999999, os.getppid()
+    names = [f"livetrans-clock-{mine}-a.crc", f"mat-debug-{mine}.log", f"livetrans-clock-{gone}-b.crc",
+             f"mat-debug-{gone}.log", "livetrans-clock-0f1e2d.crc", f"livetrans-clock-{running}-c.crc"]
+    for name in names:
+        open(os.path.join(tmp, name), "w").close()
+    try:
+        assert srv.erase_temp_traces(mine) == 2
+        assert not os.path.exists(os.path.join(tmp, names[0])) and not os.path.exists(os.path.join(tmp, names[1]))
+        # At the next start: a server no longer running, and a clock named
+        # before the process id was; not a running server's.
+        srv.erase_temp_traces()
+        assert [n for n in names if os.path.exists(os.path.join(tmp, n))] == [names[5]]
+    finally:
+        for name in names:
+            try:
+                os.remove(os.path.join(tmp, name))
+            except OSError:
+                pass
 
 
 def test_the_official_subtitles_of_a_page_are_found_by_its_index():
