@@ -5,6 +5,15 @@ import numpy as np
 
 import asr_server as srv
 
+
+def _no_translator(*args, **kwargs):
+    raise RuntimeError("no translator in these tests")
+
+
+# The tests' made-up translations are checked as real ones are, but never
+# sent to ollama: one the check would ask again for stays as it was.
+srv._ollama_generate = _no_translator
+
 SR = srv.SAMPLE_RATE
 
 
@@ -104,6 +113,35 @@ def test_sentences_heard_to_end_cut_for_good(monkeypatch=None):
         assert len(grid.cuts) == 4, grid.cuts
     finally:
         srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+
+
+def test_an_answer_shifted_by_a_line_is_caught_piece_by_piece():
+    grid = grid_with([(0.2, 2.0), (2.8, 5.0), (5.8, 7.5)], 0.0, 8.0)  # 0.8 s pauses: hard cuts
+    audio = silence(8.0)
+    whisper = FakeWhisper([("雨", 0.3, 0.8), ("ですか", 0.9, 1.9), ("傘を", 2.9, 3.5), ("借りた", 3.6, 4.2),
+                           ("んだ", 4.3, 4.9), ("明日は", 5.9, 6.5), ("晴れ", 6.6, 7.4)])
+
+    def llm(texts):
+        # Shifted by a line: the first piece given the second's meaning,
+        # the second joined to the third under the third's. The two are
+        # then translated alone, and the second comes out all but the
+        # first's.
+        return [("雨ですか", "是我借来的那把伞。"), ("傘を借りたんだ明日は晴れ", "明天会放晴。")]
+
+    alone = {"傘を借りたんだ": "那是我借来的那把伞。", "明日は晴れ": "明天会放晴。"}
+    asked = []
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = llm, srv.translate_ollama
+    srv.translate_text, real_text = alone.get, srv.translate_text
+    srv._ollama_generate = lambda ja, timeout, prompt=None: asked.append(ja) or f"again:{len(asked)}"
+    try:
+        lines = srv.hear_pieces(grid, audio, 0.0, beam_size=5, prompt="")
+    finally:
+        srv.run_whisper, srv.translate_ollama, srv.translate_text = real_whisper, real_translate, real_text
+        srv._ollama_generate = _no_translator
+    assert [l["ja"] for l in lines] == ["雨ですか", "傘を借りたんだ", "明日は晴れ"], lines
+    assert asked == ["雨ですか", "傘を借りたんだ"], asked
+    assert [l["en"] for l in lines] == ["again:1", "again:2", "明天会放晴。"], lines
 
 
 def test_llm_sentence_ends_cut_and_straddling_ones_are_translated_apart():
@@ -263,6 +301,43 @@ def test_a_cut_inside_a_clip_keeps_what_asked_for_it():
     grid = grid_with([(10.2, 15.8)], 10.0, 16.0)
     grid.cut_between(("晴れです。", 10.9, 11.7), ("明日は", 11.9, 12.4), heard=True, why="Whisper's sentence end")
     assert list(grid.reasons.values()).count("Whisper's sentence end, no pause") == 1, grid.reasons
+
+
+def test_a_piece_is_cut_where_the_speaker_changes():
+    # One stretch of speech, no pause: a question, then its answer by
+    # another voice.
+    grid = grid_with([(0.2, 4.0)], 0.0, 5.0)
+    whisper = FakeWhisper([("明日は", 0.3, 0.9), ("晴れる", 0.9, 1.3), ("かな", 1.3, 1.9), ("ええ", 2.0, 2.3), ("晴れますよ", 2.3, 3.5)])
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = (lambda texts, fixes=None: [(t, "zh") for t in texts]), srv.translate_ollama
+    try:
+        whole = srv.hear_pieces(grid_with([(0.2, 4.0)], 0.0, 5.0), silence(5.0), 0.0, beam_size=5, prompt="")
+        # A short pause between the two turns, the word in it nobody's.
+        turns = [(0.2, 1.6, "S1"), (2.05, 3.6, "S2")]
+        cut = srv.hear_pieces(grid, silence(5.0), 0.0, beam_size=5, prompt="", turns=turns)
+    finally:
+        srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+    assert [l["ja"] for l in whole] == ["明日は晴れるかなええ晴れますよ"], whole
+    assert [l["ja"] for l in cut] == ["明日は晴れるかな", "ええ晴れますよ"], cut
+    assert srv.speaker_at(turns, 1.0) == "S1" and srv.speaker_at(turns, 4.0) is None
+
+def test_a_voice_over_someone_still_speaking_is_no_change_and_a_short_reply_is_cut():
+    # One speaker throughout, another heard over them for a moment: no cut.
+    # Then a question and a two-character reply, cut where the asking
+    # speaker's turn ends, though the reply's first sound is timed early.
+    grid = grid_with([(0.2, 9.0)], 0.0, 10.0)
+    whisper = FakeWhisper([("今日は", 0.3, 0.9), ("雨が", 0.9, 1.5), ("降る", 1.5, 2.1), ("でしょう", 2.1, 3.0),
+                           ("本当", 4.0, 4.6), ("ですか", 4.6, 5.3), ("あ", 5.3, 5.5), ("あ", 5.5, 6.1)])
+    srv.run_whisper, real_whisper = whisper, srv.run_whisper
+    srv.translate_ollama, real_translate = (lambda texts, fixes=None: [(t, "zh") for t in texts]), srv.translate_ollama
+    turns = [(0.2, 3.1, "S1"), (1.0, 2.0, "S2"), (3.9, 5.25, "S1"), (5.6, 6.2, "S3")]
+    try:
+        lines = srv.hear_pieces(grid, silence(10.0), 0.0, beam_size=5, prompt="", turns=turns)
+    finally:
+        srv.run_whisper, srv.translate_ollama = real_whisper, real_translate
+    assert [l["ja"] for l in lines] == ["今日は雨が降るでしょう本当ですか", "ああ"], lines
+    assert srv.floor_turns(turns) == [(0.2, 3.1, "S1"), (3.9, 5.25, "S1"), (5.6, 6.2, "S3")]
+    assert srv.floor_turns([(0, 5, "A"), (4, 10, "B")]) == [(0, 5, "A"), (5, 10, "B")], "the floor from where A stops"
 
 
 if __name__ == "__main__":

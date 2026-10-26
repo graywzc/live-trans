@@ -59,14 +59,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         devPipeline.start()
         prefetcher.isDev = { [panel] in panel.isDev }
         devPipeline.isDev = { [panel] in panel.isDev }
-        panel.onDevChange = { [activity, engine] isDev in
+        panel.onDevChange = { [activity, engine, video] isDev in
             activity.isEnabled = isDev
             // In dev mode the host fetches the video itself: the Mac's audio
-            // is not heard, and the sound output is left alone.
-            engine.listensToMac = !isDev
+            // is not heard, and the sound output is left alone. Nor, for now,
+            // in production (AppSettings.listenToMacInProduction).
+            engine.listensToMac = Self.listensToMac(isDev: isDev)
+            if !isDev { video.forgetKeptTab() }
         }
+        engine.keepsServerLog = { [panel] in panel.isDev }
+        video.keepsTab = { [panel] in panel.isDev }
         activity.follow { [engine] in engine.client }
+        panel.restoreMode()
+        engine.listensToMac = Self.listensToMac(isDev: panel.isDev)
+        video.remember()
         panel.applyLaunchArgument()
+    }
+
+    static func listensToMac(isDev: Bool) -> Bool {
+        !isDev && UserDefaults.standard.bool(forKey: AppSettings.listenToMacInProduction)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

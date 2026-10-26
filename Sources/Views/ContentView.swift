@@ -17,6 +17,7 @@ struct ContentView: View {
 
     /// One selection for the whole window, as in any text view.
     @State private var selection: CaptionSelection?
+    @State private var confirmRerun = false
 
     private static let minCaptionsWidth: CGFloat = 420
 
@@ -121,7 +122,11 @@ struct ContentView: View {
                 selection: selectionBinding(for: caption),
                 onAnalyze: { analyze(caption) },
                 onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
-                isCurrent: prefetch.currentCaptionID == caption.id
+                isCurrent: prefetch.currentCaptionID == caption.id,
+                official: panel.isDev ? dev.official(for: caption) : nil,
+                others: panel.isDev ? dev.others(for: caption) : prefetch.others(for: caption),
+                isOtherAnalyzed: { panel.isPresented && panel.tab == .analysis && analyzer.hasAnalyzed($0) },
+                onAnalyzeOther: { analyze($0) }
             )
         }
         .selectionActions(onLookUp: lookUp)
@@ -181,7 +186,11 @@ struct ContentView: View {
         case .idle:
             ContentUnavailableView(
                 "LiveTrans", systemImage: "captions.bubble",
-                description: Text("Press Start to caption and translate Japanese speech.")
+                description: Text(
+                    panel.isDev
+                        ? "Press Load to show the Chrome video's captions, made before or made now."
+                        : "Press Start to caption and translate Japanese speech."
+                )
             )
         }
     }
@@ -193,22 +202,22 @@ struct ContentView: View {
             if canCaptionAhead || prefetch.playhead != nil {
                 HStack(spacing: 10) {
                     if canCaptionAhead && isDev {
-                        // Dev mode: the step, run over the whole video.
+                        // Dev mode: Load and Stop below run the step; this
+                        // makes it all again.
                         Button {
-                            dev.toggle()
+                            confirmRerun = true
                         } label: {
-                            Label(
-                                dev.isPaused ? "Run step" : "Pause",
-                                systemImage: dev.isPaused ? "play.fill" : "pause.fill"
-                            )
-                            .frame(minWidth: 104)
+                            Label("Re-run", systemImage: "arrow.clockwise")
+                                .frame(minWidth: 104)
                         }
                         .controlSize(.small)
-                        .help(
-                            dev.isPaused
-                                ? "Fetch the whole Chrome video's audio and run step \(dev.step.title) over it, for the Dev panel's timeline"
-                                : "Hold the step; what it found stays"
-                        )
+                        .disabled(dev.job == nil)
+                        .help("Forget what the host kept of this video and make it all again: the audio, step \(dev.step.title), speakers, words, captions and the other recognizers")
+                        .confirmationDialog("Make this video's dev results again?", isPresented: $confirmRerun) {
+                            Button("Re-run", role: .destructive) { dev.rerun() }
+                        } message: {
+                            Text("The host forgets what it kept of this video and fetches and makes it all again, which takes several minutes.")
+                        }
                     } else if canCaptionAhead {
                         Button {
                             prefetch.toggle()
@@ -239,32 +248,54 @@ struct ContentView: View {
                     }
                 }
             }
-            if engine.isRunning {
+            if !isDev, let problem = prefetch.problem {
+                // With the Mac's audio not heard, a video the host can't fetch
+                // gets no captions: said here, not left to look like silence.
+                Label(problem, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if engine.isRunning && engine.listensToMac {
                 LevelMeter(
                     level: engine.inputLevel,
                     threshold: engine.speechThreshold,
                     isSpeaking: engine.isSpeaking
                 )
             }
-            Button {
-                if engine.isRunning {
-                    engine.stop()
-                } else {
-                    engine.start()
+            // In dev mode, Load: the host started and the step run over the
+            // Chrome video, from what it kept of it.
+            let loading = isDev ? engine.isRunning && !dev.isPaused : engine.isRunning
+            HStack(spacing: 12) {
+                TabPicker()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    if loading {
+                        if isDev { dev.hold() }
+                        engine.stop()
+                    } else if isDev {
+                        if !engine.isRunning { engine.start() }
+                        dev.load()
+                    } else {
+                        engine.start()
+                    }
+                } label: {
+                    Label(
+                        loading ? "Stop" : isDev ? "Load" : "Start",
+                        systemImage: loading ? "stop.fill" : isDev ? "tray.and.arrow.down.fill" : "mic.fill"
+                    )
+                    .font(.headline)
+                    .frame(maxWidth: 240)
+                    .padding(.vertical, 4)
                 }
-            } label: {
-                Label(
-                    engine.isRunning ? "Stop" : "Start",
-                    systemImage: engine.isRunning ? "stop.fill" : "mic.fill"
-                )
-                .font(.headline)
-                .frame(maxWidth: 240)
-                .padding(.vertical, 4)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(loading ? .red : .green)
+                .keyboardShortcut(.return, modifiers: .command)
+                .help(isDev && !loading ? "Show the Chrome video's captions and step from what the host kept of it, making only what is missing" : "")
+                // Keeps the button in the middle.
+                Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(engine.isRunning ? .red : .green)
-            .keyboardShortcut(.return, modifiers: .command)
         }
         .padding()
     }
@@ -278,7 +309,6 @@ private struct VideoControls: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            TabPicker()
             Button {
                 video.send(.skip(seconds: -5))
             } label: {
@@ -532,29 +562,30 @@ private struct TabPicker: View {
         Button {
             isOpen.toggle()
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: video.pinned == nil ? "sparkle.magnifyingglass" : "pin.fill")
+            HStack(spacing: 6) {
+                Image(systemName: video.pinned == nil ? "sparkle.magnifyingglass" : "play.rectangle.fill")
                 Text(label)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: 160, alignment: .leading)
-                    .fixedSize(horizontal: true, vertical: false)
-                Image(systemName: "chevron.down")
-                    .font(.caption2)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption)
             }
-            .font(.caption)
-            .foregroundStyle(.gray)
+            .font(.callout)
+            .foregroundStyle(.white.opacity(0.85))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.1)))
         }
-        .help("Choose which Chrome tab the video buttons control")
-        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+        .buttonStyle(.plain)
+        .help("The Chrome tab whose video the app captions and controls: it stays on it until you choose another")
+        .popover(isPresented: $isOpen, arrowEdge: .top) {
             TabList { isOpen = false }
         }
     }
 
     private var label: String {
-        if let pinned = video.pinned { return pinned.title }
-        if let linked = video.linked { return "Auto: \(linked.title)" }
-        return "Auto"
+        if let pinned = video.pinned { return pinned.title.isEmpty ? pinned.url : pinned.title }
+        return "Find the video"
     }
 }
 
@@ -569,7 +600,7 @@ private struct TabList: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
                 row(
-                    title: "Automatic", detail: "The front tab of a Chrome window that has a video",
+                    title: "Find the video", detail: "The front tab of a Chrome window that has a video, kept from then on",
                     symbol: "sparkle.magnifyingglass", isChosen: video.pinned == nil, isControlled: false
                 ) {
                     video.pin(nil)
@@ -669,6 +700,54 @@ private struct CaptionSelection: Equatable {
     let range: Range<Int>
 }
 
+/// One other recognizer's text under a caption in dev mode: its name, then
+/// the text with readings, as the caption's own.
+private struct OtherHearingLine: View {
+    let label: String
+    let ruby: [RubyToken]
+    let fontSize: Double
+    let showFurigana: Bool
+    var onClick: (() -> Void)?
+    /// The row is hovered: the analysis button shows.
+    var isRowHovered = false
+    /// The side panel has this line's analysis.
+    var isAnalyzed = false
+    var onAnalyze: () -> Void = {}
+
+    @State private var selection: Range<Int>?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Self.name(label, fontSize: fontSize, showFurigana: showFurigana)
+            FuriganaText(
+                tokens: ruby, fontSize: fontSize, showReadings: showFurigana, selection: $selection, onClick: onClick
+            )
+            .help("What \(label) heard over the same stretch")
+            Spacer(minLength: 8)
+            Button(action: onAnalyze) {
+                Image(systemName: AnalysisView.symbol)
+                    .font(.system(size: fontSize * 0.7))
+                    .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
+            }
+            .buttonStyle(.plain)
+            .help("Explain what \(label) heard")
+            // Level with its first line, below the row of readings.
+            .padding(.top, showFurigana ? fontSize * 0.6 : 0)
+            .opacity(isRowHovered || isAnalyzed ? 1 : 0)
+        }
+    }
+
+    /// A recognizer's name at the left of its line, on the baseline of its
+    /// first line, below the row of readings.
+    static func name(_ label: String, fontSize: Double, showFurigana: Bool) -> some View {
+        Text(label)
+            .font(.system(size: fontSize * 0.5).monospaced())
+            .foregroundStyle(.gray)
+            .frame(width: fontSize * 1.6, alignment: .leading)
+            .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
+    }
+}
+
 struct CaptionRow: View {
     let caption: Caption
     let showFurigana: Bool
@@ -682,41 +761,70 @@ struct CaptionRow: View {
     var onSeek: (() -> Void)?
     /// The sentence being spoken, among captions fetched ahead.
     var isCurrent = false
+    /// The episode's official subtitle for the same moment, in dev mode.
+    var official: String?
+    /// What other recognizers heard over the same stretch, in dev mode,
+    /// each under the caption's own Japanese with its name and readings.
+    var others: [(label: String, sentence: Caption)] = []
+    /// Whether the side panel has the analysis of one of `others`, and
+    /// asking for it.
+    var isOtherAnalyzed: (Caption) -> Bool = { _ in false }
+    var onAnalyzeOther: (Caption) -> Void = { _ in }
 
     @State private var isHovered = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                FuriganaText(
-                    tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
-                    selection: $selection, onClick: onSeek
-                )
+                HStack(alignment: .top, spacing: 6) {
+                    // With the other recognizers under it, the caption's own
+                    // line is named too: ReazonSpeech k2's.
+                    if !others.isEmpty {
+                        OtherHearingLine.name("k2", fontSize: fontSize, showFurigana: showFurigana)
+                            .help("What ReazonSpeech k2, the captions' own recognizer, heard")
+                    }
+                    FuriganaText(
+                        tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
+                        selection: $selection, onClick: onSeek
+                    )
+                    Spacer(minLength: 8)
+                    if onSeek != nil, let moment = caption.moment {
+                        Text(Self.span(of: moment))
+                            .font(.system(size: fontSize * 0.55).monospacedDigit())
+                            .foregroundStyle(.gray)
+                            // On the Japanese's baseline, below the row of readings.
+                            .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
+                            // Clicks go through it to the row.
+                            .allowsHitTesting(false)
+                    }
+                    Button(action: onAnalyze) {
+                        Image(systemName: AnalysisView.symbol)
+                            .font(.system(size: fontSize * 0.7))
+                            .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Explain this sentence")
+                    // Level with the Japanese, below the row of readings.
+                    .padding(.top, showFurigana ? fontSize * 0.6 : 0)
+                    .opacity(isHovered || isAnalyzed ? 1 : 0)
+                }
+                ForEach(others, id: \.label) { other in
+                    OtherHearingLine(
+                        label: other.label, ruby: other.sentence.ruby, fontSize: fontSize, showFurigana: showFurigana,
+                        onClick: onSeek, isRowHovered: isHovered, isAnalyzed: isOtherAnalyzed(other.sentence),
+                        onAnalyze: { onAnalyzeOther(other.sentence) }
+                    )
+                }
                 if !caption.english.isEmpty {
                     // Not SwiftUI's selectable text, which keeps its clicks.
                     SelectableText(caption.english, size: fontSize * 0.82, color: .systemGreen, onClick: onSeek)
                 }
+                if let official {
+                    SelectableText(official, size: fontSize * 0.82, color: .systemOrange, onClick: onSeek)
+                        .help("The episode's official subtitle")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if onSeek != nil, let moment = caption.moment {
-                Text(Self.span(of: moment))
-                    .font(.system(size: fontSize * 0.55).monospacedDigit())
-                    .foregroundStyle(.gray)
-                    // On the Japanese's baseline, below the row of readings.
-                    .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
-                    // Clicks go through it to the row.
-                    .allowsHitTesting(false)
-            }
-            Button(action: onAnalyze) {
-                Image(systemName: AnalysisView.symbol)
-                    .font(.system(size: fontSize * 0.7))
-                    .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
-            }
-            .buttonStyle(.plain)
-            .help("Explain this sentence")
-            // Level with the Japanese, below the row of readings.
-            .padding(.top, showFurigana ? fontSize * 0.6 : 0)
-            .opacity(isHovered || isAnalyzed ? 1 : 0)
         }
         .foregroundStyle(.white)
         // The highlight reaches a little past the text, without moving it.

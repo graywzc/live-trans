@@ -64,6 +64,27 @@ final class SidePanelTests: XCTestCase {
         XCTAssertEqual(told, [true, false], "told of changes only")
     }
 
+    /// The mode chosen is the one the next launch opens in.
+    func testTheModeIsKeptForTheNextLaunch() {
+        let defaults = UserDefaults(suiteName: "SidePanelTests.mode")!
+        defaults.removePersistentDomain(forName: "SidePanelTests.mode")
+        let first = SidePanel()
+        first.restoreMode(from: defaults)
+        XCTAssertFalse(first.isDev, "production at first")
+        first.isDev = true
+        let next = SidePanel()
+        var told: [Bool] = []
+        next.onDevChange = { told.append($0) }
+        next.restoreMode(from: defaults)
+        XCTAssertTrue(next.isDev)
+        XCTAssertEqual(told, [true], "entered as if switched to")
+        next.isDev = false
+        let third = SidePanel()
+        third.restoreMode(from: defaults)
+        XCTAssertFalse(third.isDev)
+        defaults.removePersistentDomain(forName: "SidePanelTests.mode")
+    }
+
     func testAnUnknownValueIsIgnored() {
         let panel = SidePanel()
         panel.applyLaunchArgument(defaults: defaults(sidePanel: "both"))

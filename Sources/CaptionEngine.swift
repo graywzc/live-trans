@@ -55,6 +55,8 @@ final class CaptionEngine {
     /// no input is opened and the output is left alone, so nothing can fight
     /// the Mac over it. Changed while captioning, the audio is started or
     /// stopped and the server kept.
+    /// Whether the server it starts keeps a log: in dev mode.
+    var keepsServerLog: @MainActor () -> Bool = { true }
     var listensToMac = true {
         didSet {
             // Before the server is reached, run() does as this says once it is.
@@ -204,7 +206,8 @@ final class CaptionEngine {
             }
         }
 
-        let config = AppSettings.serverConfig
+        var config = AppSettings.serverConfig
+        config.keepsLog = keepsServerLog()
         let session = ServerSession(config: config)
         self.session = session
         status = .connecting("Connecting to \(config.sshHost)…")

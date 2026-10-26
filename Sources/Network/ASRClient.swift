@@ -8,9 +8,15 @@ struct ServerHealth: Decodable, Equatable {
     var ollamaModel: String?
     /// The server can fetch a video's audio ahead and caption it.
     var prefetch: Bool?
+    /// The language it translates into; a server that doesn't say, English.
+    var target: String?
+
+    var translatesInto: ServerConfig.Target {
+        target.flatMap(ServerConfig.Target.init(rawValue:)) ?? .english
+    }
 
     enum CodingKeys: String, CodingKey {
-        case status, asr, device, prefetch
+        case status, asr, device, prefetch, target
         case translationBackend = "translation_backend"
         case ollamaModel = "ollama_model"
     }
@@ -46,6 +52,24 @@ struct PrefetchStatus: Decodable, Equatable {
     /// A dev job's captions, made as production would with its step's
     /// speech finder: "running", "done", or "failed: <why>".
     var captions: String?
+    /// How many texts the other recognizers have given a dev job's
+    /// captions so far.
+    var others: Int?
+}
+
+/// A dev job's caption heard again by the other recognizers, to set beside
+/// its own text: the caption's times, and each one's text once it is in.
+struct OtherHearing: Decodable, Equatable {
+    var start: Double
+    var end: Double
+    var nemo: String?
+    var qwen: String?
+    var vibevoice: String?
+
+    /// The recognizers, in the order shown, with the names they are shown by.
+    static let shown: [(label: String, text: KeyPath<OtherHearing, String?>)] = [
+        ("nemo", \.nemo), ("qwen", \.qwen), ("vv", \.vibevoice),
+    ]
 }
 
 /// A word Whisper heard over a dev job's audio: sent as
@@ -113,6 +137,8 @@ struct StepFindings: Decodable, Equatable {
     var aligned: Bool?
     /// Who speaks when, as DiariZen tells the voices apart.
     var speakers: [SpeakerTurn]?
+    /// The captions heard again by the other recognizers.
+    var others: [OtherHearing]?
 
     var stretches: [ClosedRange<Double>] { Self.ranges(speech) }
 
@@ -123,6 +149,15 @@ struct StepFindings: Decodable, Equatable {
     private static func ranges(_ pairs: [[Double]]) -> [ClosedRange<Double>] {
         pairs.compactMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
     }
+}
+
+/// A line of an episode's official subtitles, read off the video and kept
+/// on the host, for dev mode to set beside the captions; in seconds of the
+/// video.
+struct ReferenceLine: Decodable, Equatable {
+    var start: Double
+    var end: Double
+    var text: String
 }
 
 struct CaptionPair: Decodable, Equatable {
@@ -235,6 +270,21 @@ struct ASRClient {
     }
 
     /// What a dev job's step has found so far.
+    /// The official subtitles of the episode at `page`, when the host has
+    /// them; empty when it has none, or is a server from before.
+    func reference(page: String) async -> [ReferenceLine] {
+        struct Lines: Decodable { var lines: [ReferenceLine] }
+        var components = URLComponents(url: baseURL.appending(path: "reference"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "page", value: page)]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 10
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(Lines.self, from: data)
+        else { return [] }
+        return decoded.lines
+    }
+
     func stepFindings(job: String) async throws -> StepFindings {
         var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/speech"))
         request.timeoutInterval = 20
@@ -263,9 +313,11 @@ struct ASRClient {
     }
 
     /// Empties the host's cache of videos fetched and findings made in dev
-    /// mode; how many videos it held.
-    func clearDevCache() async throws -> Int {
-        var request = URLRequest(url: baseURL.appending(path: "devcache/clear"))
+    /// mode, or only the video at `page`; how many videos it held.
+    func clearDevCache(page: String? = nil) async throws -> Int {
+        var components = URLComponents(url: baseURL.appending(path: "devcache/clear"), resolvingAgainstBaseURL: false)!
+        if let page { components.queryItems = [URLQueryItem(name: "page", value: page)] }
+        var request = URLRequest(url: components.url!)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         let (data, response) = try await session.data(for: request)

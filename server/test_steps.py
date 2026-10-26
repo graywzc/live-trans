@@ -17,6 +17,7 @@ import asr_server as srv
 # The step tests look at the steps; the captions a step job also makes
 # have a test of their own.
 srv.DEV_CAPTIONS = False
+srv.DEV_SPEAKER_CUTS = False
 
 # Whisper is not loaded here: the words a step job hears are made up by
 # the tests that look at them, and none elsewhere.
@@ -29,6 +30,7 @@ def _not_set_up(name, header, audio):
 
 # Nor the dev tools: none of the tests but those about them see them.
 srv.run_devtool = _not_set_up
+srv.run_devtool_lines = lambda name, header, audio, on_line: _not_set_up(name, header, audio)
 
 
 def loud_stretches(audio, model=None):
@@ -317,7 +319,7 @@ def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
     assert srv.clear_dev_cache() == 0
 
 
-def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_off_disk():
+def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_for_next_time():
     cache = fresh_cache()
     original = srv.speech_stretches, srv.heard_words, srv.WORDS_PIECE, srv.WORDS_OVERLAP
     srv.speech_stretches = loud_stretches
@@ -347,11 +349,27 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_off_disk():
     # piece keeps its head, each its middle, the last its tail.
     assert starts == [0.1, 1.1, 2.1, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1], starts
     assert [w[2] for w in job.words] == ["w0", "w1", "w2", "w1", "w2", "w1", "w2", "w1", "w2"], job.words
-    assert abs(job.worded - 8.5) < 0.01 and job.status()["worded"] == job.worded
+    assert abs(job.worded - 8.5) < 0.01 and job.status()["worded"] == round(job.worded, 2), (job.worded, job.status()["worded"])
     found = job.findings()
     assert found["words"][0] == [0.1, 0.5, "w0", 0.9]
     with open(os.path.join(cache, os.listdir(cache)[0], "speech.json"), encoding="utf-8") as f:
-        assert "words" not in json.load(f), "no text on disk"
+        assert "words" not in json.load(f), "the words are kept apart from the step's findings"
+    # Run again over the same video, the words come from the cache, unheard.
+    heard_before = len(pieces)
+    srv.heard_words = heard
+    try:
+        again = srv.PrefetchJob(url, "https://example.com/x", {}, 8.5, step="speech")
+        deadline = time.time() + 10
+        while not again.words and time.time() < deadline:
+            time.sleep(0.1)
+    finally:
+        srv.heard_words = original[1]
+    assert again.cached and len(pieces) == heard_before, (again.cached, pieces)
+    assert [list(w) for w in again.words] == found["words"] and abs(again.worded - job.worded) < 0.01
+    # Forgetting one video leaves the others.
+    os.makedirs(srv.DevCache("https://example.com/y", None).dir)
+    assert srv.clear_dev_cache("https://example.com/x") == 1
+    assert os.listdir(cache) == [os.path.basename(srv.DevCache("https://example.com/y", None).dir)], os.listdir(cache)
     srv.clear_dev_cache()
 
 
@@ -377,8 +395,8 @@ def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
         deadline = time.time() + 15
         while not (job.aligned and job.speakers is not None) and time.time() < deadline:
             time.sleep(0.1)
-        # Taken from the cache again, the speakers come with no worker run
-        # (the words, never kept, are re-timed again).
+        # Taken from the cache again, the speakers and the re-timed words
+        # come with no worker run.
         def again_tool(name, header, audio):
             asked.append((name, header, audio.size))
             return _not_set_up(name, header, audio)
@@ -387,7 +405,7 @@ def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
         again = srv.PrefetchJob(url + ".gone", "https://example.com/y", {}, 7.0, step="speech")
         deadline = time.time() + 15
         # Both come once the audio is in, in either order.
-        while (again.speakers is None or [a[0] for a in asked].count("align") < 2) and time.time() < deadline:
+        while (again.speakers is None or not again.aligned) and time.time() < deadline:
             time.sleep(0.1)
     finally:
         srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.WORDS_PIECE, srv.WORDS_OVERLAP = original
@@ -397,13 +415,13 @@ def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
     assert [w[:2] for w in job.words][:2] == [(0.6, 0.8), (2.6, 3.4)], job.words
     assert job.findings()["speakers"] == [[1.0, 2.0, "S1"], [4.0, 5.5, "S2"]]
     assert again.speakers == [(1.0, 2.0, "S1"), (4.0, 5.5, "S2")]
+    assert again.words == job.words, (again.words, job.words)
     names = [a[0] for a in asked]
-    assert sorted(set(names)) == ["align", "diarize"] and names.count("diarize") == 1, names
-    assert names.count("align") == 2, names
+    assert sorted(set(names)) == ["align", "diarize"], names
     align = next(h for n, h, _ in asked if n == "align")
     assert align["pieces"][0]["words"][0] == [0.5, 0.9, "w", 0.9]
     folder = os.path.join(cache, os.listdir(cache)[0])
-    assert sorted(os.listdir(folder)) == ["audio.json", "audio.s16", "speakers.json", "speech.json"], os.listdir(folder)
+    assert sorted(os.listdir(folder)) == ["audio.json", "audio.s16", "speakers.json", "speech.json", "words.json"], os.listdir(folder)
     for name in ("speakers.json", "speech.json"):
         with open(os.path.join(folder, name), encoding="utf-8") as f:
             kept = json.load(f)
@@ -444,7 +462,7 @@ def test_the_firered_step_finds_the_speech_with_firered_and_keeps_it_apart():
     assert again.findings()["events"] == {"singing": [[1.2, 1.8]], "music": []}
     assert "events" not in silero.findings(), "Silero hears no events"
     kept = sorted(os.listdir(os.path.join(cache, os.listdir(cache)[0])))
-    assert kept == ["audio.json", "audio.s16", "speech-firered.json", "speech.json"], kept
+    assert [k for k in kept if k != "words.json"] == ["audio.json", "audio.s16", "speech-firered.json", "speech.json"], kept
     srv.clear_dev_cache()
 
 
@@ -508,6 +526,187 @@ def test_a_step_job_captions_the_video_with_its_speech_finder_and_keeps_no_text(
     for name in os.listdir(folder):
         if name.endswith(".json"):
             assert "ことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name
+    srv.clear_dev_cache()
+
+def test_a_step_job_s_captions_are_kept_and_shown_again_without_hearing():
+    fresh_cache()
+    original = srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS
+    calls = []
+
+    def heard(grid, audio, start, **kwargs):
+        calls.append(start)
+        return [{"ja": "ことば", "en": "words", "start": a, "end": b} for a, b in grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)]
+
+    def captions():
+        job = srv.PrefetchJob(url, "https://example.com/k", {}, 3.0, step="speech")
+        deadline = time.time() + 15
+        while not job.captioned and time.time() < deadline:
+            time.sleep(0.1)
+        return job.status()
+
+    srv.speech_stretches, srv.hear_pieces, srv.DEV_CAPTIONS = (lambda audio, model=None: loud_stretches(audio)), heard, True
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        first = captions()
+        made = len(calls)
+        again = captions()
+    finally:
+        srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS = original
+    assert made >= 1 and len(calls) == made, (made, calls)
+    assert again["lines"] == first["lines"] and again["captions"] == "done", (first, again)
+    srv.clear_dev_cache()
+
+
+def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_time():
+    cache = fresh_cache()
+    original = (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,
+                srv.run_devtool_lines, srv.unload_ollama)
+    asked = []
+
+    def heard(grid, audio, start, **kwargs):
+        return [{"ja": "ことば", "en": "words", "start": a, "end": b} for a, b in grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)]
+
+    def other(name, header, audio, on_line):
+        asked.append((name, header["clips"]))
+        if name == "hear_qwen":
+            raise RuntimeError("hear_qwen is not set up")
+        for i, _ in enumerate(header["clips"]):
+            on_line({"i": i, "text": f"{name}のことば"})
+
+    def run(page_url):
+        job = srv.PrefetchJob(url, page_url, {}, 3.0, step="speech")
+        # (Jobs of tests before may still be about, asking too.)
+        deadline = time.time() + 15
+        while time.time() < deadline and not (job.captioned and job.status()["others"] >= 2 * job.status()["count"] > 0):
+            time.sleep(0.1)
+        time.sleep(0.3)
+        return job.status(), job.findings()
+
+    srv.speech_stretches, srv.hear_pieces, srv.DEV_CAPTIONS = (lambda audio, model=None: loud_stretches(audio)), heard, True
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    srv.run_devtool_lines, srv.unload_ollama = other, lambda: asked.append(("unload", None))
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        status, found = run("https://example.com/o")
+        names, clip = [a[0] for a in asked], asked[1][1][0]
+        del asked[:]
+        # Again over the same video: what was heard is taken from the cache,
+        # and only the recognizer that failed is asked again.
+        status_again, found_again = run("https://example.com/o")
+    finally:
+        (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,
+         srv.run_devtool_lines, srv.unload_ollama) = original
+    assert names[:4] == ["unload", "hear_nemo", "hear_qwen", "hear_vibevoice"], names
+    line = status["lines"][0]
+    # From half a second before the caption (or the audio's start) to 0.3 s after.
+    assert abs(clip[0] - max(line["start"] - 0.5, 0)) < 0.01 and abs(clip[1] - (line["end"] + 0.3)) < 0.01, (clip, line)
+    assert found["others"][0] == {"start": line["start"], "end": line["end"],
+                                  "nemo": "hear_nemoのことば", "vibevoice": "hear_vibevoiceのことば"}, found["others"]
+    assert status["others"] == 2 * len(status["lines"]), status["others"]
+    assert [a[0] for a in asked] == ["unload", "hear_qwen"], asked
+    assert found_again["others"] == found["others"], found_again
+    srv.clear_dev_cache()
+
+
+def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_them_heard_again():
+    cache = fresh_cache()
+    original = (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama,
+                srv.PRODUCTION_SPEECH_MODEL)
+    asked = []
+
+    def heard(grid, audio, start, turns=None, within=None, **kwargs):
+        pieces = grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)
+        if turns and within:
+            # Heard again with the speakers: cut where they change.
+            a, b = pieces[0]
+            return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": 2.0},
+                    {"ja": "はい", "en": "yes", "start": 2.0, "end": round(b, 2)}]
+        return [{"ja": "ことばはい", "en": "words yes", "start": round(a, 2), "end": round(b, 2)} for a, b in pieces]
+
+    def tool(name, header, audio):
+        asked.append(name)
+        return {"segments": [[1.0, 1.9, "S1"], [2.1, 2.9, "S2"]]}
+
+    def other(name, header, audio, on_line):
+        asked.append(name)
+        for i, _ in enumerate(header["clips"]):
+            on_line({"i": i, "text": f"{name}のことば"})
+
+    srv.speech_stretches, srv.hear_pieces, srv.PRODUCTION_SPEECH_MODEL = (lambda audio, model=None: loud_stretches(audio)), heard, None
+    srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama = tool, other, lambda: asked.append("unload")
+    srv.DEV_SPEAKER_CUTS = True
+    try:
+        url = wav_file(noise_and_silence([(1, False), (2, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/p", {}, 4.0)
+        wait_for(job, "done")
+        deadline = time.time() + 15
+        while time.time() < deadline and job.status()["others"] < 3 * 2:
+            time.sleep(0.1)
+        status, found = job.status(), job.findings()
+    finally:
+        (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama,
+         srv.PRODUCTION_SPEECH_MODEL) = original
+        srv.DEV_SPEAKER_CUTS = False
+    # The line as first made, then the two it was cut into, which take its place.
+    assert [l["ja"] for l in status["lines"]] == ["ことばはい", "ことば", "はい"], status["lines"]
+    assert [l["ja"] for l in job.lines] == ["ことば", "はい"], job.lines
+    assert asked[:5] == ["diarize", "unload", "hear_nemo", "hear_qwen", "hear_vibevoice"], asked
+    assert [o["nemo"] for o in found["others"]] == ["hear_nemoのことば"] * 2, found["others"]
+    assert found["speakers"], "the speakers are told, for the timeline"
+    assert not os.listdir(cache), "a production job keeps nothing"
+
+
+def test_the_official_subtitles_of_a_page_are_found_by_its_index():
+    folder = tempfile.mkdtemp()
+    os.makedirs(os.path.join(folder, "site", "ep1"))
+    with open(os.path.join(folder, "index.json"), "w") as f:
+        json.dump({"https://example.com/play/1.html": "site/ep1"}, f)
+    with open(os.path.join(folder, "site", "ep1", "subtitles.tsv"), "w", encoding="utf-8") as f:
+        f.write("index\tstart\tend\ttext\n0\t1.5\t3.0\t-\n1\t4.0\t6.5\t今天下雨了\n2\t7.0\t9.0\t(credits)\n")
+    kept = srv.REFERENCE_DIR
+    srv.REFERENCE_DIR = folder
+    try:
+        assert srv.reference_lines("https://example.com/play/1.html?from=list") == [{"start": 4.0, "end": 6.5, "text": "今天下雨了"}]
+        assert srv.reference_lines("https://example.com/play/2.html") is None
+    finally:
+        srv.REFERENCE_DIR = kept
+
+def test_a_dev_job_is_timed_on_the_video_s_clock_and_its_cache_keeps_it():
+    fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = lambda audio, model=None: loud_stretches(audio)
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        first = srv.PrefetchJob(url, "https://example.com/clock", {}, 3.0, step="speech")
+        wait_for(first, "done")
+        assert first.clock and first.clock.at, "the fetch timed its packets"
+        kept = srv.DevCache("https://example.com/clock", url).load_audio()
+        assert kept and kept[2]["at"] == first.clock.at, "the cache keeps the clock"
+        again = srv.PrefetchJob(url + ".gone", "https://example.com/clock", {}, 3.0, step="speech")
+        wait_for(again, "done", seconds=5)
+        assert again.cached and again.clock.at == first.clock.at
+        # Audio kept with no clock (by an older server) is fetched again.
+        older = srv.DevCache("https://example.com/older", url)
+        older.save_audio(srv.np.zeros(3 * srv.SAMPLE_RATE, srv.np.float32), 3.0)
+        assert older.load_audio() is None
+    finally:
+        srv.speech_stretches = original
+    srv.clear_dev_cache()
+
+def test_a_failed_fetch_falls_back_to_audio_kept_without_a_clock():
+    fresh_cache()
+    original = srv.speech_stretches
+    srv.speech_stretches = lambda audio, model=None: loud_stretches(audio)
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        kept = srv.DevCache("https://example.com/stale", url)
+        kept.save_audio(noise_and_silence([(1, False), (1, True), (1, False)]), 3.0)
+        job = srv.PrefetchJob(url + ".gone", "https://example.com/stale", {}, 3.0, step="speech")
+        wait_for(job, "done", seconds=10)
+        assert job.cached and job.clock is None and job.speech == [(1.0, 2.0)], (job.cached, job.speech)
+    finally:
+        srv.speech_stretches = original
     srv.clear_dev_cache()
 
 if __name__ == "__main__":

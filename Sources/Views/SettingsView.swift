@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage(AppSettings.prefetchVideo) private var prefetchVideo = true
     @AppStorage(AppSettings.analysisURL) private var analysisURL = ""
     @AppStorage(AppSettings.analysisModel) private var analysisModel = ""
+    @AppStorage(AppSettings.translationTarget) private var translationTarget = ServerConfig.Target.english.rawValue
 
     @State private var devices: [AudioInputDevice] = []
 
@@ -77,6 +78,12 @@ struct SettingsView: View {
             }
 
             Section("Captions") {
+                Picker("Translate into", selection: $translationTarget) {
+                    ForEach(ServerConfig.Target.allCases) { Text($0.title).tag($0.rawValue) }
+                }
+                Text("Takes effect the next time captioning starts; the GPU server is restarted for it.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Toggle("Furigana", isOn: $showFurigana)
                 Slider(value: $fontSize, in: 14...48, step: 1) {
                     Text("Text size")

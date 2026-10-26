@@ -27,11 +27,21 @@ final class SidePanel {
     var isDev = false {
         didSet {
             guard isDev != oldValue else { return }
+            store?.set(isDev, forKey: AppSettings.devMode)
             onDevChange(isDev)
         }
     }
     /// Told when dev mode is entered or left.
     @ObservationIgnored var onDevChange: (Bool) -> Void = { _ in }
+    /// Where the mode is kept across launches, once `restoreMode` has run.
+    @ObservationIgnored private var store: UserDefaults?
+
+    /// Opens in the mode the app was last in, and keeps each change of it
+    /// in `defaults` for the next launch.
+    func restoreMode(from defaults: UserDefaults = .standard) {
+        isDev = defaults.bool(forKey: AppSettings.devMode)
+        store = defaults
+    }
 
     func show(_ tab: Tab) {
         self.tab = tab
@@ -41,8 +51,8 @@ final class SidePanel {
     /// `-sidePanel jisho`, `-sidePanel analysis` or `-sidePanel closed`
     /// (UserDefaults reads such arguments) picks what the panel shows at
     /// launch, or leaves the captions alone; `-sidePanel dev` starts in dev
-    /// mode. Nothing is persisted: the next ordinary launch opens the panel
-    /// on Jisho again, in production.
+    /// mode. What the panel shows is not persisted: the next ordinary launch
+    /// opens it on Jisho again, in the mode last chosen (`restoreMode`).
     func applyLaunchArgument(defaults: UserDefaults = .standard) {
         switch defaults.string(forKey: "sidePanel") {
         case "jisho": show(.jisho)

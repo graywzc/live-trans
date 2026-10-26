@@ -44,6 +44,8 @@ final class Prefetcher {
         /// Whether the host can begin anywhere but the top. One that can't
         /// is left to run on when the viewer jumps.
         var seeks = true
+        /// How many texts the other recognizers have given its captions.
+        var others = 0
     }
 
     /// A stretch of the video captioned ahead, and the job that holds its
@@ -88,6 +90,26 @@ final class Prefetcher {
     var isActive: Bool { job != nil }
     /// Off at launch: the video is only fetched ahead once asked to.
     private(set) var isPaused = true
+    /// Why the host could not fetch the video it was to caption ahead, for
+    /// the viewer; nil while it can, or before it has tried.
+    private(set) var problem: String?
+    /// The captions heard again by the other recognizers, once the host has
+    /// made them all (see the server's PrefetchJob._finish).
+    private(set) var others: [OtherHearing] = []
+    @ObservationIgnored private var otherRuby: [String: [RubyToken]] = [:]
+
+    /// What the other recognizers heard over `caption`, as DevPipeline's
+    /// `others(for:)` gives it in dev mode.
+    func others(for caption: Caption) -> [(label: String, sentence: Caption)] {
+        DevPipeline.heard(others, over: caption).enumerated().map { index, other in
+            let ruby = otherRuby[other.text] ?? Furigana.annotate(other.text)
+            otherRuby[other.text] = ruby
+            return (other.label, Caption(
+                id: DevPipeline.otherID(of: caption.id, index), japanese: other.text, ruby: ruby, english: "",
+                moment: caption.moment
+            ))
+        }
+    }
 
     /// Where the video is now, carried on from the last answer.
     var position: Double? {
@@ -337,8 +359,14 @@ final class Prefetcher {
                     await stopJob()
                     finished = []
                     self.finishedIn = nil
+                    problem = nil
                 }
                 lastMedia = probe
+                if !isPaused, !probe.isFetchable {
+                    problem = probe.encrypted
+                        ? "This video is under DRM: the host can't fetch it."
+                        : "The host can't fetch this video: the page gives no way to its audio."
+                }
                 if job == nil, !isPaused, probe.isFetchable, !failedPages.contains(probe.page) {
                     await startJob(for: probe, client: client)
                 }
@@ -377,6 +405,11 @@ final class Prefetcher {
             updated.duration = status.duration ?? updated.duration
             updated.state = status.state
             updated.seen = status.count
+            if let count = status.others, count != updated.others,
+               let findings = try? await client.stepFindings(job: current.id), job?.id == current.id {
+                others = findings.others ?? []
+                updated.others = count
+            }
             job = updated
             // A line from a stretch an earlier job captioned is that job's
             // caption over again, and would take its place.
@@ -389,24 +422,16 @@ final class Prefetcher {
             }
             if status.state == "failed" {
                 print("prefetch failed: \(status.error ?? "unknown")")
+                problem = "The host couldn't fetch this video: \(status.error ?? "no reason given")"
                 failedPages.insert(current.page)
                 retire()
             }
         } catch {
             print("prefetch status: \(error.localizedDescription)")
         }
-        let hasJumped = jumped
+        // The job runs from the start to the end of the video, where the
+        // viewer jumps or not.
         jumped = false
-        guard let current = job, current.seeks, !isPaused, let probe = lastMedia,
-              probe.tabID == current.tabID, probe.page == current.page
-        else { return }
-        let viewer = hasJumped && isOnFetchedVideo ? position : nil
-        if let target = Self.move(
-            viewer: viewer, start: current.start, ready: current.ready,
-            finished: finished.map { $0.from...$0.to }, duration: current.duration
-        ) {
-            await startJob(for: probe, client: client, at: target)
-        }
     }
 
     /// Starts a job for the probed video where the viewer is, or at `target`,
@@ -415,8 +440,9 @@ final class Prefetcher {
         let old = job
         retire()
         finishedIn = (probe.tabID, probe.page)
-        let viewer = playhead.flatMap { $0.tabID == probe.tabID && $0.url == probe.page ? position : nil } ?? 0
-        let start = target ?? Self.startPoint(viewer: viewer, covered: finished.map { $0.from...$0.to })
+        // From the start of the video, whatever the viewer is at: the host
+        // then has all of it to tell the speakers apart over.
+        let start = target ?? 0
         if let duration = old?.duration ?? probe.duration, start >= duration - 1 {
             if let old { await client.stopPrefetch(job: old.id) }
             return
@@ -432,8 +458,10 @@ final class Prefetcher {
                 start: start, fetched: start, ready: start
             )
             print("prefetch \(id) from \(Int(start))s: \(probe.mediaURL ?? probe.page)")
+            problem = nil
         } catch {
             print("prefetch could not start: \(error.localizedDescription)")
+            problem = "The host couldn't start fetching this video: \(error.localizedDescription)"
             failedPages.insert(probe.page)
         }
     }
@@ -450,14 +478,18 @@ final class Prefetcher {
     private func stopJob() async {
         guard let job else { return }
         retire()
+        others = []
         currentCaptionID = nil
         playingCaptionID = nil
         lull = nil
         await engine.client?.stopPrefetch(job: job.id)
     }
 
-    private func followPlayhead() {
-        guard job != nil || !finished.isEmpty, let playhead, let now = position else {
+    /// Marks the caption being played, which the list follows and
+    /// highlights: over captions fetched ahead, or in dev mode over the
+    /// step's captions, made by DevPipeline rather than a job here.
+    func followPlayhead() {
+        guard job != nil || !finished.isEmpty || isDev(), let playhead, let now = position else {
             if currentCaptionID != nil { currentCaptionID = nil }
             if playingCaptionID != nil { playingCaptionID = nil }
             if lull != nil { lull = nil }

@@ -44,6 +44,19 @@ final class ChromeVideoTests: XCTestCase {
         XCTAssertNil(ChromeScript.automaticTarget(in: [background, noVideo], remembered: nil))
     }
 
+    /// At launch the tab of the last one: the same tab on the same page,
+    /// else another on that page (Chrome restarted, the tab reopened); not
+    /// the same tab moved on to another page.
+    func testTheLastLaunchesTabIsFoundByItsPage() {
+        let moved = ChromeScript.Tab(id: 7, title: "", url: "https://example.com/b")
+        let reopened = ChromeScript.Tab(id: 9, title: "", url: "https://example.com/a")
+        let same = ChromeScript.Tab(id: 7, title: "", url: "https://example.com/a")
+        XCTAssertEqual(ChromeScript.rememberedTab(in: [reopened, same], id: 7, url: "https://example.com/a"), same)
+        XCTAssertEqual(ChromeScript.rememberedTab(in: [moved, reopened], id: 7, url: "https://example.com/a"), reopened)
+        XCTAssertNil(ChromeScript.rememberedTab(in: [moved], id: 7, url: "https://example.com/a"))
+        XCTAssertNil(ChromeScript.rememberedTab(in: [ChromeScript.Tab(id: 3, title: "")], id: 7, url: ""))
+    }
+
     func testErrorsSayWhatToTurnOn() {
         XCTAssertEqual(
             ChromeScript.failure(number: 12, message: "Executing JavaScript through AppleScript is turned off.").message,

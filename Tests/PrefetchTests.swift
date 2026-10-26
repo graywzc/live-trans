@@ -139,6 +139,68 @@ final class PrefetchTests: XCTestCase {
         XCTAssertFalse(stretch.holds(9.9))
     }
 
+    /// In dev mode the step's captions are followed as production's are,
+    /// with no job of the prefetcher's own; in production, with none, not.
+    @MainActor
+    func testThePlayingCaptionIsFollowedInDevMode() {
+        let engine = CaptionEngine()
+        let prefetch = Prefetcher(engine: engine, video: ChromeVideo())
+        engine.add([
+            CaptionPair(ja: "あ", en: "a", start: 4, end: 6),
+            CaptionPair(ja: "い", en: "i", start: 7, end: 9),
+        ], tabID: 1, url: "https://example.com/v", heardAgain: false)
+        prefetch.show(playhead: VideoMoment(tabID: 1, url: "https://example.com/v", seconds: 7.5))
+        prefetch.followPlayhead()
+        XCTAssertNil(prefetch.currentCaptionID, "production with nothing fetched ahead follows nothing")
+        var isDev = true
+        prefetch.isDev = { isDev }
+        prefetch.followPlayhead()
+        XCTAssertEqual(prefetch.currentCaptionID, engine.captions.last?.id)
+        XCTAssertEqual(prefetch.playingCaptionID, engine.captions.last?.id)
+        isDev = false
+        prefetch.followPlayhead()
+        XCTAssertNil(prefetch.playingCaptionID)
+    }
+
+    /// The other recognizers' texts go under the caption with the same
+    /// times, in the order shown, those not yet in left out.
+    func testOtherRecognizersTextsGoToTheCaptionWithTheirTimes() throws {
+        var moment = VideoMoment(tabID: 1, url: "p", seconds: 4.2)
+        moment.end = 8
+        let caption = Caption(id: 1, japanese: "あ", ruby: [], english: "a", moment: moment)
+        let data = Data(#"{"analysed": 3, "speech": [], "others": [{"start": 0, "end": 4, "nemo": "甲"}, {"start": 4.2, "end": 8, "vibevoice": "乙", "nemo": "丙"}]}"#.utf8)
+        let others = try XCTUnwrap(JSONDecoder().decode(StepFindings.self, from: data).others)
+        let heard = DevPipeline.heard(others, over: caption)
+        XCTAssertEqual(heard.map(\.label), ["nemo", "vv"])
+        XCTAssertEqual(heard.map(\.text), ["丙", "乙"])
+        XCTAssertTrue(DevPipeline.heard(Array(others.prefix(1)), over: caption).isEmpty)
+        // Analysed as captions of their own: ids no caption has, and none shared.
+        let ids = (1...50).flatMap { id in (0..<OtherHearing.shown.count).map { DevPipeline.otherID(of: id, $0) } }
+        XCTAssertTrue(ids.allSatisfy { $0 < 0 })
+        XCTAssertEqual(Set(ids).count, ids.count)
+    }
+
+    /// Each official line goes to the caption it overlaps most; one too
+    /// slight an overlap, or none, is left out; a caption may take several.
+    func testOfficialSubtitlesAreMatchedToTheCaptionTheyOverlapMost() {
+        func caption(_ id: Int, _ start: Double, _ end: Double) -> Caption {
+            var moment = VideoMoment(tabID: 1, url: "p", seconds: start)
+            moment.end = end
+            return Caption(id: id, japanese: "あ", ruby: [], english: "a", moment: moment)
+        }
+        let captions = [caption(1, 0, 4), caption(2, 4.2, 8)]
+        let lines = [
+            ReferenceLine(start: 0.5, end: 2, text: "甲"),
+            ReferenceLine(start: 2.2, end: 5, text: "乙"),  // 1.8 s with the first, 0.8 s with the second
+            ReferenceLine(start: 5.5, end: 7, text: "丙"),
+            ReferenceLine(start: 7.95, end: 9, text: "丁"),  // 0.05 s: too slight
+            ReferenceLine(start: 20, end: 21, text: "戊"),
+        ]
+        XCTAssertEqual(DevPipeline.match(lines, to: captions), [1: ["甲", "乙"], 2: ["丙"]])
+        let decoded = try? JSONDecoder().decode(ReferenceLine.self, from: Data(#"{"start":1.5,"end":3,"text":"今天"}"#.utf8))
+        XCTAssertEqual(decoded, ReferenceLine(start: 1.5, end: 3, text: "今天"))
+    }
+
     func testStatusDecodes() throws {
         let json = #"{"state":"running","error":null,"duration":90.5,"fetched":60,"ready":35.8,"level":1200.5,"count":12,"lines":[{"ja":"あ","en":"a","start":35,"end":36}]}"#
         let status = try JSONDecoder().decode(PrefetchStatus.self, from: Data(json.utf8))

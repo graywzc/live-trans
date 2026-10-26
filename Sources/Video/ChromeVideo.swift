@@ -34,9 +34,77 @@ final class ChromeVideo {
     /// Why the last command did nothing, for the user to fix.
     var problem: String?
 
-    /// The tab the user chose. Nil means automatic: whichever front tab has a
-    /// video.
+    /// The tab the user chose, or the one automatic found: once found, it
+    /// is kept, so the app never moves on to another video by itself. Nil
+    /// until then: whichever front tab has a video.
     private(set) var pinned: ChromeScript.Tab?
+    /// The tab was found rather than chosen.
+    private(set) var pinnedAutomatically = false
+    /// Where the tab is kept across launches, once `remember` has run; and
+    /// the one kept last time, until it has been looked for in Chrome.
+    @ObservationIgnored private var store: UserDefaults?
+    @ObservationIgnored private var remembered: (id: Int, url: String)?
+    /// Whether the tab is kept for the next launch: in dev mode only, as
+    /// production keeps nothing of what was watched.
+    @ObservationIgnored var keepsTab: @MainActor () -> Bool = { true }
+
+    /// Goes back to the tab of the last launch, when Chrome still has it,
+    /// the first time it is asked about; keeps each tab chosen or found in
+    /// `defaults` for the next.
+    func remember(in defaults: UserDefaults = .standard) {
+        store = defaults
+        guard keepsTab() else {
+            defaults.removeObject(forKey: AppSettings.lastVideoTab)
+            return
+        }
+        if let kept = defaults.dictionary(forKey: AppSettings.lastVideoTab),
+           let id = kept["id"] as? Int, let url = kept["url"] as? String {
+            remembered = (id, url)
+        }
+    }
+
+    private func save(_ tab: ChromeScript.Tab?) {
+        guard let store else { return }
+        if let tab, keepsTab() {
+            store.set(["id": tab.id, "url": tab.url], forKey: AppSettings.lastVideoTab)
+        } else {
+            store.removeObject(forKey: AppSettings.lastVideoTab)
+        }
+    }
+
+    /// Forgets the tab kept for the next launch, on leaving dev mode.
+    func forgetKeptTab() {
+        remembered = nil
+        store?.removeObject(forKey: AppSettings.lastVideoTab)
+    }
+
+    /// Chosen again from `listed`, if it holds the tab of the last launch.
+    /// Looked for once: a tab gone since is let go.
+    private func restore(from listed: [ChromeScript.Tab]) {
+        guard let kept = remembered else { return }
+        remembered = nil
+        guard pinned == nil, let tab = ChromeScript.rememberedTab(in: listed, id: kept.id, url: kept.url) else { return }
+        pin(tab)
+    }
+
+    /// Lists Chrome's tabs, quietly, to go back to the tab of the last
+    /// launch before anything else is asked of Chrome.
+    private func restoreRemembered() async {
+        guard remembered != nil, pinned == nil else { return }
+        let source = ChromeScript.listSource
+        let known = hasReachedChrome
+        let listing = await withCheckedContinuation { continuation in
+            queue.async {
+                guard known || ChromeScript.mayAutomateWithoutAsking() else {
+                    return continuation.resume(returning: nil as String?)
+                }
+                continuation.resume(returning: try? ChromeScript.runForText(source).get())
+            }
+        }
+        guard let listing else { return }
+        hasReachedChrome = true
+        restore(from: ChromeScript.tabs(fromListing: listing))
+    }
     /// The tab the buttons last controlled, whether chosen or found, or in
     /// automatic the one they would control as of the last listing.
     private(set) var linked: ChromeScript.Tab?
@@ -84,6 +152,7 @@ final class ChromeVideo {
     func moment(at wall: Date) async -> VideoMoment? {
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: ChromeScript.bundleID).isEmpty
         else { return nil }
+        await restoreRemembered()
         let source = ChromeScript.source(running: ChromeScript.momentJavaScript, pinned: pinned?.id, preferring: linked?.id)
         let known = hasReachedChrome
         let result = await withCheckedContinuation { continuation in
@@ -104,6 +173,7 @@ final class ChromeVideo {
     func probeMedia() async -> MediaProbe? {
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: ChromeScript.bundleID).isEmpty
         else { return nil }
+        await restoreRemembered()
         let source = ChromeScript.source(running: ChromeScript.mediaProbeJavaScript, pinned: pinned?.id, preferring: linked?.id)
         let known = hasReachedChrome
         let result = await withCheckedContinuation { continuation in
@@ -116,14 +186,31 @@ final class ChromeVideo {
         }
         guard let result, let probe = ChromeScript.mediaProbe(fromResult: result) else { return nil }
         hasReachedChrome = true
+        if pinned == nil {
+            keep(tabs.first(where: { $0.id == probe.tabID }) ?? linked.flatMap { $0.id == probe.tabID ? $0 : nil }
+                ?? ChromeScript.Tab(id: probe.tabID, title: probe.page, url: probe.page))
+        }
         return probe
     }
 
-    /// Nil goes back to automatic.
+    /// Nil goes back to automatic, which keeps the next video it finds.
     func pin(_ tab: ChromeScript.Tab?) {
         pinned = tab
+        pinnedAutomatically = false
         linked = tab
         state = tab?.video ?? .unknown
+        remembered = nil
+        save(tab)
+    }
+
+    /// Automatic found its video: kept from now on, until another tab is
+    /// chosen or this one closes.
+    private func keep(_ tab: ChromeScript.Tab) {
+        guard pinned == nil else { return }
+        pinned = tab
+        pinnedAutomatically = true
+        remembered = nil
+        save(tab)
     }
 
     /// Lists Chrome's tabs with the front tabs checked, then checks the rest
@@ -153,9 +240,11 @@ final class ChromeVideo {
                 case .success(let text):
                     self.hasReachedChrome = true
                     let listed = ChromeScript.tabs(fromListing: text)
+                    self.restore(from: listed)
                     if self.pinned == nil {
                         self.linked = ChromeScript.automaticTarget(in: listed, remembered: self.linked?.id)
                         self.state = self.linked?.video ?? .unknown
+                        if let found = self.linked { self.keep(found) }
                     }
                     self.checkRemaining(listed)
                 case .failure(let failure):
@@ -210,6 +299,7 @@ final class ChromeVideo {
         case .controlled(let tab, let playing):
             hasReachedChrome = true
             linked = tab
+            keep(tab)
             // Keep what the listing knew; the title may have changed with
             // the next episode.
             if pinned?.id == tab.id { pinned?.title = tab.title }
@@ -625,6 +715,12 @@ enum ChromeScript {
         else { return .noVideo }
         let playing = parts[0] == "playing"
         return .controlled(Tab(id: id, title: String(parts[2]), video: playing ? .playing : .paused), playing: playing)
+    }
+
+    /// The tab of the last launch among `tabs`: the same tab still on the
+    /// same page, or else a tab on that page.
+    static func rememberedTab(in tabs: [Tab], id: Int, url: String) -> Tab? {
+        tabs.first { $0.id == id && $0.url == url } ?? tabs.first { !url.isEmpty && $0.url == url }
     }
 
     static func tabs(fromListing listing: String) -> [Tab] {
