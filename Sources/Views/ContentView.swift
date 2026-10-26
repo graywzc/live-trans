@@ -124,7 +124,7 @@ struct ContentView: View {
                 onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
                 isCurrent: prefetch.currentCaptionID == caption.id,
                 official: panel.isDev ? dev.official(for: caption) : nil,
-                others: panel.isDev ? dev.others(for: caption) : [],
+                others: panel.isDev ? dev.others(for: caption) : prefetch.others(for: caption),
                 isOtherAnalyzed: { panel.isPresented && panel.tab == .analysis && analyzer.hasAnalyzed($0) },
                 onAnalyzeOther: { analyze($0) }
             )
