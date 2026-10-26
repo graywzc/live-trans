@@ -641,7 +641,7 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
         job = srv.PrefetchJob(url, "https://example.com/p", {}, 4.0)
         wait_for(job, "done")
         deadline = time.time() + 15
-        while time.time() < deadline and job.status()["others"] < 3 * 2:
+        while time.time() < deadline and job.status()["others"] < 2 * 2:
             time.sleep(0.1)
         status, found = job.status(), job.findings()
     finally:
@@ -652,8 +652,9 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
     assert [l["ja"] for l in status["lines"]] == ["ことばはい", "ことば", "はい"], status["lines"]
     assert [l["ja"] for l in job.lines] == ["ことば", "はい"], job.lines
     # nemo and qwen as the captions come, the speakers once all are made,
-    # nemo and qwen again for the pieces cut, VibeVoice last.
-    assert asked[:7] == ["hear_nemo", "hear_qwen", "diarize", "hear_nemo", "hear_qwen", "unload", "hear_vibevoice"], asked
+    # nemo and qwen again for the pieces cut; no VibeVoice, and the
+    # translator never let go.
+    assert asked == ["hear_nemo", "hear_qwen", "diarize", "hear_nemo", "hear_qwen"], asked
     assert [o["nemo"] for o in found["others"]] == ["hear_nemoのことば"] * 2, found["others"]
     assert found["speakers"], "the speakers are told, for the timeline"
     assert not os.listdir(cache), "a production job keeps nothing"
