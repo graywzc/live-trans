@@ -603,6 +603,10 @@ def run_devtool_lines(name, header, audio, on_line):
 # is not heard again.
 DEV_OTHER_HEARERS = [("nemo", "hear_nemo"), ("qwen", "hear_qwen"), ("vibevoice", "hear_vibevoice")]
 DEV_OTHER_HEARING = os.getenv("LIVETRANS_OTHER_HEARERS", "1") != "0"
+# Whether a production job, once its captions are made, tells the speakers
+# apart, cuts its captions where they change, and has the other recognizers
+# hear each (see PrefetchJob._finish).
+PRODUCTION_FINISH = os.getenv("LIVETRANS_PRODUCTION_FINISH", "1") != "0"
 # Each caption is heard from a little before its start to a little after
 # its end, as a click on it plays it.
 OTHER_LEAD, OTHER_TAIL = 0.5, 0.3
@@ -2435,6 +2439,10 @@ class PrefetchJob:
         self.audio_lock = threading.Lock()
         self.fetch_done = False
         self.lines = []
+        # What the client is sent, in order: each line as it is made, and
+        # again any line made anew, which takes the place of those it
+        # overlaps (a caption cut where the speaker changes).
+        self.feed = []
         self.text = ""
         self.grid = CutGrid()
         # Where the speech is found, for the batches and a step's findings.
@@ -2500,6 +2508,8 @@ class PrefetchJob:
             threading.Thread(target=self._tell_speakers, daemon=True).start()
             if DEV_OTHER_HEARING:
                 threading.Thread(target=self._hear_others, daemon=True).start()
+        elif PRODUCTION_FINISH:
+            threading.Thread(target=self._finish, daemon=True).start()
 
     @property
     def fetched(self):
@@ -2892,6 +2902,53 @@ class PrefetchJob:
             except OSError as exc:
                 print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
 
+    def _finish(self):
+        """A production job's work once its captions are made, each step
+        given to the client as it is done: the speakers told apart over all
+        the audio (DiariZen), each caption a change of speaker falls inside
+        heard again and cut there, then each caption heard by the other
+        recognizers, VibeVoice last (it needs the translator's GPU memory).
+        Nothing of it is kept."""
+        while not self.stop_event.is_set() and self.state == "running":
+            time.sleep(1)
+        if self.stop_event.is_set() or self.state != "done":
+            return
+        with self.audio_lock:
+            audio = self.audio.copy()
+        t0 = time.time()
+        try:
+            found = run_devtool("diarize", {}, audio)["segments"]
+        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            print(f"prefetch {self.id}: speakers: {exc}", flush=True)
+            found = []
+        if found and not self.stop_event.is_set():
+            self.turns = [(self.offset + a, self.offset + b, who) for a, b, who in found]
+            self.speakers = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3), who)
+                             for a, b, who in found]
+            floor = steady_floor(self.turns)
+            changes = [self._video(end) for (_, end, before), (_, _, after) in zip(floor, floor[1:]) if before != after]
+            recut = 0
+            for line in list(self.lines):
+                if self.stop_event.is_set():
+                    return
+                if line.get("start") is None or not any(
+                        line["start"] + SPEAKER_SNAP < t < line["end"] - SPEAKER_SNAP for t in changes):
+                    continue
+                try:
+                    new = self.rehear(line["start"], line["end"])
+                except Exception as exc:
+                    print(f"prefetch {self.id}: not cut: {type(exc).__name__}: {exc}", flush=True)
+                    continue
+                if len(new) > 1 and line in self.lines:
+                    at = self.lines.index(line)
+                    self.lines[at:at + 1] = new
+                    self.feed.extend(new)
+                    recut += 1
+            print(f"prefetch {self.id}: {len(self.speakers)} speaker turns in {time.time() - t0:.0f}s, "
+                  f"{recut} captions cut where the speaker changes", flush=True)
+        self.captioned = True
+        self._hear_others()
+
     def _captions_from_cache(self):
         """Whether the captions came from the dev cache: made before by the
         same code over the same audio, which this job took from the cache."""
@@ -2903,6 +2960,7 @@ class PrefetchJob:
         if not kept or not kept.get("lines"):
             return False
         self.lines = kept["lines"]
+        self.feed = list(self.lines)
         self.text = "".join(line["ja"] for line in self.lines)
         self.captioned = True
         print(f"prefetch {self.id}: {len(self.lines)} captions from the cache", flush=True)
@@ -3001,6 +3059,7 @@ class PrefetchJob:
             # Stopped while this was heard: its audio may be let go already.
             return
         self.lines.extend(lines)
+        self.feed.extend(lines)
         self.text += ja
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
 
@@ -3045,8 +3104,8 @@ class PrefetchJob:
             # fetch that yields silence is a fetch of the wrong thing.
             "level": round(float(np.sqrt(np.mean(last * last))) * 32768, 1) if last.size else 0,
             "ready": round(self._video(self.ready), 2),
-            "count": len(self.lines),
-            "lines": self.lines[since:],
+            "count": len(self.feed),
+            "lines": self.feed[since:],
             "step": self.step,
             "analysed": round(self.analysed, 2),
             "worded": round(self.worded, 2),

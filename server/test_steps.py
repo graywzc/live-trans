@@ -609,6 +609,54 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     srv.clear_dev_cache()
 
 
+def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_them_heard_again():
+    cache = fresh_cache()
+    original = (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama,
+                srv.PRODUCTION_SPEECH_MODEL)
+    asked = []
+
+    def heard(grid, audio, start, turns=None, within=None, **kwargs):
+        pieces = grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)
+        if turns and within:
+            # Heard again with the speakers: cut where they change.
+            a, b = pieces[0]
+            return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": 2.0},
+                    {"ja": "はい", "en": "yes", "start": 2.0, "end": round(b, 2)}]
+        return [{"ja": "ことばはい", "en": "words yes", "start": round(a, 2), "end": round(b, 2)} for a, b in pieces]
+
+    def tool(name, header, audio):
+        asked.append(name)
+        return {"segments": [[1.0, 1.9, "S1"], [2.1, 2.9, "S2"]]}
+
+    def other(name, header, audio, on_line):
+        asked.append(name)
+        for i, _ in enumerate(header["clips"]):
+            on_line({"i": i, "text": f"{name}のことば"})
+
+    srv.speech_stretches, srv.hear_pieces, srv.PRODUCTION_SPEECH_MODEL = (lambda audio, model=None: loud_stretches(audio)), heard, None
+    srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama = tool, other, lambda: asked.append("unload")
+    srv.DEV_SPEAKER_CUTS = True
+    try:
+        url = wav_file(noise_and_silence([(1, False), (2, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/p", {}, 4.0)
+        wait_for(job, "done")
+        deadline = time.time() + 15
+        while time.time() < deadline and job.status()["others"] < 3 * 2:
+            time.sleep(0.1)
+        status, found = job.status(), job.findings()
+    finally:
+        (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama,
+         srv.PRODUCTION_SPEECH_MODEL) = original
+        srv.DEV_SPEAKER_CUTS = False
+    # The line as first made, then the two it was cut into, which take its place.
+    assert [l["ja"] for l in status["lines"]] == ["ことばはい", "ことば", "はい"], status["lines"]
+    assert [l["ja"] for l in job.lines] == ["ことば", "はい"], job.lines
+    assert asked[:5] == ["diarize", "unload", "hear_nemo", "hear_qwen", "hear_vibevoice"], asked
+    assert [o["nemo"] for o in found["others"]] == ["hear_nemoのことば"] * 2, found["others"]
+    assert found["speakers"], "the speakers are told, for the timeline"
+    assert not os.listdir(cache), "a production job keeps nothing"
+
+
 def test_the_official_subtitles_of_a_page_are_found_by_its_index():
     folder = tempfile.mkdtemp()
     os.makedirs(os.path.join(folder, "site", "ep1"))
