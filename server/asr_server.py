@@ -2252,9 +2252,9 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
     # The cut goes at the first break between words that lies in the quiet
     # between the two turns, else the break nearest it, within
     # SPEAKER_SNAP: the recognizer times a speaker's first word a little
-    # early, so the first break in the quiet is the speakers' own (父上が
-    # まだ来ない⁉｜ええ, not ⁉え｜え); and a cut only between two words heard
-    # on either side of it as the two speakers'.
+    # early, so the first break in the quiet is the speakers' own (晴れる
+    # かな｜ええ, not かなえ｜え); and a cut only between two words heard on
+    # either side of it as the two speakers'.
     if turns:
         floor = steady_floor(turns)
         for (_, end, before), (start, _, after) in zip(floor, floor[1:]):
