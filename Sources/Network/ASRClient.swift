@@ -55,6 +55,16 @@ struct PrefetchStatus: Decodable, Equatable {
     /// How many texts the other recognizers have given a dev job's
     /// captions so far.
     var others: Int?
+    /// What the host holds of a dev job's video for the phone: "none",
+    /// "running", "done" or "failed: <why>", and seconds of it so far.
+    var bundle: String?
+    var bundleFetched: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case state, error, duration, start, fetched, ready, count, lines, step, analysed, worded, aligned, speakers
+        case cached, fetching, captions, others, bundle
+        case bundleFetched = "bundle_fetched"
+    }
 }
 
 /// A dev job's caption heard again by the other recognizers, to set beside
@@ -313,16 +323,45 @@ struct ASRClient {
     }
 
     /// Empties the host's cache of videos fetched and findings made in dev
-    /// mode, or only the video at `page`; how many videos it held.
-    func clearDevCache(page: String? = nil) async throws -> Int {
-        var components = URLComponents(url: baseURL.appending(path: "devcache/clear"), resolvingAgainstBaseURL: false)!
-        if let page { components.queryItems = [URLQueryItem(name: "page", value: page)] }
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 20
+    /// mode, or only the video at `page`, or with `bundleOnly` only what
+    /// that one holds for the phone; how many videos it held.
+    func clearDevCache(page: String? = nil, bundleOnly: Bool = false) async throws -> Int {
+        let request = Self.clearDevCacheRequest(baseURL: baseURL, page: page, bundleOnly: bundleOnly)
         let (data, response) = try await session.data(for: request)
         struct Payload: Decodable { var cleared: Int }
         return try Self.decode(Payload.self, from: data, statusCode: response).cleared
+    }
+
+    static func clearDevCacheRequest(baseURL: URL, page: String?, bundleOnly: Bool) -> URLRequest {
+        var components = URLComponents(url: baseURL.appending(path: "devcache/clear"), resolvingAgainstBaseURL: false)!
+        if let page {
+            components.queryItems = [URLQueryItem(name: "page", value: page)]
+            if bundleOnly { components.queryItems?.append(URLQueryItem(name: "bundle", value: "1")) }
+        }
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        return request
+    }
+
+    /// Has the host keep a dev job's video for the phone, with its
+    /// captions, beside the audio in its cache; `title` is for the phone's
+    /// list. The host's word on it ("running"); a job it will not keep
+    /// (captions not at the end yet, say) is a server error with why.
+    func keepForPhone(job: String, title: String?) async throws -> String {
+        let request = Self.keepForPhoneRequest(baseURL: baseURL, job: job, title: title)
+        let (data, response) = try await session.data(for: request)
+        struct Payload: Decodable { var bundle: String }
+        return try Self.decode(Payload.self, from: data, statusCode: response).bundle
+    }
+
+    static func keepForPhoneRequest(baseURL: URL, job: String, title: String?) -> URLRequest {
+        var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/bundle"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["title": title ?? ""])
+        return request
     }
 
     func stopPrefetch(job: String) async {
