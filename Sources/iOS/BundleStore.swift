@@ -101,6 +101,11 @@ final class BundleStore {
         local[id]
     }
 
+    /// Where the bundle's video is on the phone.
+    func videoURL(for id: String) -> URL {
+        root.appending(path: id).appending(path: Self.videoName)
+    }
+
     /// Asks the host for its list. Without an answer only the bundles on
     /// the phone are listed, and the error says why.
     func refresh() async {
@@ -136,9 +141,11 @@ final class BundleStore {
         }
     }
 
-    /// Removes the bundle from the phone, or stops its download.
+    /// Removes the bundle from the phone, or stops its download; where its
+    /// video was left goes with it.
     func delete(_ id: String) {
         guard Self.isSafeID(id) else { return }
+        PlaybackModel.forgetPosition(for: id)
         cancelTasks(for: id)
         if downloads[id] != nil { discarded.insert(id) }
         downloads[id] = nil
