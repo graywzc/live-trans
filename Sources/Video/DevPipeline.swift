@@ -67,6 +67,10 @@ final class DevPipeline {
         /// host says of the captions ("running", "done", "failed: ...").
         var seenLines = 0
         var captions = "running"
+        /// What the host holds of the video for the phone ("none",
+        /// "running", "done", "failed: ..."), and seconds of it so far.
+        var bundle = "none"
+        var bundleFetched = 0.0
     }
 
     /// What FireRedVAD's event model hears besides speech, drawn over the
@@ -404,6 +408,11 @@ final class DevPipeline {
                 updated.aligned = findings.aligned ?? false
                 updated.spoken = findings.speakers != nil
             }
+            if let bundle = status.bundle, bundle != updated.bundle {
+                if let news = Self.phoneCopyNews(from: updated.bundle, to: bundle) { ActivityLog.tell(news) }
+                updated.bundle = bundle
+            }
+            updated.bundleFetched = status.bundleFetched ?? 0
             job = updated
             if status.state == "failed" {
                 ActivityLog.tell("Step \(current.step.title) failed: \(status.error ?? "unknown")")
@@ -412,6 +421,67 @@ final class DevPipeline {
             }
         } catch {
             print("step status: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: The video kept for the phone
+
+    /// Whether the host can be asked to keep the job's video for the
+    /// phone: the step's captions have reached the end, and it is not
+    /// fetching the video already.
+    var canKeepForPhone: Bool {
+        guard let job else { return false }
+        return job.captions == "done" && job.bundle != "running"
+    }
+
+    /// What to tell when the host's word on the phone's copy changes;
+    /// nothing for the states the control itself shows.
+    static func phoneCopyNews(from old: String, to new: String) -> String? {
+        guard new != old else { return nil }
+        if new == "done" { return "The video is on the host for the iPhone, with its captions" }
+        if new.hasPrefix("failed") { return "Keeping the video for the iPhone \(new)" }
+        return nil
+    }
+
+    /// Has the host keep the job's video for the phone, with its captions:
+    /// fetched as it is, beside the audio in the dev cache, with the tab's
+    /// title for the phone's list. Dev mode only, as the whole cache is.
+    func keepForPhone() {
+        guard let client = engine.client, let current = job else { return }
+        let title = video.tabs.first { $0.id == current.tabID }?.title
+            ?? video.pinned.flatMap { $0.id == current.tabID ? $0.title : nil }
+        Task {
+            do {
+                _ = try await client.keepForPhone(job: current.id, title: title)
+                if job?.id == current.id {
+                    job?.bundle = "running"
+                    job?.bundleFetched = 0
+                }
+                ActivityLog.tell("Keeping the video for the iPhone: the host is fetching it as it is")
+            } catch {
+                ActivityLog.tell("Could not keep the video for the iPhone: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Has the host forget the phone's copy of the job's video, the video
+    /// and its captions beside it, keeping the audio and the findings.
+    func forgetPhoneCopy() {
+        guard let client = engine.client, let current = job else { return }
+        Task {
+            do {
+                let count = try await client.clearDevCache(page: current.page, bundleOnly: true)
+                if job?.id == current.id {
+                    job?.bundle = "none"
+                    job?.bundleFetched = 0
+                }
+                ActivityLog.tell(
+                    count == 0 ? "The host had no copy of this video for the iPhone"
+                        : "The host forgot the iPhone's copy of this video"
+                )
+            } catch {
+                ActivityLog.tell("Could not forget the iPhone's copy: \(error.localizedDescription)")
+            }
         }
     }
 
