@@ -6,6 +6,10 @@ import SwiftUI
 /// questions asked in the field at the bottom, and an entry for each selection
 /// that was looked up. Any of the text can be selected and looked up, an
 /// entry's own included.
+///
+/// The Mac's side panel and the phone's sheet: what differs between them,
+/// the colours, the Japanese line and the way to Settings, each app gives
+/// in its own `Palette`, `AnalysisRuby` and `SettingsButton`.
 struct AnalysisView: View {
     static let symbol = "text.magnifyingglass"
 
@@ -51,7 +55,7 @@ struct AnalysisView: View {
             Divider()
             questionField
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(Palette.text)
     }
 
     private func thread(viewportHeight: CGFloat) -> some View {
@@ -156,16 +160,13 @@ private struct AnalysisSection: View {
     let fontSize: CGFloat
     let tableFontSize: CGFloat
 
-    /// A range of this sentence.
-    @State private var selection: Range<Int>?
-
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             // Readings always: they are the point here, whatever the captions
             // are set to.
-            FuriganaText(tokens: analysis.ruby, fontSize: fontSize, selection: $selection)
+            AnalysisRuby(tokens: analysis.ruby, fontSize: fontSize)
             if !analysis.chinese.isEmpty {
-                SelectableText(analysis.chinese, size: fontSize * 0.82, color: .systemOrange)
+                SelectableText(analysis.chinese, size: fontSize * 0.82, color: Palette.orange)
             }
             if !analysis.words.isEmpty {
                 table
@@ -194,9 +195,7 @@ private struct AnalysisSection: View {
                     )
                     .foregroundStyle(.orange)
                     HStack {
-                        SettingsLink {
-                            Text("Open Settings")
-                        }
+                        SettingsButton()
                         Button("Try Again") { analyzer.retry(analysis.id) }
                     }
                 }
@@ -225,14 +224,14 @@ private struct AnalysisSection: View {
                 GridRow {
                     VStack(alignment: .leading, spacing: 1) {
                         if word.reading != word.surface {
-                            SelectableText(word.reading, size: tableFontSize * 0.7, color: .secondaryLabelColor)
+                            SelectableText(word.reading, size: tableFontSize * 0.7, color: Palette.secondary)
                         }
                         SelectableText(word.surface, size: tableFontSize)
                     }
                     .fixedSize()
                     VStack(alignment: .leading, spacing: 1) {
                         SelectableText(word.base, size: tableFontSize)
-                        SelectableText(word.partOfSpeech, size: tableFontSize * 0.75, color: .secondaryLabelColor)
+                        SelectableText(word.partOfSpeech, size: tableFontSize * 0.75, color: Palette.secondary)
                     }
                     .fixedSize()
                     if word.change.isEmpty {
@@ -258,7 +257,7 @@ private struct FollowUpView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SelectableText(followUp.question, size: fontSize, color: .systemOrange)
+            SelectableText(followUp.question, size: fontSize, color: Palette.orange)
             if !followUp.answer.isEmpty {
                 SelectableText(Self.rendered(followUp.answer), size: fontSize, lineSpacing: 3)
             } else if followUp.error == nil, isLast, analyzer.isAnswering {

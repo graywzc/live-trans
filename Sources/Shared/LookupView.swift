@@ -3,6 +3,8 @@ import SwiftUI
 /// A looked-up selection, set out the way jisho.org sets out a word: the
 /// headword under its reading, tags, numbered meanings under their part of
 /// speech, then the grammar. All of it can be selected and looked up in turn.
+/// Shared by the Mac's panel and the phone's sheet, through each app's
+/// `Palette` and `SelectableText`.
 struct LookupView: View {
     static let symbol = "character.book.closed"
 
@@ -16,7 +18,7 @@ struct LookupView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
                 Image(systemName: Self.symbol)
-                SelectableText(lookup.text, size: fontSize * 0.85, weight: .semibold, color: .systemGray)
+                SelectableText(lookup.text, size: fontSize * 0.85, weight: .semibold, color: Palette.gray)
                 if isLoading {
                     ProgressView()
                         .controlSize(.small)
@@ -36,7 +38,7 @@ struct LookupView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             SelectableText(point.form, size: fontSize, weight: .semibold)
                             if !point.explanation.isEmpty {
-                                SelectableText(point.explanation, size: fontSize, color: .lightGray)
+                                SelectableText(point.explanation, size: fontSize, color: Palette.lightGray)
                             }
                         }
                     }
@@ -55,7 +57,7 @@ struct LookupView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+        .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -67,7 +69,7 @@ private struct EntryView: View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 0) {
                 if !entry.reading.isEmpty, entry.reading != entry.headword {
-                    SelectableText(entry.reading, size: fontSize * 0.8, color: .lightGray)
+                    SelectableText(entry.reading, size: fontSize * 0.8, color: Palette.lightGray)
                 }
                 SelectableText(entry.headword, size: fontSize * 1.7)
             }
@@ -76,6 +78,8 @@ private struct EntryView: View {
                     ForEach(entry.tags, id: \.self) { tag in
                         Text(tag)
                             .font(.system(size: fontSize * 0.7, weight: .medium))
+                            // The tag's own colours, whatever the page's.
+                            .foregroundStyle(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(Self.color(ofTag: tag), in: RoundedRectangle(cornerRadius: 3))
@@ -87,7 +91,7 @@ private struct EntryView: View {
                 // that share it rather than being repeated on each.
                 if !sense.partOfSpeech.isEmpty,
                    index == 0 || entry.senses[index - 1].partOfSpeech != sense.partOfSpeech {
-                    SelectableText(sense.partOfSpeech, size: fontSize * 0.8, color: .systemGray)
+                    SelectableText(sense.partOfSpeech, size: fontSize * 0.8, color: Palette.gray)
                         .padding(.top, 2)
                 }
                 SenseView(sense: sense, number: index + 1, fontSize: fontSize)
@@ -125,13 +129,13 @@ private struct SenseView: View {
                     }
                 }
                 if !sense.note.isEmpty {
-                    SelectableText(sense.note, size: fontSize * 0.85, color: .lightGray)
+                    SelectableText(sense.note, size: fontSize * 0.85, color: Palette.lightGray)
                 }
                 if !sense.example.isEmpty {
-                    SelectableText(sense.example, size: fontSize * 0.9, color: .lightGray)
+                    SelectableText(sense.example, size: fontSize * 0.9, color: Palette.lightGray)
                         .padding(.top, 2)
                     if !sense.exampleChinese.isEmpty {
-                        SelectableText(sense.exampleChinese, size: fontSize * 0.85, color: .systemGray)
+                        SelectableText(sense.exampleChinese, size: fontSize * 0.85, color: Palette.gray)
                     }
                 }
             }

@@ -53,6 +53,18 @@ struct SelectableText: View {
         self.text = text
     }
 
+    /// With a SwiftUI colour, as the shared views name theirs.
+    init(
+        _ string: String, size: CGFloat, weight: NSFont.Weight = .regular, color: Color,
+        onClick: (() -> Void)? = nil
+    ) {
+        self.init(string, size: size, weight: weight, color: NSColor(color), onClick: onClick)
+    }
+
+    init(_ attributed: AttributedString, size: CGFloat, color: Color, lineSpacing: CGFloat = 0) {
+        self.init(attributed, size: size, color: NSColor(color), lineSpacing: lineSpacing)
+    }
+
     var body: some View {
         TextBox(text: text, onClick: onClick) { selected = $0 }
             .anchorPreference(key: SelectedText.Key.self, value: .rect(selected?.rect ?? .zero)) { bounds in
