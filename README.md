@@ -162,6 +162,20 @@ pip install -U yt-dlp
 curl -fsSL https://deno.land/install.sh | sh -s -- --no-modify-path
 ```
 
+Dev mode can also keep a video itself, beside its audio in the dev cache,
+with its captions in a `bundle.json` next to it, for a companion app on the
+phone to download over your own network (`POST /prefetch/<id>/bundle`; the
+cache's `index.json` lists what is kept). To hand those to the phone, serve
+the cache folder on your tailnet once, from the host:
+
+```
+tailscale serve --bg --set-path /livetrans ~/livetrans/devcache
+```
+
+That makes `https://<host>.<your tailnet>.ts.net/livetrans/index.json` the
+list of videos kept, reachable from your own devices only; no `index.json`
+means none. Production keeps nothing, as before.
+
 Then in LiveTrans, open Settings (⌘,) and set **SSH host** to whatever you type
 after `ssh` to reach that machine. An alias from `~/.ssh/config` is fine.
 `ssh <host> true` must succeed without prompting.

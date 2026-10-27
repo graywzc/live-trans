@@ -45,6 +45,21 @@ POST /prefetch/<id>/stop
 POST /prefetch/<id>/pause, /prefetch/<id>/resume
                    holds or lets go the transcription (the GPU work); the
                    audio keeps being fetched. A paused job reports "paused".
+POST /prefetch/<id>/bundle
+                   body: {"title": "..."}, optional. Dev mode only: for a
+                   step job from the top of the video whose captions have
+                   reached the end, keeps the video itself beside the audio
+                   in the dev cache, its streams copied as they are, and
+                   writes bundle.json with the captions beside it, for the
+                   phone app to download (see BundleFetch). -> {"bundle":
+                   "running"}, or 409 with why not. The job's status then
+                   says "bundle": "none"|"running"|"done"|"failed: <why>"
+                   and "bundle_fetched": seconds of video so far.
+POST /devcache/clear[?page=<url>][&bundle=1]
+                   forgets what dev mode kept: every video, or the one at
+                   page alone; with bundle=1 only what that one holds for
+                   the phone, keeping its audio and findings.
+                   -> {"cleared": how many}
 POST /transcribe   body: raw PCM s16le mono 16kHz
                    query: beam_size=3, translate=1, prompt=<text said before>
                    -> {"ja": "...", "en": "...", "rtf": 0.05,
@@ -1243,6 +1258,9 @@ def erase_temp_traces(pid=None):
 
 
 def exit_releasing_gpu():
+    # A video being kept for the phone dies with the server: left to run,
+    # ffmpeg would finish writing a file nothing then names.
+    stop_bundle_fetches()
     unload_ollama()
     erase_temp_traces(os.getpid())
     # Nothing of the session is kept: the log, which the app starts afresh
@@ -1777,22 +1795,342 @@ def reference_lines(page):
         return None
 
 
-def clear_dev_cache(page=None):
-    """Forgets every video dev mode kept, or the one at `page` alone; how
-    many there were."""
+def clear_dev_cache(page=None, bundle_only=False):
+    """Forgets every video dev mode kept, or the one at `page` alone; with
+    `bundle_only`, only what that one holds for the phone (the video and
+    bundle.json), keeping its audio and findings. How many there were."""
     if page:
         folder = DevCache(page, None).dir
         if not os.path.isdir(folder):
             return 0
-        shutil.rmtree(folder, ignore_errors=True)
-        return 1
+        stop_bundle_fetch(folder)
+        if bundle_only:
+            had = int(forget_bundle(folder))
+        else:
+            shutil.rmtree(folder, ignore_errors=True)
+            had = 1
+        write_bundle_index()
+        return had
     try:
         kept = [d for d in os.listdir(DEV_CACHE_DIR) if os.path.isdir(os.path.join(DEV_CACHE_DIR, d))]
     except OSError:
         return 0
     for d in kept:
-        shutil.rmtree(os.path.join(DEV_CACHE_DIR, d), ignore_errors=True)
+        folder = os.path.join(DEV_CACHE_DIR, d)
+        stop_bundle_fetch(folder)
+        shutil.rmtree(folder, ignore_errors=True)
+    write_bundle_index()
     return len(kept)
+
+
+# The video itself, kept for the phone app beside the audio in the dev
+# cache: "video.mp4", its streams copied as they are, so that its timeline
+# is the stream's own, the one the browser's player and the captions are
+# on (joining the segments afresh re-spaces them, seconds out by the end
+# of an episode); "bundle.json" beside it with the step job's captions;
+# and "index.json" at the top of the cache listing the bundles that are
+# whole, newest first, for the app to show. Whatever serves the cache
+# folder on the user's own network (tailscale serve, say) hands them to
+# the phone. Forgotten with the rest of the cache; production jobs keep
+# nothing, as ever.
+BUNDLE_VERSION = 1
+BUNDLE_VIDEO = "video.mp4"
+BUNDLE_FILE = "bundle.json"
+BUNDLE_INDEX = "index.json"
+# yt-dlp's pick for a page with no direct stream link: an mp4 the phone
+# plays as it is, no taller than 1080.
+BUNDLE_FORMAT = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b"
+
+_bundle_fetches = {}
+_bundle_lock = threading.Lock()
+
+
+def _without_urls(text):
+    """`text` with any URL in it taken out, for a log line: a tool's error
+    names the file it could not open."""
+    return re.sub(r"https?://\S+", "<url>", text or "")
+
+
+def media_seconds(path):
+    """How long the media file at `path` runs, as ffprobe reads it, or None."""
+    try:
+        result = subprocess.run(
+            [_tool("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60,
+        )
+        return float(result.stdout.strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+class BundleFetch:
+    """One video fetched for the phone into `folder`, the dev cache folder
+    of its page. A direct link (a file, or an HLS or DASH playlist) has
+    its video and sound copied into an mp4 by ffmpeg, no re-encoding; a
+    page alone goes to yt-dlp, which picks and merges an mp4 itself. Done,
+    bundle.json is written beside it with `lines`, the captions, and the
+    index at the top of the cache is made again. It outlives the job that
+    asked for it, so a step run again meanwhile does not end it; the
+    server's exit, or forgetting the video, does."""
+
+    def __init__(self, folder, url, page, headers, duration, step, title, lines):
+        self.folder = folder
+        self.url = url
+        self.page = page
+        self.headers = headers or {}
+        self.duration = duration
+        self.step = step
+        self.title = title or ""
+        self.lines = lines
+        self.state = "running"
+        self.error = None
+        # Seconds of video written so far, as the tool reports it.
+        self.fetched = 0.0
+        self.process = None
+        self.stop_event = threading.Event()
+        self.started = time.time()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    @property
+    def part(self):
+        """The file while it is being written; named .mp4 so that ffmpeg
+        knows the container."""
+        return os.path.join(self.folder, "video.part.mp4")
+
+    def stop(self):
+        self.stop_event.set()
+        if self.process and self.process.poll() is None:
+            self.process.kill()
+
+    def _discard_parts(self):
+        try:
+            for name in os.listdir(self.folder):
+                if name.startswith("video.part"):
+                    os.remove(os.path.join(self.folder, name))
+        except OSError:
+            pass
+
+    def _fail(self, message):
+        self.error = _without_urls(message)
+        self.state = "failed"
+        self._discard_parts()
+        print(f"bundle {os.path.basename(self.folder)}: {self.error}", flush=True)
+        tell(f"bundle: the video could not be kept ({self.error[:80]})")
+
+    def _run(self):
+        os.makedirs(self.folder, exist_ok=True)
+        print(f"bundle {os.path.basename(self.folder)}: fetching the video", flush=True)
+        tell("bundle: fetching the video for the phone")
+        try:
+            fetched = self._copy_streams() if self.url else self._download_page()
+        except Exception as exc:
+            self._fail(f"{type(exc).__name__}: {exc}")
+            return
+        if self.stop_event.is_set():
+            self._fail("stopped")
+            return
+        if not fetched:
+            return
+        seconds = media_seconds(self.part)
+        if seconds is None or not DevCache.is_whole(seconds, self.duration):
+            self._fail(f"the video came short: {seconds or 0:.0f}s of {self.duration or 0:.0f}s")
+            return
+        os.replace(self.part, os.path.join(self.folder, BUNDLE_VIDEO))
+        self._discard_parts()
+        self._write_bundle(seconds)
+        self.fetched = seconds
+        self.state = "done"
+        print(f"bundle {os.path.basename(self.folder)}: {seconds:.0f}s of video kept in "
+              f"{time.time() - self.started:.0f}s, {len(self.lines)} captions", flush=True)
+        tell(f"bundle: {clock(seconds)} of video kept for the phone, with {len(self.lines)} captions")
+
+    def _copy_streams(self):
+        """The direct link's streams copied into the mp4; whether it ended
+        well. Progress comes from ffmpeg's own report on stdout."""
+        header_lines = "".join(f"{k}: {v}\r\n" for k, v in self.headers.items())
+        command = [
+            _tool("ffmpeg"), "-nostdin", "-loglevel", "error", "-nostats",
+            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+            "-headers", header_lines, "-i", self.url,
+            # The video and the sound, nothing else: an HLS stream carries
+            # a timed-ID3 track an mp4 cannot hold. Copied, so the
+            # timestamps stay the stream's own, shifted to begin at zero
+            # (no -copyts) as the captions' clock and the browser's player
+            # shift them: joining the segments afresh would re-space them.
+            "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart",
+            "-progress", "pipe:1", "-y", self.part,
+        ]
+        self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for line in self.process.stdout:
+            if line.startswith("out_time_us="):
+                try:
+                    self.fetched = max(self.fetched, int(line[12:]) / 1e6)
+                except ValueError:
+                    pass
+        self.process.wait()
+        if self.process.returncode != 0 and not self.stop_event.is_set():
+            lines = self.process.stderr.read().strip().splitlines() or [f"exited {self.process.returncode}"]
+            self._fail(f"ffmpeg: {lines[-1][-200:]}")
+            return False
+        return True
+
+    def _download_page(self):
+        """The page's video as yt-dlp downloads and merges it; whether it
+        ended well. Progress comes from its download lines, against the
+        video's length when known."""
+        command = [
+            _tool("yt-dlp"), "--no-cache-dir", "--no-playlist", "--newline", "--no-warnings",
+            "-f", BUNDLE_FORMAT, "--merge-output-format", "mp4", "-o", self.part, self.page,
+        ]
+        deno = _tool("deno")
+        if os.path.isabs(deno):
+            command[1:1] = ["--js-runtimes", f"deno:{deno}"]
+        for name, flag in (("User-Agent", "--user-agent"), ("Referer", "--referer")):
+            if self.headers.get(name):
+                command[1:1] = [flag, self.headers[name]]
+        self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for line in self.process.stdout:
+            match = re.search(r"\[download\]\s+([\d.]+)%", line)
+            if match and self.duration:
+                self.fetched = max(self.fetched, float(match.group(1)) / 100 * self.duration)
+        self.process.wait()
+        if self.process.returncode != 0 and not self.stop_event.is_set():
+            lines = self.process.stderr.read().strip().splitlines() or ["yt-dlp found no media"]
+            self._fail(f"yt-dlp: {lines[-1][-200:]}")
+            return False
+        if not os.path.isfile(self.part):
+            self._fail("yt-dlp wrote no file")
+            return False
+        return True
+
+    def _write_bundle(self, seconds):
+        bundle = {
+            "version": BUNDLE_VERSION,
+            "id": os.path.basename(self.folder),
+            "title": self.title,
+            "duration": round(seconds, 3),
+            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "video": BUNDLE_VIDEO,
+            "size": os.path.getsize(os.path.join(self.folder, BUNDLE_VIDEO)),
+            "step": self.step,
+            "lines": [{key: line.get(key) for key in ("ja", "en", "start", "end")} for line in self.lines],
+        }
+        path = os.path.join(self.folder, BUNDLE_FILE)
+        with open(path + ".part", "w", encoding="utf-8") as f:
+            json.dump(bundle, f, ensure_ascii=False)
+        os.replace(path + ".part", path)
+        write_bundle_index()
+
+
+def start_bundle(job, title=None):
+    """Keeps `job`'s video for the phone (see BundleFetch): the job must be
+    a step job from the top of the video whose captions have reached the
+    end. The HTTP status and body to answer with; a fetch already running
+    for the video is left to run."""
+    if not job.step or not job.cache:
+        return 409, {"error": "only a step job in dev mode keeps its video"}
+    if job.caption_error:
+        return 409, {"error": f"the captions failed: {job.caption_error}"}
+    if not job.captioned:
+        return 409, {"error": "the captions have not reached the end yet"}
+    lines = list(job.lines)
+    if not lines:
+        kept = job.cache.load_findings(f"captions-{job.step}")
+        lines = list((kept or {}).get("lines") or [])
+    if not lines:
+        return 409, {"error": "the job has no captions"}
+    with _bundle_lock:
+        current = _bundle_fetches.get(job.cache.dir)
+        if current and current.state == "running":
+            return 200, {"bundle": "running"}
+        _bundle_fetches[job.cache.dir] = BundleFetch(
+            job.cache.dir, job.url, job.page, job.headers, job.duration, job.step, title, lines
+        )
+    return 200, {"bundle": "running"}
+
+
+def bundle_status(cache):
+    """What the dev cache holds for the phone of `cache`'s video: ("none" |
+    "running" | "done" | "failed: <why>", seconds of video so far)."""
+    if cache is None:
+        return "none", 0.0
+    with _bundle_lock:
+        fetch = _bundle_fetches.get(cache.dir)
+    if fetch and fetch.state == "running":
+        return "running", round(fetch.fetched, 1)
+    if fetch and fetch.state == "failed":
+        return f"failed: {fetch.error}", round(fetch.fetched, 1)
+    if os.path.isfile(os.path.join(cache.dir, BUNDLE_FILE)) and os.path.isfile(os.path.join(cache.dir, BUNDLE_VIDEO)):
+        return "done", round(fetch.fetched, 1) if fetch else 0.0
+    return "none", 0.0
+
+
+def stop_bundle_fetch(folder):
+    """Ends the fetch into `folder`, if one is running, and forgets it."""
+    with _bundle_lock:
+        fetch = _bundle_fetches.pop(folder, None)
+    if fetch:
+        fetch.stop()
+
+
+def stop_bundle_fetches():
+    with _bundle_lock:
+        fetches = list(_bundle_fetches.values())
+        _bundle_fetches.clear()
+    for fetch in fetches:
+        fetch.stop()
+
+
+def forget_bundle(folder):
+    """Removes what `folder` holds for the phone, finished or not; whether
+    there was anything."""
+    had = False
+    try:
+        for name in os.listdir(folder):
+            if name in (BUNDLE_VIDEO, BUNDLE_FILE) or name.startswith("video.part"):
+                os.remove(os.path.join(folder, name))
+                had = True
+    except OSError:
+        pass
+    return had
+
+
+def write_bundle_index():
+    """index.json at the top of the dev cache: the bundles that are whole,
+    newest first, for the phone app to list; taken away when there are
+    none, so a cache with nothing kept holds nothing. The entries."""
+    entries = []
+    try:
+        names = os.listdir(DEV_CACHE_DIR)
+    except OSError:
+        names = []
+    for name in names:
+        folder = os.path.join(DEV_CACHE_DIR, name)
+        try:
+            with open(os.path.join(folder, BUNDLE_FILE), encoding="utf-8") as f:
+                bundle = json.load(f)
+            size = os.path.getsize(os.path.join(folder, BUNDLE_VIDEO))
+        except (OSError, ValueError):
+            continue
+        entries.append({
+            "id": name, "title": bundle.get("title") or "", "duration": bundle.get("duration"),
+            "created": bundle.get("created") or "", "size": size, "lines": len(bundle.get("lines") or []),
+        })
+    entries.sort(key=lambda entry: entry["created"], reverse=True)
+    path = os.path.join(DEV_CACHE_DIR, BUNDLE_INDEX)
+    try:
+        if not entries:
+            if os.path.isfile(path):
+                os.remove(path)
+            return entries
+        with open(path + ".part", "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False)
+        os.replace(path + ".part", path)
+    except OSError as exc:
+        print(f"bundle index not written: {exc}", flush=True)
+    return entries
+
+
 PREFETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -3167,6 +3505,7 @@ class PrefetchJob:
     def status(self, since=0):
         with self.audio_lock:
             last = self.audio[-SAMPLE_RATE:]
+        bundle, bundle_fetched = bundle_status(self.cache)
         return {
             "state": "paused" if self.state == "running" and self.paused.is_set() else self.state,
             "error": self.error,
@@ -3194,6 +3533,9 @@ class PrefetchJob:
             # "failed: <why>".
             "captions": f"failed: {self.caption_error}" if self.caption_error
             else "done" if self.captioned else "running",
+            # The video kept for the phone, in dev mode (see BundleFetch).
+            "bundle": bundle,
+            "bundle_fetched": bundle_fetched,
         }
 
     def findings(self):
@@ -3341,6 +3683,14 @@ class Handler(BaseHTTPRequestHandler):
                 job.paused.clear()
             print(f"prefetch {job.id}: {action}d", flush=True)
             self._send(200, {"state": job.status(len(job.lines))["state"]})
+        elif action == "bundle":
+            try:
+                request = json.loads(self._read_body() or b"{}")
+            except ValueError as exc:
+                self._send(400, {"error": f"bad body: {exc}"})
+                return
+            code, payload = start_bundle(job, (request.get("title") or "").strip() or None)
+            self._send(code, payload)
         elif action == "rehear":
             query = parse_qs(parts.query)
             try:
@@ -3368,8 +3718,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/devcache/clear"):
             from urllib.parse import parse_qs, urlparse
 
-            page = parse_qs(urlparse(self.path).query).get("page", [""])[0]
-            self._send(200, {"cleared": clear_dev_cache(page or None)})
+            query = parse_qs(urlparse(self.path).query)
+            page = query.get("page", [""])[0]
+            bundle_only = bool(page) and query.get("bundle", ["0"])[0] == "1"
+            self._send(200, {"cleared": clear_dev_cache(page or None, bundle_only=bundle_only)})
             return
         if not self.path.startswith("/transcribe"):
             self._send(404, {"error": "not found"})
