@@ -612,20 +612,18 @@ def run_devtool_lines(name, header, audio, on_line):
 
 # Dev mode's other recognizers, each caption's stretch heard again by each
 # to set beside the caption's own text (k2's): the name the app shows,
-# and the dev tool that hears it. VibeVoice needs most of the GPU, so the
-# translator is let go before they run. What they heard is kept in the dev
-# cache by the caption's times, so a caption cut the same way next time
-# is not heard again.
-DEV_OTHER_HEARERS = [("nemo", "hear_nemo"), ("qwen", "hear_qwen"), ("vibevoice", "hear_vibevoice")]
+# and the dev tool that hears it. Not VibeVoice, which often heard garbage
+# and on a blind judging of a whole episode was never better than all
+# three others on any caption; without it they fit beside the translator.
+# What they heard is kept in the dev cache by the caption's times, so a
+# caption cut the same way next time is not heard again.
+DEV_OTHER_HEARERS = [("nemo", "hear_nemo"), ("qwen", "hear_qwen")]
 DEV_OTHER_HEARING = os.getenv("LIVETRANS_OTHER_HEARERS", "1") != "0"
 # Whether a production job, once its captions are made, tells the speakers
 # apart, cuts its captions where they change, and has the other recognizers
 # hear each (see PrefetchJob._finish).
 PRODUCTION_FINISH = os.getenv("LIVETRANS_PRODUCTION_FINISH", "1") != "0"
-# The other recognizers a production job's captions are heard by: not
-# VibeVoice, which on a blind judging of a whole episode was never better
-# than all three others on any caption, for most of the GPU and the
-# translator let go.
+# The other recognizers a production job's captions are heard by.
 PRODUCTION_HEARERS = ("nemo", "qwen")
 # Each caption is heard from a little before its start to a little after
 # its end, as a click on it plays it.
@@ -3388,7 +3386,9 @@ class PrefetchJob:
             while not self.stop_event.is_set() and not self.captioned and not self.cache.audio_seconds():
                 time.sleep(1)
             if (found := self.cache.load_findings("others")):
-                kept = {(a, b): texts for a, b, texts in found.get("others", [])}
+                # (Less what VibeVoice heard, when it was one of them.)
+                names = {name for name, _ in DEV_OTHER_HEARERS}
+                kept = {(a, b): {n: t for n, t in texts.items() if n in names} for a, b, texts in found.get("others", [])}
 
         def spans():
             return [(line["start"], line["end"]) for line in list(self.lines) if line.get("start") is not None and line.get("end") is not None]
@@ -3406,18 +3406,12 @@ class PrefetchJob:
         spans = spans()
         with self.audio_lock:
             audio = self.audio.copy()
-        unloaded = False
         for name, tool in DEV_OTHER_HEARERS:
             todo = [span for span in spans if name not in self.others.get(span, {})]
             if self.stop_event.is_set():
                 return
             if not todo:
                 continue
-            if not unloaded:
-                # The captions are made: the translator's GPU memory is the
-                # recognizers' now (VibeVoice needs most of the card).
-                unload_ollama()
-                unloaded = True
             t0 = time.time()
             clips = [[max(self._samples(a - OTHER_LEAD) - self.offset, 0), max(self._samples(b + OTHER_TAIL) - self.offset, 0)] for a, b in todo]
 

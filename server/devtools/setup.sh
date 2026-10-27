@@ -6,9 +6,8 @@
 #   diarize - tells the speakers apart with DiariZen (code MIT, weights
 #             CC BY-NC 4.0: personal, non-commercial use), Python 3.10
 #             and torch 2.1.1 as it is pinned to.
-#   hear_nemo, hear_qwen, hear_vibevoice - hear each caption again with
-#             ReazonSpeech nemo-v2 (Apache-2.0), Qwen3-ASR-1.7B (Apache-2.0)
-#             and VibeVoice-ASR (MIT, about 17 GB of GPU memory), to set
+#   hear_nemo, hear_qwen - hear each caption again with ReazonSpeech
+#             nemo-v2 (Apache-2.0) and Qwen3-ASR-1.7B (Apache-2.0), to set
 #             beside the captions' own recognizer.
 # Usage: setup.sh [DIR], DIR defaulting to ~/livetrans/devtools. Needs uv
 # and git; the models download from Hugging Face on first use.
@@ -42,10 +41,6 @@ if [ ! -x hear_qwen/bin/python ]; then
     uv venv --python 3.12 hear_qwen
     uv pip install --python hear_qwen/bin/python torch==2.14.1 qwen-asr==0.0.6
 fi
-if [ ! -x hear_vibevoice/bin/python ]; then
-    uv venv --python 3.12 hear_vibevoice
-    uv pip install --python hear_vibevoice/bin/python torch==2.14.1 transformers==5.20.0 accelerate==1.15.0 librosa==1.0.0
-fi
 # The workers the server runs in these Pythons.
-cp "$HERE/align.py" "$HERE/diarize.py" "$HERE/hear_nemo.py" "$HERE/hear_qwen.py" "$HERE/hear_vibevoice.py" "$DIR/"
+cp "$HERE/align.py" "$HERE/diarize.py" "$HERE/hear_nemo.py" "$HERE/hear_qwen.py" "$DIR/"
 echo "dev tools ready in $DIR"
