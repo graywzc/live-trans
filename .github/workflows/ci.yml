@@ -28,7 +28,12 @@ jobs:
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
 
       - name: Build and test the iPhone app
+        env:
+          # The phone's tests render their views to PNGs here, for a look:
+          # the simulator cannot be run from a session on the Mac.
+          TEST_RUNNER_SNAPSHOT_DIR: ${{ runner.temp }}/phone-snapshots
         run: |
+          mkdir -p "${TEST_RUNNER_SNAPSHOT_DIR}"
           xcrun simctl list devices available | grep -i iphone
           xcodebuild test -project LiveTrans.xcodeproj -scheme LiveTransMobile \
             -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' -derivedDataPath DerivedData \
@@ -40,3 +45,11 @@ jobs:
         with:
           name: gui-snapshots
           path: ${{ runner.temp }}/snapshots
+
+      - name: Upload iPhone snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-snapshots
+          path: ${{ runner.temp }}/phone-snapshots
+          if-no-files-found: ignore
