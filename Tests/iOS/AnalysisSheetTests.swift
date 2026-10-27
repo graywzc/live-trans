@@ -39,7 +39,7 @@ final class AnalysisSheetTests: XCTestCase {
         XCTAssertNil(model.shown)
     }
 
-    /// The sheet with a sentence explained, a word looked up and a question
+    /// The thread with a sentence explained, a word looked up and a question
     /// answered by a scripted server, rendered to a picture for a look
     /// (SNAPSHOT_DIR) and checked to have taken its room.
     func testTheSheetDrawsTheThread() async throws {
@@ -66,15 +66,19 @@ final class AnalysisSheetTests: XCTestCase {
         XCTAssertEqual(analyzer.followUps.first?.answer.isEmpty, false)
         XCTAssertEqual(analyzer.thread.count, 3)
 
-        let sheet = AnalysisView()
+        // The thread's items, as the sheet shows them in its scroll view,
+        // which ImageRenderer would leave blank.
+        let thread = AnalysisThread(fontSize: 20, tableFontSize: 14)
             .environment(analyzer)
-            .frame(width: 390, height: 900)
+            .foregroundStyle(Palette.text)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
             .background(Color(.systemBackground))
-        let renderer = ImageRenderer(content: sheet)
+        let renderer = ImageRenderer(content: thread)
         renderer.scale = 2
         let image = try XCTUnwrap(renderer.uiImage)
         XCTAssertEqual(image.size.width, 390)
-        XCTAssertEqual(image.size.height, 900)
+        XCTAssertGreaterThan(image.size.height, 500, "the sentence, its table, the entry and the answer")
         if let dir = ProcessInfo.processInfo.environment["SNAPSHOT_DIR"], let png = image.pngData() {
             try? png.write(to: URL(fileURLWithPath: "\(dir)/phone-analysis.png"))
         }

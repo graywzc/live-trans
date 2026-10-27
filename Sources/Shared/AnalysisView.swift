@@ -60,60 +60,7 @@ struct AnalysisView: View {
 
     private func thread(viewportHeight: CGFloat) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                ForEach(Array(analyzer.thread.enumerated()), id: \.element.id) { index, item in
-                    if index > 0 {
-                        // A new sentence starts a new section.
-                        if case .analysis = item {
-                            Rectangle()
-                                .fill(.gray.opacity(0.6))
-                                .frame(height: 2)
-                                .padding(.vertical, 10)
-                        } else {
-                            Divider()
-                        }
-                    }
-                    Group {
-                        switch item {
-                        case .analysis(let analysis):
-                            AnalysisSection(analysis: analysis, fontSize: fontSize, tableFontSize: tableFontSize)
-                        case .followUp(let followUp):
-                            FollowUpView(
-                                followUp: followUp, fontSize: tableFontSize,
-                                isLast: followUp.id == analyzer.followUps.last?.id
-                            )
-                        case .lookup(let lookup):
-                            LookupView(
-                                lookup: lookup, fontSize: tableFontSize,
-                                isLoading: analyzer.lookingUp == lookup.id
-                            ) {
-                                analyzer.retryLookup(lookup.id)
-                            }
-                        }
-                    }
-                    // The button a caption's selection gets, but the entry is
-                    // the LLM's and stays here: what is selected in an
-                    // explanation is as often a form or a term as a word, and
-                    // jisho.org has the captions. Grammar asks about it as a
-                    // question, so it can be asked about further. Both are
-                    // about the sentence the selection is under.
-                    .selectionActions(
-                        lookUpHelp: { "Look up \($0) with the LLM" },
-                        onLookUp: { analyzer.lookUp($0, under: item.id) },
-                        canAskGrammar: analyzer.canAsk,
-                        onGrammar: { analyzer.askAboutGrammar($0, under: item.id) }
-                    )
-                    // Room for the newest one to reach the top of the panel
-                    // before anything has been written under it.
-                    .frame(
-                        minHeight: item.id == analyzer.thread.last?.id ? viewportHeight - 45 : nil,
-                        alignment: .top
-                    )
-                    .id(item.id)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
+            AnalysisThread(fontSize: fontSize, tableFontSize: tableFontSize, lastItemMinHeight: viewportHeight - 45)
         }
     }
 
@@ -149,6 +96,74 @@ struct AnalysisView: View {
         analyzer.ask(analyzer.draft)
         analyzer.draft = ""
         questionIsFocused = true
+    }
+}
+
+/// The items of the thread, top to bottom. The scroll view around them is
+/// AnalysisView's: apart, they can be drawn to a picture, which a scroll
+/// view cannot be.
+struct AnalysisThread: View {
+    @Environment(SentenceAnalyzer.self) private var analyzer
+
+    let fontSize: CGFloat
+    let tableFontSize: CGFloat
+    /// Room for the newest item to reach the top of the panel before
+    /// anything has been written under it.
+    var lastItemMinHeight: CGFloat? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(analyzer.thread.enumerated()), id: \.element.id) { index, item in
+                if index > 0 {
+                    // A new sentence starts a new section.
+                    if case .analysis = item {
+                        Rectangle()
+                            .fill(.gray.opacity(0.6))
+                            .frame(height: 2)
+                            .padding(.vertical, 10)
+                    } else {
+                        Divider()
+                    }
+                }
+                Group {
+                    switch item {
+                    case .analysis(let analysis):
+                        AnalysisSection(analysis: analysis, fontSize: fontSize, tableFontSize: tableFontSize)
+                    case .followUp(let followUp):
+                        FollowUpView(
+                            followUp: followUp, fontSize: tableFontSize,
+                            isLast: followUp.id == analyzer.followUps.last?.id
+                        )
+                    case .lookup(let lookup):
+                        LookupView(
+                            lookup: lookup, fontSize: tableFontSize,
+                            isLoading: analyzer.lookingUp == lookup.id
+                        ) {
+                            analyzer.retryLookup(lookup.id)
+                        }
+                    }
+                }
+                // The button a caption's selection gets, but the entry is
+                // the LLM's and stays here: what is selected in an
+                // explanation is as often a form or a term as a word, and
+                // jisho.org has the captions. Grammar asks about it as a
+                // question, so it can be asked about further. Both are
+                // about the sentence the selection is under.
+                .selectionActions(
+                    lookUpHelp: { "Look up \($0) with the LLM" },
+                    onLookUp: { analyzer.lookUp($0, under: item.id) },
+                    canAskGrammar: analyzer.canAsk,
+                    onGrammar: { analyzer.askAboutGrammar($0, under: item.id) }
+                )
+                .frame(
+                    minHeight: item.id == analyzer.thread.last?.id ? lastItemMinHeight : nil,
+                    alignment: .top
+                )
+                .id(item.id)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
     }
 }
 
