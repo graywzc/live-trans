@@ -578,7 +578,7 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
         job = srv.PrefetchJob(url, page_url, {}, 3.0, step="speech")
         # (Jobs of tests before may still be about, asking too.)
         deadline = time.time() + 15
-        while time.time() < deadline and not (job.captioned and job.status()["others"] >= 2 * job.status()["count"] > 0):
+        while time.time() < deadline and not (job.captioned and job.status()["others"] >= job.status()["count"] > 0):
             time.sleep(0.1)
         time.sleep(0.3)
         return job.status(), job.findings()
@@ -589,7 +589,7 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     try:
         url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
         status, found = run("https://example.com/o")
-        names, clip = [a[0] for a in asked], asked[1][1][0]
+        names, clip = [a[0] for a in asked], asked[0][1][0]
         del asked[:]
         # Again over the same video: what was heard is taken from the cache,
         # and only the recognizer that failed is asked again.
@@ -597,14 +597,15 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     finally:
         (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,
          srv.run_devtool_lines, srv.unload_ollama) = original
-    assert names[:4] == ["unload", "hear_nemo", "hear_qwen", "hear_vibevoice"], names
+    # nemo and qwen, with the translator kept; no VibeVoice.
+    assert names[:2] == ["hear_nemo", "hear_qwen"], names
     line = status["lines"][0]
     # From half a second before the caption (or the audio's start) to 0.3 s after.
     assert abs(clip[0] - max(line["start"] - 0.5, 0)) < 0.01 and abs(clip[1] - (line["end"] + 0.3)) < 0.01, (clip, line)
     assert found["others"][0] == {"start": line["start"], "end": line["end"],
-                                  "nemo": "hear_nemoのことば", "vibevoice": "hear_vibevoiceのことば"}, found["others"]
-    assert status["others"] == 2 * len(status["lines"]), status["others"]
-    assert [a[0] for a in asked] == ["unload", "hear_qwen"], asked
+                                  "nemo": "hear_nemoのことば"}, found["others"]
+    assert status["others"] == len(status["lines"]), status["others"]
+    assert [a[0] for a in asked] == ["hear_qwen"], asked
     assert found_again["others"] == found["others"], found_again
     srv.clear_dev_cache()
 

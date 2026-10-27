@@ -74,11 +74,10 @@ struct OtherHearing: Decodable, Equatable {
     var end: Double
     var nemo: String?
     var qwen: String?
-    var vibevoice: String?
 
     /// The recognizers, in the order shown, with the names they are shown by.
     static let shown: [(label: String, text: KeyPath<OtherHearing, String?>)] = [
-        ("nemo", \.nemo), ("qwen", \.qwen), ("vv", \.vibevoice),
+        ("nemo", \.nemo), ("qwen", \.qwen),
     ]
 }
 
