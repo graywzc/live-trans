@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: com.larrywang.livetrans
   deploymentTarget:
     macOS: "14.0"
+    iOS: "26.0"
   createIntermediateGroups: true
 
 settings:
@@ -18,7 +19,10 @@ targets:
     type: application
     platform: macOS
     sources:
+      # The phone's own files are under Sources/iOS; what both apps share
+      # is under Sources/Shared, which is inside Sources.
       - path: Sources
+        excludes: ["iOS/**"]
     info:
       path: Sources/Info.plist
       properties:
@@ -49,6 +53,7 @@ targets:
     platform: macOS
     sources:
       - path: Tests
+        excludes: ["iOS/**"]
     dependencies:
       - target: LiveTrans
     settings:
@@ -56,6 +61,57 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.larrywang.livetrans.tests
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/LiveTrans.app/Contents/MacOS/LiveTrans"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+  # The iPhone companion: the Mac's captions and video, kept on the GPU host
+  # as a bundle, fetched over the tailnet and watched on the phone.
+  LiveTransMobile:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources/Shared
+      - path: Sources/iOS
+    info:
+      path: Sources/iOS/Info.plist
+      properties:
+        CFBundleDisplayName: LiveTrans
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # The video keeps playing with the screen off.
+        UIBackgroundModes: [audio]
+        # The LLM that analyzes sentences speaks plain HTTP over the
+        # tailnet; the bundles come over HTTPS and need no exception.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.larrywang.livetrans.ios
+        PRODUCT_NAME: LiveTrans
+        PRODUCT_MODULE_NAME: LiveTransMobile
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Sources/iOS/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+  LiveTransMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/iOS
+    dependencies:
+      - target: LiveTransMobile
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.larrywang.livetrans.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/LiveTrans.app/LiveTrans"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
 schemes:
@@ -67,3 +123,11 @@ schemes:
     test:
       targets:
         - LiveTransTests
+  LiveTransMobile:
+    build:
+      targets:
+        LiveTransMobile: all
+        LiveTransMobileTests: [test]
+    test:
+      targets:
+        - LiveTransMobileTests

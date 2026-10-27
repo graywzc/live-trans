@@ -1,15 +1,6 @@
 import AVFoundation
 import Observation
 
-struct Caption: Identifiable, Equatable {
-    let id: Int
-    let japanese: String
-    let ruby: [RubyToken]
-    let english: String
-    /// Where the sentence starts in the Chrome video it was heard from.
-    var moment: VideoMoment?
-}
-
 /// Runs the pipeline: audio -> VAD -> utterances -> GPU server -> captions.
 ///
 /// Everything here is on the main actor. The per-frame work is a 480-sample

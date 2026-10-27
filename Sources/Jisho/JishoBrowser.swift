@@ -2,20 +2,6 @@ import AppKit
 import Observation
 import WebKit
 
-enum Jisho {
-    /// Jisho takes the search as a path component. It copes with more than a
-    /// dictionary form: a conjugated verb, or a phrase it splits into words.
-    static func searchURL(for text: String) -> URL? {
-        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        var allowed = CharacterSet.urlPathAllowed
-        allowed.remove(charactersIn: "/")
-        guard !query.isEmpty, let path = query.addingPercentEncoding(withAllowedCharacters: allowed) else {
-            return nil
-        }
-        return URL(string: "https://jisho.org/search/\(path)")
-    }
-}
-
 /// The web view behind the Jisho panel. It lives here rather than in the
 /// panel's view so that a lookup can be started before the panel exists, and
 /// so that closing the panel keeps the page and its history.

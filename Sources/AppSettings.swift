@@ -29,7 +29,8 @@ enum AppVersion {
     }
 }
 
-enum AppSettings {
+/// The Mac's own keys, after the shared ones in `Shared/Settings.swift`.
+extension AppSettings {
     static let sshHost = "sshHost"
     static let asrPort = "asrPort"
     static let remoteDir = "remoteDir"
@@ -37,15 +38,11 @@ enum AppSettings {
     static let idleTimeout = "idleTimeout"
     static let inputDeviceName = "inputDeviceName"
     static let autoRouteOutput = "autoRouteOutput"
-    static let showFurigana = "showFurigana"
-    static let captionFontSize = "captionFontSize"
     static let sensitivity = "sensitivity"
     static let keepOnTop = "keepOnTop"
     static let prefetchVideo = "prefetchVideo"
     /// The panel was Jisho's alone when the key was named.
     static let sidePanelWidth = "jishoPanelWidth"
-    static let analysisURL = "analysisURL"
-    static let analysisModel = "analysisModel"
     static let demoAudioPath = "demoAudioPath"
     static let autoStart = "autoStart"
     /// The Chrome tab last chosen or found, {"id", "url"}, to go back to at
@@ -100,17 +97,6 @@ enum AppSettings {
             idleTimeout: defaults.integer(forKey: idleTimeout),
             target: ServerConfig.Target(rawValue: defaults.string(forKey: translationTarget) ?? "") ?? .english
         )
-    }
-
-    /// Nil until an LLM server has been entered in Settings.
-    static var analysisClient: AnalysisClient? {
-        let defaults = UserDefaults.standard
-        let address = (defaults.string(forKey: analysisURL) ?? "").trimmingCharacters(in: .whitespaces)
-        let model = (defaults.string(forKey: analysisModel) ?? "").trimmingCharacters(in: .whitespaces)
-        guard !model.isEmpty, let url = URL(string: address), url.scheme?.hasPrefix("http") == true,
-              url.host != nil
-        else { return nil }
-        return AnalysisClient(baseURL: url, model: model)
     }
 
     /// The 0...1 sensitivity slider as the VAD's speech-to-noise ratio: from 6x

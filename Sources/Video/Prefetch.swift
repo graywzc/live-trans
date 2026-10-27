@@ -1,17 +1,6 @@
 import Foundation
 import Observation
 
-/// Where the video is among its captions while no sentence is being spoken.
-struct Lull: Equatable {
-    /// The caption it is next to.
-    let captionID: Int
-    /// After that caption, the last one spoken; before it when the video has
-    /// not reached its first.
-    let isAfter: Bool
-    /// How far into the video, in whole seconds as the list shows it.
-    let seconds: Int
-}
-
 /// Captions a Chrome video ahead of the viewer from its own audio, through
 /// the GPU host: the tab's video is probed for what it is made of, the host
 /// fetches and transcribes it in chunks from where the viewer is, and the
@@ -544,37 +533,15 @@ final class Prefetcher {
         return past > ready ? past : nil
     }
 
-    /// The caption being spoken at `seconds` of the page's video: the one
-    /// whose stretch holds it, else the last one that started before it,
-    /// within a breath.
+    /// The caption being spoken at `seconds` of the page's video, as
+    /// `CaptionTiming` has it: the phone follows its video the same way.
     nonisolated static func current(in captions: [Caption], at seconds: Double, tabID: Int, url: String) -> Int? {
-        var before: Caption?
-        for caption in captions {
-            guard let moment = caption.moment, moment.tabID == tabID, moment.url == url,
-                  moment.seconds <= seconds
-            else { continue }
-            if let end = moment.end, seconds <= end { return caption.id }
-            if before?.moment.map({ $0.seconds <= moment.seconds }) ?? true { before = caption }
-        }
-        guard let before, let moment = before.moment, seconds - (moment.end ?? moment.seconds) < 2 else { return nil }
-        return before.id
+        CaptionTiming.current(in: captions, at: seconds, tabID: tabID, url: url)
     }
 
     /// Where `seconds` of the page's video is among its captions when no
-    /// sentence is being spoken: after the last one that started before it,
-    /// however long ago, else before the first one after it.
+    /// sentence is being spoken, as `CaptionTiming` has it.
     nonisolated static func lull(in captions: [Caption], at seconds: Double, tabID: Int, url: String) -> Lull? {
-        var before: Caption?
-        var after: Caption?
-        for caption in captions {
-            guard let moment = caption.moment, moment.tabID == tabID, moment.url == url else { continue }
-            if moment.seconds <= seconds {
-                if before?.moment.map({ $0.seconds <= moment.seconds }) ?? true { before = caption }
-            } else if after?.moment.map({ moment.seconds < $0.seconds }) ?? true {
-                after = caption
-            }
-        }
-        guard let beside = before ?? after else { return nil }
-        return Lull(captionID: beside.id, isAfter: before != nil, seconds: Int(max(seconds, 0)))
+        CaptionTiming.lull(in: captions, at: seconds, tabID: tabID, url: url)
     }
 }
