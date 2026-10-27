@@ -101,8 +101,8 @@ final class BundleStore {
         local[id]
     }
 
-    /// Asks the host for its list. Without an answer the list stands, with
-    /// the bundles on the phone in it, and the error says why.
+    /// Asks the host for its list. Without an answer only the bundles on
+    /// the phone are listed, and the error says why.
     func refresh() async {
         guard !isRefreshing else { return }
         guard let host else {
@@ -118,6 +118,7 @@ final class BundleStore {
             remote = try Self.index(from: data, status: (response as? HTTPURLResponse)?.statusCode)
             error = nil
         } catch {
+            remote = []
             self.error = "Could not reach \(Self.describe(host)): \(error.localizedDescription)"
         }
         rebuild()

@@ -95,7 +95,7 @@ final class BundleStoreTests: XCTestCase {
         XCTAssertEqual(store.items.map(\.name), ["Lesson one", "fedcba9876543210"])
     }
 
-    func testAHostThatCannotBeReachedIsSaidAndTheListStands() async throws {
+    func testAHostThatCannotBeReachedIsSaidAndThePhonesBundlesStand() async throws {
         let store = store(host: host)
         await store.refresh()
         store.download("0123456789abcdef")
