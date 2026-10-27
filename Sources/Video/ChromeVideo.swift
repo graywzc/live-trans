@@ -361,27 +361,6 @@ struct MediaProbe: Equatable {
     }
 }
 
-/// A stretch of a Chrome video: where a sentence was said.
-struct VideoMoment: Equatable {
-    let tabID: Int
-    /// The page, so a tab that has moved on to the next video isn't sought.
-    let url: String
-    let seconds: Double
-    /// Where the sentence ends, so playing it can stop there.
-    var end: Double?
-    /// Video seconds per second heard.
-    var rate: Double = 1
-    /// Whether the video was playing when this was read.
-    var playing = false
-    /// How long the video is, when it has an end.
-    var duration: Double?
-
-    /// This moment `heard` seconds of listening later.
-    func advanced(by heard: TimeInterval) -> VideoMoment {
-        VideoMoment(tabID: tabID, url: url, seconds: seconds + heard * rate, rate: rate)
-    }
-}
-
 /// The AppleScript side, kept free of UI so it can be tested.
 ///
 /// Chrome's tab ids are text. A number written into a script would be read
@@ -415,12 +394,11 @@ enum ChromeScript {
         case failed(String)
     }
 
-    /// Seeking lands this far before the sentence, so its first word isn't
-    /// clipped: the VAD only notices speech once it is under way.
-    static let seekLead = 0.5
-    /// Playing a sentence runs this far past its end, which is an estimate
-    /// and shouldn't cut the last word.
-    static let seekTail = 0.3
+    /// How far before a sentence a seek lands, and how far past its end
+    /// playing it runs: the phone plays its sentences back by the same
+    /// margins.
+    static let seekLead = CaptionTiming.seekLead
+    static let seekTail = CaptionTiming.seekTail
 
     struct Failure: Error {
         let message: String

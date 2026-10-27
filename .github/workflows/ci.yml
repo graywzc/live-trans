@@ -27,6 +27,13 @@ jobs:
             -destination platform=macOS -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
 
+      - name: Build and test the iPhone app
+        run: |
+          xcrun simctl list devices available | grep -i iphone
+          xcodebuild test -project LiveTrans.xcodeproj -scheme LiveTransMobile \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' -derivedDataPath DerivedData \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
+
       - name: Upload GUI snapshots
         if: failure()
         uses: actions/upload-artifact@v4
