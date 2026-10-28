@@ -6,6 +6,10 @@ import SwiftUI
 /// questions asked in the field at the bottom, and an entry for each selection
 /// that was looked up. Any of the text can be selected and looked up, an
 /// entry's own included.
+///
+/// The Mac's side panel and the phone's sheet: what differs between them,
+/// the colours, the Japanese line and the way to Settings, each app gives
+/// in its own `Palette`, `AnalysisRuby` and `SettingsButton`.
 struct AnalysisView: View {
     static let symbol = "text.magnifyingglass"
 
@@ -51,65 +55,12 @@ struct AnalysisView: View {
             Divider()
             questionField
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(Palette.text)
     }
 
     private func thread(viewportHeight: CGFloat) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                ForEach(Array(analyzer.thread.enumerated()), id: \.element.id) { index, item in
-                    if index > 0 {
-                        // A new sentence starts a new section.
-                        if case .analysis = item {
-                            Rectangle()
-                                .fill(.gray.opacity(0.6))
-                                .frame(height: 2)
-                                .padding(.vertical, 10)
-                        } else {
-                            Divider()
-                        }
-                    }
-                    Group {
-                        switch item {
-                        case .analysis(let analysis):
-                            AnalysisSection(analysis: analysis, fontSize: fontSize, tableFontSize: tableFontSize)
-                        case .followUp(let followUp):
-                            FollowUpView(
-                                followUp: followUp, fontSize: tableFontSize,
-                                isLast: followUp.id == analyzer.followUps.last?.id
-                            )
-                        case .lookup(let lookup):
-                            LookupView(
-                                lookup: lookup, fontSize: tableFontSize,
-                                isLoading: analyzer.lookingUp == lookup.id
-                            ) {
-                                analyzer.retryLookup(lookup.id)
-                            }
-                        }
-                    }
-                    // The button a caption's selection gets, but the entry is
-                    // the LLM's and stays here: what is selected in an
-                    // explanation is as often a form or a term as a word, and
-                    // jisho.org has the captions. Grammar asks about it as a
-                    // question, so it can be asked about further. Both are
-                    // about the sentence the selection is under.
-                    .selectionActions(
-                        lookUpHelp: { "Look up \($0) with the LLM" },
-                        onLookUp: { analyzer.lookUp($0, under: item.id) },
-                        canAskGrammar: analyzer.canAsk,
-                        onGrammar: { analyzer.askAboutGrammar($0, under: item.id) }
-                    )
-                    // Room for the newest one to reach the top of the panel
-                    // before anything has been written under it.
-                    .frame(
-                        minHeight: item.id == analyzer.thread.last?.id ? viewportHeight - 45 : nil,
-                        alignment: .top
-                    )
-                    .id(item.id)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
+            AnalysisThread(fontSize: fontSize, tableFontSize: tableFontSize, lastItemMinHeight: viewportHeight - 45)
         }
     }
 
@@ -148,6 +99,74 @@ struct AnalysisView: View {
     }
 }
 
+/// The items of the thread, top to bottom. The scroll view around them is
+/// AnalysisView's: apart, they can be drawn to a picture, which a scroll
+/// view cannot be.
+struct AnalysisThread: View {
+    @Environment(SentenceAnalyzer.self) private var analyzer
+
+    let fontSize: CGFloat
+    let tableFontSize: CGFloat
+    /// Room for the newest item to reach the top of the panel before
+    /// anything has been written under it.
+    var lastItemMinHeight: CGFloat? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(analyzer.thread.enumerated()), id: \.element.id) { index, item in
+                if index > 0 {
+                    // A new sentence starts a new section.
+                    if case .analysis = item {
+                        Rectangle()
+                            .fill(.gray.opacity(0.6))
+                            .frame(height: 2)
+                            .padding(.vertical, 10)
+                    } else {
+                        Divider()
+                    }
+                }
+                Group {
+                    switch item {
+                    case .analysis(let analysis):
+                        AnalysisSection(analysis: analysis, fontSize: fontSize, tableFontSize: tableFontSize)
+                    case .followUp(let followUp):
+                        FollowUpView(
+                            followUp: followUp, fontSize: tableFontSize,
+                            isLast: followUp.id == analyzer.followUps.last?.id
+                        )
+                    case .lookup(let lookup):
+                        LookupView(
+                            lookup: lookup, fontSize: tableFontSize,
+                            isLoading: analyzer.lookingUp == lookup.id
+                        ) {
+                            analyzer.retryLookup(lookup.id)
+                        }
+                    }
+                }
+                // The button a caption's selection gets, but the entry is
+                // the LLM's and stays here: what is selected in an
+                // explanation is as often a form or a term as a word, and
+                // jisho.org has the captions. Grammar asks about it as a
+                // question, so it can be asked about further. Both are
+                // about the sentence the selection is under.
+                .selectionActions(
+                    lookUpHelp: { "Look up \($0) with the LLM" },
+                    onLookUp: { analyzer.lookUp($0, under: item.id) },
+                    canAskGrammar: analyzer.canAsk,
+                    onGrammar: { analyzer.askAboutGrammar($0, under: item.id) }
+                )
+                .frame(
+                    minHeight: item.id == analyzer.thread.last?.id ? lastItemMinHeight : nil,
+                    alignment: .top
+                )
+                .id(item.id)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+    }
+}
+
 /// One sentence of the thread: its readings, its translation, its words.
 private struct AnalysisSection: View {
     @Environment(SentenceAnalyzer.self) private var analyzer
@@ -156,16 +175,13 @@ private struct AnalysisSection: View {
     let fontSize: CGFloat
     let tableFontSize: CGFloat
 
-    /// A range of this sentence.
-    @State private var selection: Range<Int>?
-
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             // Readings always: they are the point here, whatever the captions
             // are set to.
-            FuriganaText(tokens: analysis.ruby, fontSize: fontSize, selection: $selection)
+            AnalysisRuby(tokens: analysis.ruby, fontSize: fontSize)
             if !analysis.chinese.isEmpty {
-                SelectableText(analysis.chinese, size: fontSize * 0.82, color: .systemOrange)
+                SelectableText(analysis.chinese, size: fontSize * 0.82, color: Palette.orange)
             }
             if !analysis.words.isEmpty {
                 table
@@ -194,9 +210,7 @@ private struct AnalysisSection: View {
                     )
                     .foregroundStyle(.orange)
                     HStack {
-                        SettingsLink {
-                            Text("Open Settings")
-                        }
+                        SettingsButton()
                         Button("Try Again") { analyzer.retry(analysis.id) }
                     }
                 }
@@ -225,14 +239,14 @@ private struct AnalysisSection: View {
                 GridRow {
                     VStack(alignment: .leading, spacing: 1) {
                         if word.reading != word.surface {
-                            SelectableText(word.reading, size: tableFontSize * 0.7, color: .secondaryLabelColor)
+                            SelectableText(word.reading, size: tableFontSize * 0.7, color: Palette.secondary)
                         }
                         SelectableText(word.surface, size: tableFontSize)
                     }
                     .fixedSize()
                     VStack(alignment: .leading, spacing: 1) {
                         SelectableText(word.base, size: tableFontSize)
-                        SelectableText(word.partOfSpeech, size: tableFontSize * 0.75, color: .secondaryLabelColor)
+                        SelectableText(word.partOfSpeech, size: tableFontSize * 0.75, color: Palette.secondary)
                     }
                     .fixedSize()
                     if word.change.isEmpty {
@@ -258,7 +272,7 @@ private struct FollowUpView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SelectableText(followUp.question, size: fontSize, color: .systemOrange)
+            SelectableText(followUp.question, size: fontSize, color: Palette.orange)
             if !followUp.answer.isEmpty {
                 SelectableText(Self.rendered(followUp.answer), size: fontSize, lineSpacing: 3)
             } else if followUp.error == nil, isLast, analyzer.isAnswering {

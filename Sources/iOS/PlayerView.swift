@@ -3,7 +3,8 @@ import SwiftUI
 
 /// The video on top with its own controls, its captions below kept on
 /// the sentence being spoken; a tap on a caption plays the sentence
-/// again. Where the video was left is kept for the next opening.
+/// again, the button at its end explains it in a sheet. Where the video
+/// was left is kept for the next opening.
 struct PlayerView: View {
     let bundle: VideoBundle
 
@@ -12,11 +13,12 @@ struct PlayerView: View {
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 20.0
     @State private var model: PlaybackModel?
+    @State private var sheet = AnalysisSheetModel()
 
     var body: some View {
         Group {
             if let model {
-                PlayerScreen(model: model, fontSize: fontSize, showFurigana: showFurigana)
+                PlayerScreen(model: model, fontSize: fontSize, showFurigana: showFurigana, onAnalyze: sheet.open)
             } else {
                 Color.clear
             }
@@ -30,7 +32,13 @@ struct PlayerView: View {
             }
             model?.start()
         }
-        .onDisappear { model?.stop() }
+        .onDisappear {
+            model?.stop()
+            sheet.end()
+        }
+        .sheet(isPresented: $sheet.isPresented) {
+            AnalysisSheet(model: sheet)
+        }
         .onChange(of: scenePhase) {
             // Put away, the app may not come back: where the video is goes
             // on record now.
@@ -44,6 +52,7 @@ struct PlayerScreen: View {
     let model: PlaybackModel
     let fontSize: Double
     let showFurigana: Bool
+    let onAnalyze: (Caption) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,7 +61,7 @@ struct PlayerScreen: View {
                 .background(Color.black)
             CaptionScroll(
                 captions: model.captions, playingID: model.playingID, lull: model.lull,
-                fontSize: fontSize, showFurigana: showFurigana, onTap: model.replay
+                fontSize: fontSize, showFurigana: showFurigana, onTap: model.replay, onAnalyze: onAnalyze
             )
         }
     }

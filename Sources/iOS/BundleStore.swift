@@ -10,8 +10,9 @@ import Observation
 @MainActor
 @Observable
 final class BundleStore {
-    static let bundleName = "bundle.json"
-    static let videoName = "video.mp4"
+    // Read off the main actor too, by the download delegate and the loader.
+    nonisolated static let bundleName = "bundle.json"
+    nonisolated static let videoName = "video.mp4"
 
     /// A bundle as the list shows it: from the host's index, or from the
     /// phone's copy when the host does not list it or cannot be reached.
