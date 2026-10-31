@@ -2,31 +2,50 @@ import SwiftUI
 
 /// Japanese with readings printed above the kanji: each word a small
 /// two-row stack, wrapped like text by the shared FlowLayout, as
-/// FuriganaText lays it out on the Mac. Without the Mac's selection: a
-/// long press on a word is for later.
+/// FuriganaText lays it out on the Mac. In place of the Mac's selection,
+/// a long press on a piece lifts out the whole word it belongs to (see
+/// RubyWords) with the word menu, when the text has `onWord`.
 struct RubyText: View {
     let tokens: [RubyToken]
     let fontSize: Double
     var showReadings = true
+    /// What the menu's items do with the word pressed; none, and a press
+    /// does nothing.
+    var onWord: ((WordAction, String) -> Void)? = nil
 
     var body: some View {
         FlowLayout(lineSpacing: fontSize * 0.15) {
-            ForEach(Array(tokens.enumerated()), id: \.offset) { _, token in
-                VStack(spacing: 0) {
-                    if showReadings {
-                        // A blank reading still takes its row, so every
-                        // word has the same height and the base text
-                        // shares one baseline.
-                        Text(token.reading ?? " ")
-                            .font(.system(size: fontSize * 0.5))
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(token.base)
-                        .font(.system(size: fontSize))
-                }
-                .fixedSize()
-                .layoutValue(key: GluesToPrevious.self, value: token.gluesToPrevious)
+            ForEach(Array(tokens.enumerated()), id: \.offset) { index, token in
+                piece(token, at: index)
+                    .layoutValue(key: GluesToPrevious.self, value: token.gluesToPrevious)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func piece(_ token: RubyToken, at index: Int) -> some View {
+        let stack = VStack(spacing: 0) {
+            if showReadings {
+                // A blank reading still takes its row, so every word has
+                // the same height and the base text shares one baseline.
+                Text(token.reading ?? " ")
+                    .font(.system(size: fontSize * 0.5))
+                    .foregroundStyle(.secondary)
+            }
+            Text(token.base)
+                .font(.system(size: fontSize))
+        }
+        .fixedSize()
+        if let onWord {
+            let range = RubyWords.word(at: index, in: tokens)
+            let word = RubyWords.text(of: range, in: tokens)
+            stack.contextMenu {
+                WordMenuItems(word: word, hasDefinition: WordMenuItems.dictionaryKnows(word)) { onWord($0, word) }
+            } preview: {
+                WordPreview(tokens: Array(tokens[range]), fontSize: fontSize)
+            }
+        } else {
+            stack
         }
     }
 }
@@ -34,7 +53,8 @@ struct RubyText: View {
 /// One caption: the Japanese with its readings, the translation under
 /// it, where in the video it was said at its end, lit while it is being
 /// spoken. A tap plays the sentence again; the button at its end, when
-/// there is one, asks for its analysis.
+/// there is one, asks for its analysis; a long press on a word, when
+/// there is `onWord`, offers the word menu.
 struct PhoneCaptionRow: View {
     let caption: Caption
     let fontSize: Double
@@ -42,6 +62,7 @@ struct PhoneCaptionRow: View {
     var isCurrent = false
     let onTap: () -> Void
     var onAnalyze: (() -> Void)? = nil
+    var onWord: ((WordAction, String) -> Void)? = nil
 
     /// The highlight reaches a little past the text, without moving it.
     static let highlightInset: CGFloat = 6
@@ -49,7 +70,7 @@ struct PhoneCaptionRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                RubyText(tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana)
+                RubyText(tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana, onWord: onWord)
                 if !caption.english.isEmpty {
                     Text(caption.english)
                         .font(.system(size: fontSize * 0.78))

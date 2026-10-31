@@ -327,7 +327,9 @@ final class SentenceAnalyzer {
         (analyses.last { $0.id <= itemID ?? .max } ?? analyses.first)?.sentence
     }
 
-    private func lookUp(_ text: String, in sentence: String) {
+    /// Look up `text` as said in `sentence`, given outright: the phone's
+    /// long press on a word of a caption that may not be in the thread.
+    func lookUp(_ text: String, in sentence: String) {
         lookupTask?.cancel()
         let id = nextID
         nextID += 1

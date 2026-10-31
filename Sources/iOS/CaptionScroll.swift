@@ -35,6 +35,9 @@ struct CaptionScroll: View {
     let onTap: (Caption) -> Void
     /// The button at a row's end; none, and there is no button.
     var onAnalyze: ((Caption) -> Void)? = nil
+    /// The word menu's items, for the word pressed in the caption; none,
+    /// and a long press does nothing.
+    var onWord: ((WordAction, String, Caption) -> Void)? = nil
 
     @State private var follow = FollowState()
 
@@ -53,7 +56,8 @@ struct CaptionScroll: View {
                         PhoneCaptionRow(
                             caption: caption, fontSize: fontSize, showFurigana: showFurigana,
                             isCurrent: caption.id == playingID, onTap: { onTap(caption) },
-                            onAnalyze: onAnalyze.map { analyze in { analyze(caption) } }
+                            onAnalyze: onAnalyze.map { analyze in { analyze(caption) } },
+                            onWord: onWord.map { act in { action, word in act(action, word, caption) } }
                         )
                         .id(caption.id)
                         .overlay(alignment: .bottom) {
