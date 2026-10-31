@@ -24,7 +24,7 @@ final class PlaybackModel {
     private(set) var isPlaying = false
 
     @ObservationIgnored private var timeObserver: Any?
-    @ObservationIgnored private var stopObserver: Any?
+    private var stopObserver: Any?
     @ObservationIgnored private var rateObservation: NSKeyValueObservation?
     @ObservationIgnored private let defaults: UserDefaults
 
@@ -93,6 +93,20 @@ final class PlaybackModel {
     func pause() {
         player.pause()
         remember()
+    }
+
+    /// A sentence played again is going to stop at its end.
+    var stopsAtSentenceEnd: Bool { stopObserver != nil }
+
+    /// Whether there is anything for continuePlaying to do: not while the
+    /// video is simply running.
+    var canContinue: Bool { !isPlaying || stopsAtSentenceEnd }
+
+    /// Goes on from where the video is, past the end of a sentence played
+    /// again, whether it has stopped there already or is on its way.
+    func continuePlaying() {
+        clearStop()
+        player.play()
     }
 
     /// Plays the sentence again from a little before it, and pauses a

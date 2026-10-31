@@ -3,8 +3,8 @@ import XCTest
 @testable import LiveTransMobile
 
 /// The player's model and rows: the captions made of a bundle, which one
-/// is lit as the video moves, a sentence played again, the list following
-/// or staying, and where the video was left.
+/// is lit as the video moves, a sentence played again and going on from
+/// it, the list following or staying, and where the video was left.
 @MainActor
 final class PlayerTests: XCTestCase {
     private var bundle: VideoBundle!
@@ -69,6 +69,17 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(model.playingID, 1)
         XCTAssertNil(model.lull)
         XCTAssertEqual(model.time, 4.0, accuracy: 1e-9)
+    }
+
+    func testContinueGoesOnPastTheSentenceEnd() {
+        let model = model()
+        XCTAssertFalse(model.stopsAtSentenceEnd)
+        XCTAssertTrue(model.canContinue, "stopped, it can go on")
+        model.replay(PlaybackModel.captions(of: bundle)[1])
+        XCTAssertTrue(model.stopsAtSentenceEnd)
+        XCTAssertTrue(model.canContinue, "on its way to the stop, it can run on")
+        model.continuePlaying()
+        XCTAssertFalse(model.stopsAtSentenceEnd, "the stop is gone")
     }
 
     func testWhereTheVideoWasLeftIsKeptForNextTimeButNotNearTheEnds() {

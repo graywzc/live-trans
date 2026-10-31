@@ -3,9 +3,11 @@ import SwiftUI
 
 /// The video on top with its own controls, its captions below kept on
 /// the sentence being spoken; a tap on a caption plays the sentence
-/// again, the button at its end explains it in a sheet, a long press on a
-/// word offers jisho.org, Apple's dictionary, the LLM's entry and the
-/// clipboard. Where the video was left is kept for the next opening.
+/// again and stops at its end, Continue in the top bar goes on from
+/// there, the button at a caption's end explains it in a sheet, a long
+/// press on a word offers jisho.org, Apple's dictionary, the LLM's entry
+/// and the clipboard. Where the video was left is kept for the next
+/// opening.
 struct PlayerView: View {
     let bundle: VideoBundle
 
@@ -85,6 +87,13 @@ struct PlayerScreen: View {
                 fontSize: fontSize, showFurigana: showFurigana, onTap: model.replay, onAnalyze: onAnalyze,
                 onWord: onWord
             )
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Continue", systemImage: "play.fill", action: model.continuePlaying)
+                    .labelStyle(.titleAndIcon)
+                    .disabled(!model.canContinue)
+            }
         }
     }
 }
