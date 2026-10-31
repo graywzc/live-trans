@@ -54,7 +54,11 @@ POST /prefetch/<id>/bundle
                    phone app to download (see BundleFetch). -> {"bundle":
                    "running"}, or 409 with why not. The job's status then
                    says "bundle": "none"|"running"|"done"|"failed: <why>"
-                   and "bundle_fetched": seconds of video so far.
+                   and "bundle_fetched": seconds of video so far, with
+                   "bundle_url": where the phone fetches the bundles (the
+                   dev cache served on the tailnet, set up by the server
+                   itself; see ensure_bundle_serving) or null, and
+                   "bundle_serve_error": why not, when it could not be.
 POST /devcache/clear[?page=<url>][&bundle=1]
                    forgets what dev mode kept: every video, or the one at
                    page alone; with bundle=1 only what that one holds for
@@ -2018,6 +2022,7 @@ class BundleFetch:
             json.dump(bundle, f, ensure_ascii=False)
         os.replace(path + ".part", path)
         write_bundle_index()
+        ensure_bundle_serving()
 
 
 def start_bundle(job, title=None):
@@ -2127,6 +2132,111 @@ def write_bundle_index():
     except OSError as exc:
         print(f"bundle index not written: {exc}", flush=True)
     return entries
+
+
+# The bundles reach the phone through `tailscale serve`: the dev cache
+# folder as plain files over HTTPS, under this path of the host's own
+# tailnet name, reachable from the user's devices only. The phone's
+# Library reads index.json there and downloads what it lists. The server
+# sets that up itself when a bundle is kept (and at start, when the cache
+# holds bundles from before), so nothing has to be typed on the host.
+# tailscaled lets only root serve a folder, or an operator it finds able
+# to run `sudo tailscale`; the server asks as itself first and then through
+# `sudo -n` (which never prompts), so the user running it must be able to
+# run tailscale with sudo without a password (a sudoers line, see the
+# README). When tailscale refuses either way, or is not there, the bundles
+# stay where they are and the job's status tells why, for the user to
+# serve the folder by hand.
+BUNDLE_SERVE_PATH = "/livetrans"
+# _serve_lock guards what is known; _serve_attempt_lock serializes the
+# attempts, so that a status read never waits behind tailscale.
+_serve_lock = threading.Lock()
+_serve_attempt_lock = threading.Lock()
+_serve = {"url": None, "error": None, "thread": None}
+
+
+def _tailscale(*args, timeout=20, as_root=False):
+    """What `tailscale <args>` prints, run through `sudo -n` as root when
+    asked; when it fails, its last line of complaint raised."""
+    command = [_tool("tailscale"), *args]
+    if as_root:
+        command = [_tool("sudo"), "-n", *command]
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        raise RuntimeError(f"{'sudo' if as_root else 'tailscale'} is not installed on the host") from None
+    if done.returncode != 0:
+        lines = (done.stderr or done.stdout).strip().splitlines() or [f"tailscale exited {done.returncode}"]
+        raise RuntimeError(lines[-1].strip()[-200:])
+    return done.stdout
+
+
+def _served_paths():
+    """What `tailscale serve` has under the host's HTTPS: each path and
+    what it serves there (a folder or file by its path, a proxy by its
+    URL, or text)."""
+    config = json.loads(_tailscale("serve", "status", "--json") or "{}")
+    paths = {}
+    for site in (config.get("Web") or {}).values():
+        for path, handler in (site.get("Handlers") or {}).items():
+            paths[path] = handler.get("Path") or handler.get("Proxy") or handler.get("Text") or ""
+    return paths
+
+
+def ensure_bundle_serving():
+    """The URL the phone fetches the bundles at, https://<tailnet name>
+    + BUNDLE_SERVE_PATH, the serve set up first when the cache folder is
+    not under that path yet; None when tailscale cannot, the reason kept
+    for the status."""
+    with _serve_attempt_lock:
+        with _serve_lock:
+            if _serve["url"]:
+                return _serve["url"]
+        url = error = None
+        try:
+            folder = os.path.realpath(DEV_CACHE_DIR)
+            target = _served_paths().get(BUNDLE_SERVE_PATH)
+            if not target or os.path.realpath(target) != folder:
+                serve = ("serve", "--bg", "--set-path", BUNDLE_SERVE_PATH, folder)
+                try:
+                    _tailscale(*serve, timeout=60)
+                except RuntimeError as refused:
+                    # Not root, and not an operator tailscaled could
+                    # verify: once more as root, when sudo lets this user
+                    # without a password; the first refusal is what is
+                    # told when it does not.
+                    try:
+                        _tailscale(*serve, timeout=60, as_root=True)
+                    except RuntimeError:
+                        raise refused from None
+                print(f"bundles: the dev cache is served to the tailnet under {BUNDLE_SERVE_PATH}", flush=True)
+            name = ((json.loads(_tailscale("status", "--json")).get("Self") or {}).get("DNSName") or "").rstrip(".")
+            if not name:
+                raise RuntimeError("tailscale gives this host no tailnet name")
+            url = f"https://{name}{BUNDLE_SERVE_PATH}"
+        except (OSError, ValueError, subprocess.SubprocessError, RuntimeError) as exc:
+            error = _without_urls(str(exc) or type(exc).__name__)[:200]
+            print(f"bundles: not served to the phone ({error})", flush=True)
+        with _serve_lock:
+            _serve["url"], _serve["error"] = url, error
+        return url
+
+
+def ensure_bundle_serving_soon():
+    """ensure_bundle_serving off this thread, one attempt at a time, when
+    nothing is known yet."""
+    with _serve_lock:
+        if _serve["url"] or _serve["error"] or (_serve["thread"] and _serve["thread"].is_alive()):
+            return
+        _serve["thread"] = threading.Thread(target=ensure_bundle_serving, daemon=True)
+        _serve["thread"].start()
+
+
+def bundle_serving():
+    """Where the phone fetches the bundles, and why not when it cannot:
+    (url or None, error or None), as known so far."""
+    with _serve_lock:
+        return _serve["url"], _serve["error"]
 
 
 PREFETCH_HEADERS = {
@@ -3500,6 +3610,9 @@ class PrefetchJob:
         with self.audio_lock:
             last = self.audio[-SAMPLE_RATE:]
         bundle, bundle_fetched = bundle_status(self.cache)
+        bundle_url, bundle_serve_error = bundle_serving()
+        if bundle == "done" and not bundle_url and not bundle_serve_error:
+            ensure_bundle_serving_soon()  # kept before this server started
         return {
             "state": "paused" if self.state == "running" and self.paused.is_set() else self.state,
             "error": self.error,
@@ -3530,6 +3643,10 @@ class PrefetchJob:
             # The video kept for the phone, in dev mode (see BundleFetch).
             "bundle": bundle,
             "bundle_fetched": bundle_fetched,
+            # Where the phone fetches it, or why it cannot yet (see
+            # ensure_bundle_serving).
+            "bundle_url": bundle_url,
+            "bundle_serve_error": bundle_serve_error,
         }
 
     def findings(self):
@@ -3797,6 +3914,10 @@ def main():
     if args.idle_timeout > 0:
         print(f"idle timeout: {args.idle_timeout:.0f}s", flush=True)
         start_idle_watchdog(args.idle_timeout)
+    # Bundles kept before are served to the phone again, in case tailscale
+    # forgot; a cache without any waits for the first.
+    if os.path.isfile(os.path.join(DEV_CACHE_DIR, BUNDLE_INDEX)):
+        ensure_bundle_serving_soon()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"listening on {args.host}:{args.port}", flush=True)
     server.serve_forever()

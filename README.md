@@ -165,16 +165,24 @@ curl -fsSL https://deno.land/install.sh | sh -s -- --no-modify-path
 Dev mode can also keep a video itself, beside its audio in the dev cache,
 with its captions in a `bundle.json` next to it, for a companion app on the
 phone to download over your own network (`POST /prefetch/<id>/bundle`; the
-cache's `index.json` lists what is kept). To hand those to the phone, serve
-the cache folder on your tailnet once, from the host:
+cache's `index.json` lists what is kept). To hand those to the phone, the
+server serves the cache folder on your tailnet itself the first time a
+video is kept, with `tailscale serve`, and the Mac app shows the address
+(copy it from the kept video's menu into the phone app's Settings). That
+makes `https://<host>.<your tailnet>.ts.net/livetrans/index.json` the list
+of videos kept, reachable from your own devices only; no `index.json` means
+none. Tailscale lets only root serve a folder (or an operator it can verify
+may run `sudo tailscale`), so the server asks as itself and then through
+`sudo -n`, which never prompts: allow the user it runs as to run tailscale
+with sudo without a password, once, on the host:
 
 ```
-tailscale serve --bg --set-path /livetrans ~/livetrans/devcache
+echo "$USER ALL=(root) NOPASSWD: /usr/bin/tailscale" | sudo tee /etc/sudoers.d/livetrans-tailscale
 ```
 
-That makes `https://<host>.<your tailnet>.ts.net/livetrans/index.json` the
-list of videos kept, reachable from your own devices only; no `index.json`
-means none. Production keeps nothing, as before.
+Otherwise the app tells you that the host could not serve the folder, and
+`sudo tailscale serve --bg --set-path /livetrans ~/livetrans/devcache` run
+by hand does the same. Production keeps nothing, as before.
 
 Then in LiveTrans, open Settings (⌘,) and set **SSH host** to whatever you type
 after `ssh` to reach that machine. An alias from `~/.ssh/config` is fine.

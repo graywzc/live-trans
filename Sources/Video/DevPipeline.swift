@@ -71,6 +71,10 @@ final class DevPipeline {
         /// "running", "done", "failed: ..."), and seconds of it so far.
         var bundle = "none"
         var bundleFetched = 0.0
+        /// Where the phone fetches the host's bundles, once the host serves
+        /// them, or why it could not.
+        var bundleURL: String?
+        var bundleServeError: String?
     }
 
     /// What FireRedVAD's event model hears besides speech, drawn over the
@@ -413,6 +417,14 @@ final class DevPipeline {
                 updated.bundle = bundle
             }
             updated.bundleFetched = status.bundleFetched ?? 0
+            if let news = Self.phoneAddressNews(
+                fromURL: updated.bundleURL, error: updated.bundleServeError,
+                toURL: status.bundleURL, error: status.bundleServeError
+            ) {
+                ActivityLog.tell(news)
+            }
+            updated.bundleURL = status.bundleURL
+            updated.bundleServeError = status.bundleServeError
             job = updated
             if status.state == "failed" {
                 ActivityLog.tell("Step \(current.step.title) failed: \(status.error ?? "unknown")")
@@ -440,6 +452,22 @@ final class DevPipeline {
         guard new != old else { return nil }
         if new == "done" { return "The video is on the host for the iPhone, with its captions" }
         if new.hasPrefix("failed") { return "Keeping the video for the iPhone \(new)" }
+        return nil
+    }
+
+    /// What to tell when the host's word on where the phone fetches its
+    /// videos changes: the address once the host serves them, the reason
+    /// once it could not; nothing for the same word again.
+    static func phoneAddressNews(fromURL oldURL: String?, error oldError: String?, toURL url: String?, error: String?)
+        -> String?
+    {
+        if let url, url != oldURL {
+            return "The iPhone app fetches the host's videos from \(url): enter it as the host in its Settings"
+        }
+        if let error, error != oldError {
+            return "The host could not serve its videos to the iPhone (\(error)): "
+                + "let the server's user run tailscale with sudo without a password, or serve the dev cache folder yourself"
+        }
         return nil
     }
 
