@@ -32,6 +32,66 @@ srv.run_devtool = _not_set_up
 srv.run_devtool_lines = lambda name, header, audio, on_line: _not_set_up(name, header, audio)
 srv.speech_stretches = lambda audio, model=None: [(0.0, audio.size / srv.SAMPLE_RATE)] if audio.size else []
 
+# tailscale stood in for by a script, first on PATH for the whole run, so
+# that no test touches this machine's tailnet: it answers `status --json`
+# with a made-up tailnet name, `serve status --json` with the serve
+# config kept in FAKE_TAILSCALE_STATE (the host's own HTTPS with one proxy
+# until a path is added), and `serve --bg --set-path` by noting the call
+# in FAKE_TAILSCALE_CALLS and adding the path, or by refusing the way
+# tailscale does a user who is not its operator when FAKE_TAILSCALE_DENY
+# is set.
+TAILNET_HOST = "host.test-net.ts.net"
+_fake_bin = tempfile.mkdtemp()
+with open(os.path.join(_fake_bin, "tailscale"), "w", encoding="utf-8") as _f:
+    _f.write(f"""#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+state = os.environ["FAKE_TAILSCALE_STATE"]
+host = {TAILNET_HOST!r}
+
+
+def config():
+    try:
+        with open(state) as f:
+            return json.load(f)
+    except OSError:
+        return {{"TCP": {{"443": {{"HTTPS": True}}}},
+                "Web": {{host + ":443": {{"Handlers": {{"/": {{"Proxy": "http://127.0.0.1:8080"}}}}}}}}}}
+
+
+if args == ["status", "--json"]:
+    print(json.dumps({{"Self": {{"DNSName": host + "."}}}}))
+elif args == ["serve", "status", "--json"]:
+    print(json.dumps(config()))
+elif args[:3] == ["serve", "--bg", "--set-path"]:
+    with open(os.environ["FAKE_TAILSCALE_CALLS"], "a") as f:
+        f.write(" ".join(args) + "\\n")
+    if os.environ.get("FAKE_TAILSCALE_DENY"):
+        print("Access denied: serve config denied; run 'sudo tailscale set --operator=$USER'", file=sys.stderr)
+        sys.exit(1)
+    current = config()
+    current["Web"][host + ":443"]["Handlers"][args[3]] = {{"Path": args[4]}}
+    with open(state, "w") as f:
+        json.dump(current, f)
+    print("Available within your tailnet:")
+else:
+    print("fake tailscale: unexpected arguments", args, file=sys.stderr)
+    sys.exit(2)
+""")
+os.chmod(os.path.join(_fake_bin, "tailscale"), 0o755)
+os.environ["PATH"] = _fake_bin + os.pathsep + os.environ["PATH"]
+os.environ["FAKE_TAILSCALE_STATE"] = os.path.join(_fake_bin, "serve.json")
+os.environ["FAKE_TAILSCALE_CALLS"] = os.path.join(_fake_bin, "calls.log")
+
+
+def tailscale_calls():
+    """The `serve --set-path` calls the fake tailscale has taken."""
+    try:
+        with open(os.environ["FAKE_TAILSCALE_CALLS"], encoding="utf-8") as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
 # Made-up lines, as a step job's captions come: the text, its translation,
 # and where in the video it was said.
 LINES = [
@@ -86,8 +146,14 @@ def hls_stream(seconds=6):
 
 
 def fresh_cache():
-    """A cache of its own for the test, empty."""
+    """A cache of its own for the test, empty, with the tailnet as the
+    server first finds it: the folder not served, nothing asked yet."""
     srv.DEV_CACHE_DIR = tempfile.mkdtemp()
+    scratch = tempfile.mkdtemp()
+    os.environ["FAKE_TAILSCALE_STATE"] = os.path.join(scratch, "serve.json")
+    os.environ["FAKE_TAILSCALE_CALLS"] = os.path.join(scratch, "calls.log")
+    os.environ.pop("FAKE_TAILSCALE_DENY", None)
+    srv._serve.update(url=None, error=None, thread=None)
     return srv.DEV_CACHE_DIR
 
 
@@ -187,7 +253,75 @@ def test_a_step_job_keeps_its_video_and_captions_for_the_phone():
     # The log names neither the title nor where the video came from.
     assert TITLE not in out.getvalue() and "http" not in out.getvalue(), out.getvalue()
     assert all(TITLE not in e["text"] and "http" not in e["text"] for e in srv._events)
+    # And the cache folder is now served to the phone (see the serving
+    # tests), the status saying where.
+    assert status["bundle_url"] == f"https://{TAILNET_HOST}/livetrans" and status["bundle_serve_error"] is None
     return job
+
+
+def test_the_bundles_are_served_to_the_phone_once_one_is_kept():
+    cache = fresh_cache()
+    url, _ = hls_stream(4)
+    job = step_job(url, "https://example.com/watch/7", 4)
+    job.lines = list(LINES)
+    # Nothing is served, or asked of tailscale, for a cache with nothing
+    # kept.
+    status = job.status()
+    assert status["bundle_url"] is None and status["bundle_serve_error"] is None, status
+    assert tailscale_calls() == []
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert srv.start_bundle(job, TITLE)[0] == 200
+        assert wait_for_bundle(job) == "done", srv._bundle_fetches[job.cache.dir].error
+    # The first bundle kept has the server put the cache folder under
+    # /livetrans of the host's own tailnet name, once.
+    status = job.status()
+    assert status["bundle_url"] == f"https://{TAILNET_HOST}/livetrans" and status["bundle_serve_error"] is None, status
+    assert tailscale_calls() == [f"serve --bg --set-path /livetrans {os.path.realpath(cache)}"], tailscale_calls()
+    # A server started later finds the folder served and asks nothing more.
+    srv._serve.update(url=None, error=None)
+    assert srv.ensure_bundle_serving() == f"https://{TAILNET_HOST}/livetrans"
+    assert len(tailscale_calls()) == 1
+    # At start, a cache holding bundles is seen to off the main thread.
+    srv._serve.update(url=None, error=None)
+    srv.ensure_bundle_serving_soon()
+    srv._serve["thread"].join(10)
+    assert srv.bundle_serving() == (f"https://{TAILNET_HOST}/livetrans", None)
+    assert len(tailscale_calls()) == 1
+    # Served somewhere else under that path, the folder is put there anew.
+    srv._serve.update(url=None, error=None)
+    with open(os.environ["FAKE_TAILSCALE_STATE"], encoding="utf-8") as f:
+        config = json.load(f)
+    config["Web"][f"{TAILNET_HOST}:443"]["Handlers"]["/livetrans"] = {"Path": tempfile.mkdtemp()}
+    with open(os.environ["FAKE_TAILSCALE_STATE"], "w", encoding="utf-8") as f:
+        json.dump(config, f)
+    assert srv.ensure_bundle_serving() == f"https://{TAILNET_HOST}/livetrans"
+    assert len(tailscale_calls()) == 2
+    # The log tells of the serving without the host's name.
+    assert "served to the tailnet under /livetrans" in out.getvalue() and TAILNET_HOST not in out.getvalue(), out.getvalue()
+
+
+def test_when_tailscale_refuses_the_bundle_is_kept_and_the_reason_told():
+    fresh_cache()
+    os.environ["FAKE_TAILSCALE_DENY"] = "1"
+    url, _ = hls_stream(4)
+    job = step_job(url, "https://example.com/watch/8", 4)
+    job.lines = list(LINES)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert srv.start_bundle(job, TITLE)[0] == 200
+        assert wait_for_bundle(job) == "done", srv._bundle_fetches[job.cache.dir].error
+    status = job.status()
+    assert status["bundle"] == "done", status
+    assert status["bundle_url"] is None, status
+    assert status["bundle_serve_error"].startswith("Access denied"), status
+    assert "not served to the phone (Access denied" in out.getvalue(), out.getvalue()
+    assert "http" not in out.getvalue(), out.getvalue()
+    # Allowed later (the user made themself the operator), the next
+    # attempt serves it.
+    os.environ.pop("FAKE_TAILSCALE_DENY")
+    assert srv.ensure_bundle_serving() == f"https://{TAILNET_HOST}/livetrans"
+    assert job.status()["bundle_serve_error"] is None
 
 
 def test_only_a_finished_step_job_in_dev_mode_keeps_its_video():

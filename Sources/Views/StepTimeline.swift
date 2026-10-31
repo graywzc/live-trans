@@ -80,7 +80,8 @@ struct StepTimeline: View {
                 .fixedSize()
                 PhoneKeepControl(
                     bundle: dev.job?.bundle ?? "none", fetched: dev.job?.bundleFetched ?? 0, duration: dev.job?.duration,
-                    canKeep: dev.canKeepForPhone, onKeep: dev.keepForPhone, onForget: dev.forgetPhoneCopy
+                    canKeep: dev.canKeepForPhone, onKeep: dev.keepForPhone, onForget: dev.forgetPhoneCopy,
+                    address: dev.job?.bundleURL, serveError: dev.job?.bundleServeError
                 )
                 Button(action: dev.forgetCache) {
                     Image(systemName: "trash.slash")

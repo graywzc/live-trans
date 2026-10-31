@@ -31,11 +31,26 @@ final class PhoneKeepTests: XCTestCase {
         """.utf8))
         XCTAssertEqual(status.bundle, "running")
         XCTAssertEqual(status.bundleFetched, 12.5)
+        XCTAssertNil(status.bundleURL)
+        XCTAssertNil(status.bundleServeError)
+        let served = try JSONDecoder().decode(PrefetchStatus.self, from: Data("""
+        {"state": "done", "fetched": 60, "ready": 60, "count": 0, "lines": [], "bundle": "done", "bundle_fetched": 60,
+         "bundle_url": "https://host.example-net.ts.net/livetrans", "bundle_serve_error": null}
+        """.utf8))
+        XCTAssertEqual(served.bundleURL, "https://host.example-net.ts.net/livetrans")
+        XCTAssertNil(served.bundleServeError)
+        let unserved = try JSONDecoder().decode(PrefetchStatus.self, from: Data("""
+        {"state": "done", "fetched": 60, "ready": 60, "count": 0, "lines": [], "bundle": "done", "bundle_fetched": 60,
+         "bundle_url": null, "bundle_serve_error": "Access denied: not the operator"}
+        """.utf8))
+        XCTAssertNil(unserved.bundleURL)
+        XCTAssertEqual(unserved.bundleServeError, "Access denied: not the operator")
         let older = try JSONDecoder().decode(PrefetchStatus.self, from: Data("""
         {"state": "running", "fetched": 1, "ready": 0, "count": 0, "lines": []}
         """.utf8))
         XCTAssertNil(older.bundle, "a server from before says nothing of it")
         XCTAssertNil(older.bundleFetched)
+        XCTAssertNil(older.bundleURL)
     }
 
     func testTheKeepRequestNamesTheJobAndCarriesTheTitle() throws {
@@ -85,6 +100,30 @@ final class PhoneKeepTests: XCTestCase {
         XCTAssertNil(DevPipeline.phoneCopyNews(from: "done", to: "none"), "forgotten: the control says so")
     }
 
+    func testWhatIsToldWhenTheHostsAddressChanges() {
+        let url = "https://host.example-net.ts.net/livetrans"
+        XCTAssertNil(DevPipeline.phoneAddressNews(fromURL: nil, error: nil, toURL: nil, error: nil))
+        XCTAssertEqual(
+            DevPipeline.phoneAddressNews(fromURL: nil, error: nil, toURL: url, error: nil),
+            "The iPhone app fetches the host's videos from \(url): enter it as the host in its Settings"
+        )
+        XCTAssertNil(DevPipeline.phoneAddressNews(fromURL: url, error: nil, toURL: url, error: nil), "told already")
+        XCTAssertEqual(
+            DevPipeline.phoneAddressNews(fromURL: nil, error: nil, toURL: nil, error: "Access denied: not the operator"),
+            "The host could not serve its videos to the iPhone (Access denied: not the operator): "
+                + "make the server's user tailscale's operator, or serve the dev cache folder yourself"
+        )
+        XCTAssertNil(
+            DevPipeline.phoneAddressNews(fromURL: nil, error: "Access denied", toURL: nil, error: "Access denied"),
+            "told already"
+        )
+        XCTAssertEqual(
+            DevPipeline.phoneAddressNews(fromURL: nil, error: "Access denied", toURL: url, error: nil),
+            "The iPhone app fetches the host's videos from \(url): enter it as the host in its Settings",
+            "served after all"
+        )
+    }
+
     func testWhenTheHostCanBeAsked() {
         let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())
         XCTAssertFalse(dev.canKeepForPhone, "no job")
@@ -130,6 +169,21 @@ final class PhoneKeepTests: XCTestCase {
         XCTAssertEqual(
             PhoneKeepControl.help(bundle: "done", canKeep: true),
             "The video is on the host with its captions, for the iPhone app to download"
+        )
+        XCTAssertEqual(
+            PhoneKeepControl.help(bundle: "done", canKeep: true, address: "https://host.example-net.ts.net/livetrans"),
+            "The video is on the host with its captions, for the iPhone app to download; "
+                + "the app fetches it from https://host.example-net.ts.net/livetrans, its host in Settings"
+        )
+        XCTAssertEqual(
+            PhoneKeepControl.help(bundle: "done", canKeep: true, serveError: "Access denied: not the operator"),
+            "The video is on the host with its captions, for the iPhone app to download; "
+                + "the host could not serve it to the iPhone: Access denied: not the operator"
+        )
+        XCTAssertEqual(
+            PhoneKeepControl.help(bundle: "none", canKeep: true, serveError: "Access denied"),
+            "Have the host keep this video with its captions, for the iPhone app to download",
+            "nothing kept yet: nothing to fetch"
         )
     }
 

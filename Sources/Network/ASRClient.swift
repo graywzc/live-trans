@@ -59,11 +59,17 @@ struct PrefetchStatus: Decodable, Equatable {
     /// "running", "done" or "failed: <why>", and seconds of it so far.
     var bundle: String?
     var bundleFetched: Double?
+    /// Where the phone fetches the host's bundles, the dev cache served on
+    /// the tailnet by the host itself, or why it could not be served.
+    var bundleURL: String?
+    var bundleServeError: String?
 
     enum CodingKeys: String, CodingKey {
         case state, error, duration, start, fetched, ready, count, lines, step, analysed, worded, aligned, speakers
         case cached, fetching, captions, others, bundle
         case bundleFetched = "bundle_fetched"
+        case bundleURL = "bundle_url"
+        case bundleServeError = "bundle_serve_error"
     }
 }
 
