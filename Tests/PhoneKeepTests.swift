@@ -111,7 +111,7 @@ final class PhoneKeepTests: XCTestCase {
         XCTAssertEqual(
             DevPipeline.phoneAddressNews(fromURL: nil, error: nil, toURL: nil, error: "Access denied: not the operator"),
             "The host could not serve its videos to the iPhone (Access denied: not the operator): "
-                + "make the server's user tailscale's operator, or serve the dev cache folder yourself"
+                + "let the server's user run tailscale with sudo without a password, or serve the dev cache folder yourself"
         )
         XCTAssertNil(
             DevPipeline.phoneAddressNews(fromURL: nil, error: "Access denied", toURL: nil, error: "Access denied"),

@@ -32,14 +32,16 @@ srv.run_devtool = _not_set_up
 srv.run_devtool_lines = lambda name, header, audio, on_line: _not_set_up(name, header, audio)
 srv.speech_stretches = lambda audio, model=None: [(0.0, audio.size / srv.SAMPLE_RATE)] if audio.size else []
 
-# tailscale stood in for by a script, first on PATH for the whole run, so
-# that no test touches this machine's tailnet: it answers `status --json`
-# with a made-up tailnet name, `serve status --json` with the serve
-# config kept in FAKE_TAILSCALE_STATE (the host's own HTTPS with one proxy
-# until a path is added), and `serve --bg --set-path` by noting the call
-# in FAKE_TAILSCALE_CALLS and adding the path, or by refusing the way
-# tailscale does a user who is not its operator when FAKE_TAILSCALE_DENY
-# is set.
+# tailscale and sudo stood in for by scripts, first on PATH for the whole
+# run, so that no test touches this machine's tailnet. The tailscale one
+# answers `status --json` with a made-up tailnet name, `serve status
+# --json` with the serve config kept in FAKE_TAILSCALE_STATE (the host's
+# own HTTPS with one proxy until a path is added), and `serve --bg
+# --set-path` by noting the call in FAKE_TAILSCALE_CALLS and adding the
+# path, or, when FAKE_TAILSCALE_DENY is set and it is not run as root,
+# by refusing the way tailscaled does a user it cannot verify. The sudo
+# one runs what follows `-n` as root (the call noted with "sudo" before
+# it), or refuses for want of a password when FAKE_SUDO_DENY is set.
 TAILNET_HOST = "host.test-net.ts.net"
 _fake_bin = tempfile.mkdtemp()
 with open(os.path.join(_fake_bin, "tailscale"), "w", encoding="utf-8") as _f:
@@ -48,6 +50,7 @@ import json, os, sys
 args = sys.argv[1:]
 state = os.environ["FAKE_TAILSCALE_STATE"]
 host = {TAILNET_HOST!r}
+as_root = bool(os.environ.get("FAKE_TAILSCALE_ROOT"))
 
 
 def config():
@@ -65,9 +68,10 @@ elif args == ["serve", "status", "--json"]:
     print(json.dumps(config()))
 elif args[:3] == ["serve", "--bg", "--set-path"]:
     with open(os.environ["FAKE_TAILSCALE_CALLS"], "a") as f:
-        f.write(" ".join(args) + "\\n")
-    if os.environ.get("FAKE_TAILSCALE_DENY"):
-        print("Access denied: serve config denied; run 'sudo tailscale set --operator=$USER'", file=sys.stderr)
+        f.write(("sudo " if as_root else "") + " ".join(args) + "\\n")
+    if os.environ.get("FAKE_TAILSCALE_DENY") and not as_root:
+        print("sending serve config: 401 Unauthorized: must be root, or be an operator and able to run "
+              "'sudo tailscale' to serve a path or Unix socket", file=sys.stderr)
         sys.exit(1)
     current = config()
     current["Web"][host + ":443"]["Handlers"][args[3]] = {{"Path": args[4]}}
@@ -79,6 +83,19 @@ else:
     sys.exit(2)
 """)
 os.chmod(os.path.join(_fake_bin, "tailscale"), 0o755)
+with open(os.path.join(_fake_bin, "sudo"), "w", encoding="utf-8") as _f:
+    _f.write("""#!/usr/bin/env python3
+import os, subprocess, sys
+args = sys.argv[1:]
+if args[:1] != ["-n"]:
+    print("fake sudo: only -n is expected", args, file=sys.stderr)
+    sys.exit(2)
+if os.environ.get("FAKE_SUDO_DENY"):
+    print("sudo: a password is required", file=sys.stderr)
+    sys.exit(1)
+sys.exit(subprocess.run(args[1:], env=dict(os.environ, FAKE_TAILSCALE_ROOT="1")).returncode)
+""")
+os.chmod(os.path.join(_fake_bin, "sudo"), 0o755)
 os.environ["PATH"] = _fake_bin + os.pathsep + os.environ["PATH"]
 os.environ["FAKE_TAILSCALE_STATE"] = os.path.join(_fake_bin, "serve.json")
 os.environ["FAKE_TAILSCALE_CALLS"] = os.path.join(_fake_bin, "calls.log")
@@ -153,6 +170,7 @@ def fresh_cache():
     os.environ["FAKE_TAILSCALE_STATE"] = os.path.join(scratch, "serve.json")
     os.environ["FAKE_TAILSCALE_CALLS"] = os.path.join(scratch, "calls.log")
     os.environ.pop("FAKE_TAILSCALE_DENY", None)
+    os.environ.pop("FAKE_SUDO_DENY", None)
     srv._serve.update(url=None, error=None, thread=None)
     return srv.DEV_CACHE_DIR
 
@@ -301,9 +319,13 @@ def test_the_bundles_are_served_to_the_phone_once_one_is_kept():
     assert "served to the tailnet under /livetrans" in out.getvalue() and TAILNET_HOST not in out.getvalue(), out.getvalue()
 
 
-def test_when_tailscale_refuses_the_bundle_is_kept_and_the_reason_told():
-    fresh_cache()
+def test_when_tailscale_refuses_the_server_asks_as_root_or_tells_why_not():
+    # tailscaled refuses the user; sudo wants a password: the bundle is
+    # kept all the same, tailscale's refusal told in the status and the
+    # log, no URL anywhere.
+    cache = fresh_cache()
     os.environ["FAKE_TAILSCALE_DENY"] = "1"
+    os.environ["FAKE_SUDO_DENY"] = "1"
     url, _ = hls_stream(4)
     job = step_job(url, "https://example.com/watch/8", 4)
     job.lines = list(LINES)
@@ -314,13 +336,16 @@ def test_when_tailscale_refuses_the_bundle_is_kept_and_the_reason_told():
     status = job.status()
     assert status["bundle"] == "done", status
     assert status["bundle_url"] is None, status
-    assert status["bundle_serve_error"].startswith("Access denied"), status
-    assert "not served to the phone (Access denied" in out.getvalue(), out.getvalue()
+    assert status["bundle_serve_error"].startswith("sending serve config: 401 Unauthorized: must be root"), status
+    assert "not served to the phone (sending serve config: 401" in out.getvalue(), out.getvalue()
     assert "http" not in out.getvalue(), out.getvalue()
-    # Allowed later (the user made themself the operator), the next
-    # attempt serves it.
-    os.environ.pop("FAKE_TAILSCALE_DENY")
+    serve = f"serve --bg --set-path /livetrans {os.path.realpath(cache)}"
+    assert tailscale_calls() == [serve], tailscale_calls()
+    # sudo allowed without a password (the sudoers line from the README):
+    # the next attempt is refused as the user again and then made as root.
+    os.environ.pop("FAKE_SUDO_DENY")
     assert srv.ensure_bundle_serving() == f"https://{TAILNET_HOST}/livetrans"
+    assert tailscale_calls() == [serve, serve, f"sudo {serve}"], tailscale_calls()
     assert job.status()["bundle_serve_error"] is None
 
 

@@ -466,7 +466,7 @@ final class DevPipeline {
         }
         if let error, error != oldError {
             return "The host could not serve its videos to the iPhone (\(error)): "
-                + "make the server's user tailscale's operator, or serve the dev cache folder yourself"
+                + "let the server's user run tailscale with sudo without a password, or serve the dev cache folder yourself"
         }
         return nil
     }

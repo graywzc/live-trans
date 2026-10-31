@@ -2139,11 +2139,14 @@ def write_bundle_index():
 # tailnet name, reachable from the user's devices only. The phone's
 # Library reads index.json there and downloads what it lists. The server
 # sets that up itself when a bundle is kept (and at start, when the cache
-# holds bundles from before), so nothing has to be typed on the host. The
-# user running the server must be tailscale's operator for that
-# (`sudo tailscale set --operator=$USER`, once); when tailscale refuses,
-# or is not there, the bundles stay where they are and the job's status
-# tells why, for the user to serve the folder by hand.
+# holds bundles from before), so nothing has to be typed on the host.
+# tailscaled lets only root serve a folder, or an operator it finds able
+# to run `sudo tailscale`; the server asks as itself first and then through
+# `sudo -n` (which never prompts), so the user running it must be able to
+# run tailscale with sudo without a password (a sudoers line, see the
+# README). When tailscale refuses either way, or is not there, the bundles
+# stay where they are and the job's status tells why, for the user to
+# serve the folder by hand.
 BUNDLE_SERVE_PATH = "/livetrans"
 # _serve_lock guards what is known; _serve_attempt_lock serializes the
 # attempts, so that a status read never waits behind tailscale.
@@ -2152,13 +2155,16 @@ _serve_attempt_lock = threading.Lock()
 _serve = {"url": None, "error": None, "thread": None}
 
 
-def _tailscale(*args, timeout=20):
-    """What `tailscale <args>` prints; when it fails, its last line of
-    complaint raised."""
+def _tailscale(*args, timeout=20, as_root=False):
+    """What `tailscale <args>` prints, run through `sudo -n` as root when
+    asked; when it fails, its last line of complaint raised."""
+    command = [_tool("tailscale"), *args]
+    if as_root:
+        command = [_tool("sudo"), "-n", *command]
     try:
-        done = subprocess.run([_tool("tailscale"), *args], capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
-        raise RuntimeError("tailscale is not installed on the host") from None
+        raise RuntimeError(f"{'sudo' if as_root else 'tailscale'} is not installed on the host") from None
     if done.returncode != 0:
         lines = (done.stderr or done.stdout).strip().splitlines() or [f"tailscale exited {done.returncode}"]
         raise RuntimeError(lines[-1].strip()[-200:])
@@ -2191,7 +2197,18 @@ def ensure_bundle_serving():
             folder = os.path.realpath(DEV_CACHE_DIR)
             target = _served_paths().get(BUNDLE_SERVE_PATH)
             if not target or os.path.realpath(target) != folder:
-                _tailscale("serve", "--bg", "--set-path", BUNDLE_SERVE_PATH, folder, timeout=60)
+                serve = ("serve", "--bg", "--set-path", BUNDLE_SERVE_PATH, folder)
+                try:
+                    _tailscale(*serve, timeout=60)
+                except RuntimeError as refused:
+                    # Not root, and not an operator tailscaled could
+                    # verify: once more as root, when sudo lets this user
+                    # without a password; the first refusal is what is
+                    # told when it does not.
+                    try:
+                        _tailscale(*serve, timeout=60, as_root=True)
+                    except RuntimeError:
+                        raise refused from None
                 print(f"bundles: the dev cache is served to the tailnet under {BUNDLE_SERVE_PATH}", flush=True)
             name = ((json.loads(_tailscale("status", "--json")).get("Self") or {}).get("DNSName") or "").rstrip(".")
             if not name:

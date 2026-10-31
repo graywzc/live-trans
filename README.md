@@ -171,16 +171,18 @@ video is kept, with `tailscale serve`, and the Mac app shows the address
 (copy it from the kept video's menu into the phone app's Settings). That
 makes `https://<host>.<your tailnet>.ts.net/livetrans/index.json` the list
 of videos kept, reachable from your own devices only; no `index.json` means
-none. For the server to set that up, the user it runs as must be
-Tailscale's operator, once, on the host:
+none. Tailscale lets only root serve a folder (or an operator it can verify
+may run `sudo tailscale`), so the server asks as itself and then through
+`sudo -n`, which never prompts: allow the user it runs as to run tailscale
+with sudo without a password, once, on the host:
 
 ```
-sudo tailscale set --operator=$USER
+echo "$USER ALL=(root) NOPASSWD: /usr/bin/tailscale" | sudo tee /etc/sudoers.d/livetrans-tailscale
 ```
 
 Otherwise the app tells you that the host could not serve the folder, and
-`tailscale serve --bg --set-path /livetrans ~/livetrans/devcache` run by
-hand does the same. Production keeps nothing, as before.
+`sudo tailscale serve --bg --set-path /livetrans ~/livetrans/devcache` run
+by hand does the same. Production keeps nothing, as before.
 
 Then in LiveTrans, open Settings (⌘,) and set **SSH host** to whatever you type
 after `ssh` to reach that machine. An alias from `~/.ssh/config` is fine.
