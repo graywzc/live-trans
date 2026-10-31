@@ -46,10 +46,15 @@ POST /prefetch/<id>/pause, /prefetch/<id>/resume
                    holds or lets go the transcription (the GPU work); the
                    audio keeps being fetched. A paused job reports "paused".
 POST /prefetch/<id>/bundle
-                   body: {"title": "..."}, optional. Dev mode only: for a
-                   step job from the top of the video whose captions have
-                   reached the end, keeps the video itself beside the audio
-                   in the dev cache, its streams copied as they are, and
+                   body: {"title": "...", "url": "...", "duration": s}, all
+                   optional: the title for the phone's list, and the media
+                   playing on the page now with its length, taken in place
+                   of the job's own (which may be a pre-roll ad's; a media
+                   much shorter than the captions is refused). Dev mode
+                   only: for a step job from the top of the video whose
+                   captions have reached the end, keeps the video itself
+                   beside the audio in the dev cache, its streams copied
+                   as they are, and
                    writes bundle.json with the captions beside it, for the
                    phone app to download (see BundleFetch). -> {"bundle":
                    "running"}, or 409 with why not. The job's status then
@@ -2025,11 +2030,14 @@ class BundleFetch:
         ensure_bundle_serving()
 
 
-def start_bundle(job, title=None):
+def start_bundle(job, title=None, url=None, duration=None):
     """Keeps `job`'s video for the phone (see BundleFetch): the job must be
     a step job from the top of the video whose captions have reached the
-    end. The HTTP status and body to answer with; a fetch already running
-    for the video is left to run."""
+    end. `url` and `duration` are the media the Mac finds playing on the
+    page now, taken in place of the job's own from when it started: a job
+    restored from the cache never fetched its link, which may be a
+    pre-roll ad's. The HTTP status and body to answer with; a fetch
+    already running for the video is left to run."""
     if not job.step or not job.cache:
         return 409, {"error": "only a step job in dev mode keeps its video"}
     if job.caption_error:
@@ -2042,12 +2050,23 @@ def start_bundle(job, title=None):
         lines = list((kept or {}).get("lines") or [])
     if not lines:
         return 409, {"error": "the job has no captions"}
+    # How long the video is, by everything known of it: the captions'
+    # end, the audio kept, the media's own length. A media much shorter
+    # than that is not the video (a pre-roll ad was playing): refused
+    # here; and a copy that comes shorter fails the fetch (see _run).
+    known = [x for x in (job.cache.audio_seconds(), lines[-1].get("end"), job.duration) if x]
+    expected = max(known) if known else None
+    if url and duration and expected and duration < expected * 0.5:
+        return 409, {"error": f"the page is playing something {duration:.0f}s long, not the {expected:.0f}s video: "
+                              "let the video itself play, then keep again"}
+    media_duration = (duration if url else job.duration) or 0
     with _bundle_lock:
         current = _bundle_fetches.get(job.cache.dir)
         if current and current.state == "running":
             return 200, {"bundle": "running"}
         _bundle_fetches[job.cache.dir] = BundleFetch(
-            job.cache.dir, job.url, job.page, job.headers, job.duration, job.step, title, lines
+            job.cache.dir, url or job.url, job.page, job.headers, max(expected or 0, media_duration) or None,
+            job.step, title, lines
         )
     return 200, {"bundle": "running"}
 
@@ -3800,7 +3819,11 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send(400, {"error": f"bad body: {exc}"})
                 return
-            code, payload = start_bundle(job, (request.get("title") or "").strip() or None)
+            duration = request.get("duration")
+            code, payload = start_bundle(
+                job, (request.get("title") or "").strip() or None, (request.get("url") or "").strip() or None,
+                float(duration) if isinstance(duration, (int, float)) and duration > 0 else None,
+            )
             self._send(code, payload)
         elif action == "rehear":
             query = parse_qs(parts.query)

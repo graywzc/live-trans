@@ -319,6 +319,42 @@ def test_the_bundles_are_served_to_the_phone_once_one_is_kept():
     assert "served to the tailnet under /livetrans" in out.getvalue() and TAILNET_HOST not in out.getvalue(), out.getvalue()
 
 
+def test_a_media_much_shorter_than_the_captions_is_not_taken_for_the_video():
+    # The job began while a 2-second pre-roll played: its own link and
+    # length are the ad's, and the audio and captions kept are the 6-second
+    # video's. Cache-restored, the job never fetched that link.
+    fresh_cache()
+    video_url, _ = hls_stream(6)
+    ad_url, _ = hls_stream(2)
+    job = step_job(video_url, "https://example.com/watch/9", 6)
+    job.lines = list(LINES)
+    job.url, job.duration = ad_url, 2.0
+    # Asked with the ad still playing on the page: refused, with why.
+    code, payload = srv.start_bundle(job, TITLE, url=ad_url, duration=2.0)
+    assert code == 409, (code, payload)
+    assert payload["error"].startswith("the page is playing something 2s long, not the 6s video"), payload
+    assert job.status()["bundle"] == "none"
+    # Asked with nothing known of the page (an older Mac): the job's own
+    # link is fetched, and the copy that comes is judged by the captions
+    # and the audio, not by the length the ad gave the job.
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert srv.start_bundle(job, TITLE)[0] == 200
+        assert wait_for_bundle(job).startswith("failed"), srv._bundle_fetches[job.cache.dir].state
+    status = job.status()
+    assert status["bundle"] == "failed: the video came short: 2s of 6s", status
+    assert kept_for_phone(job.cache.dir) == [], kept_for_phone(job.cache.dir)
+    # Asked once the video itself plays: its link is taken over the job's,
+    # and the copy is whole.
+    with contextlib.redirect_stdout(out):
+        assert srv.start_bundle(job, TITLE, url=video_url, duration=6.0)[0] == 200
+        assert wait_for_bundle(job) == "done", srv._bundle_fetches[job.cache.dir].error
+    status = job.status()
+    assert status["bundle"] == "done" and abs(status["bundle_fetched"] - 6) < 0.2, status
+    assert kept_for_phone(job.cache.dir) == ["bundle.json", "video.mp4"]
+    assert "http" not in out.getvalue(), out.getvalue()
+
+
 def test_when_tailscale_refuses_the_server_asks_as_root_or_tells_why_not():
     # tailscaled refuses the user; sudo wants a password: the bundle is
     # kept all the same, tailscale's refusal told in the status and the

@@ -479,8 +479,15 @@ final class DevPipeline {
         let title = video.tabs.first { $0.id == current.tabID }?.title
             ?? video.pinned.flatMap { $0.id == current.tabID ? $0.title : nil }
         Task {
+            // The media playing on the page now goes with the ask, not the
+            // one the job began with: a job restored from the cache never
+            // fetched its link, which may be a pre-roll ad's. The host
+            // judges its length against the captions.
+            let playing = await video.probeMedia().flatMap { $0.page == current.page ? $0 : nil }
             do {
-                _ = try await client.keepForPhone(job: current.id, title: title)
+                _ = try await client.keepForPhone(
+                    job: current.id, title: title, url: playing?.mediaURL, duration: playing?.duration
+                )
                 if job?.id == current.id {
                     job?.bundle = "running"
                     job?.bundleFetched = 0

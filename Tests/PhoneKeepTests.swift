@@ -60,10 +60,21 @@ final class PhoneKeepTests: XCTestCase {
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
         let body = try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: String]
-        XCTAssertEqual(body, ["title": "A made-up episode"])
+        XCTAssertEqual(body, ["title": "A made-up episode"], "nothing playing known: the host uses the job's own media")
         let untitled = ASRClient.keepForPhoneRequest(baseURL: base, job: "abc123", title: nil)
         let bare = try JSONSerialization.jsonObject(with: XCTUnwrap(untitled.httpBody)) as? [String: String]
         XCTAssertEqual(bare, ["title": ""])
+        // The media playing on the page now, with its length, when the
+        // probe found one: the host takes it in place of the job's own.
+        let playing = ASRClient.keepForPhoneRequest(
+            baseURL: base, job: "abc123", title: "A made-up episode",
+            url: "https://cdn.example.com/stream/playlist.m3u8", duration: 1442.02
+        )
+        let full = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(playing.httpBody)) as? [String: Any])
+        XCTAssertEqual(full["title"] as? String, "A made-up episode")
+        XCTAssertEqual(full["url"] as? String, "https://cdn.example.com/stream/playlist.m3u8")
+        XCTAssertEqual(full["duration"] as? Double, 1442.02)
+        XCTAssertEqual(full.count, 3)
     }
 
     func testForgettingThePhonesCopyAsksForTheBundleAlone() {
