@@ -353,19 +353,27 @@ struct ASRClient {
     /// captions, beside the audio in its cache; `title` is for the phone's
     /// list. The host's word on it ("running"); a job it will not keep
     /// (captions not at the end yet, say) is a server error with why.
-    func keepForPhone(job: String, title: String?) async throws -> String {
-        let request = Self.keepForPhoneRequest(baseURL: baseURL, job: job, title: title)
+    /// Has the host keep the job's video for the phone, with `title` for
+    /// the phone's list and, when known, the media playing on the page
+    /// now and its length, which the host takes in place of the job's own.
+    func keepForPhone(job: String, title: String?, url: String? = nil, duration: Double? = nil) async throws -> String {
+        let request = Self.keepForPhoneRequest(baseURL: baseURL, job: job, title: title, url: url, duration: duration)
         let (data, response) = try await session.data(for: request)
         struct Payload: Decodable { var bundle: String }
         return try Self.decode(Payload.self, from: data, statusCode: response).bundle
     }
 
-    static func keepForPhoneRequest(baseURL: URL, job: String, title: String?) -> URLRequest {
+    static func keepForPhoneRequest(baseURL: URL, job: String, title: String?, url: String? = nil, duration: Double? = nil)
+        -> URLRequest
+    {
         var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/bundle"))
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["title": title ?? ""])
+        var body: [String: Any] = ["title": title ?? ""]
+        if let url { body["url"] = url }
+        if let duration { body["duration"] = duration }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return request
     }
 
