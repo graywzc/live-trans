@@ -50,11 +50,9 @@ struct RubySelectionMap {
                   frames[index].map { $0.minX <= point.x && point.x <= $0.maxX } ?? false
               })
         else { return nil }
-        var first = hit
-        while first > 0, tokens[first].continuesWord { first -= 1 }
-        var last = hit
-        while last + 1 < tokens.count, tokens[last + 1].continuesWord { last += 1 }
-        return starts[first]..<starts[last] + tokens[last].base.count
+        let word = RubyWords.word(at: hit, in: tokens)
+        let last = word.upperBound - 1
+        return starts[word.lowerBound]..<starts[last] + tokens[last].base.count
     }
 
     /// One rectangle for each line the range touches.
