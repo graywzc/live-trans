@@ -3804,6 +3804,9 @@ class PrefetchJob:
             # How many texts the other recognizers have given so far.
             "others": sum(len(texts) for texts in list(self.others.values())),
             "cached": self.cached,
+            # The video's folder in the dev cache, what its picks are kept
+            # under (see phone_service.py).
+            "video": os.path.basename(self.cache.dir) if self.cache else None,
             # Whether the audio is still coming: a dev job's is kept for the
             # next step only once its fetch has ended unstopped.
             "fetching": not self.fetch_done,

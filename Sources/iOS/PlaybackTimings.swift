@@ -6,7 +6,7 @@ import UIKit
 /// tap took to play, frames the screen missed, and where the sound goes.
 /// Numbers only, nothing of what is being watched.
 struct PlaybackTimings {
-    /// One period's numbers, as the host's phone_timings.py takes them.
+    /// One period's numbers, as the host's phone_service.py takes them.
     struct Report: Encodable, Equatable {
         var build = AppVersion.current
         var seconds = 0.0

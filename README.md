@@ -184,6 +184,22 @@ Otherwise the app tells you that the host could not serve the folder, and
 `sudo tailscale serve --bg --set-path /livetrans ~/livetrans/devcache` run
 by hand does the same. Production keeps nothing, as before.
 
+The iPhone plays with the Mac app and the GPU server off, so what it sends the
+host goes to a small service of its own, `server/phone_service.py`, on port
+8773 of the tailnet address and always running: the picks of the versions (see
+[Default and Incognito](#default-and-incognito)), and the playback timings.
+Copy it to `~/livetrans/` and run it as a user service:
+
+```
+[Service]
+ExecStart=/usr/bin/python3 %h/livetrans/phone_service.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+```
+
 Then in LiveTrans, open Settings (⌘,) and set **SSH host** to whatever you type
 after `ssh` to reach that machine. An alias from `~/.ssh/config` is fine.
 `ssh <host> true` must succeed without prompting.
@@ -365,6 +381,13 @@ In Default the menu at the bottom left lists the Chrome tabs with a video and
 the videos the host has processed. The button reads **Load** for one of those,
 which opens a video not in a tab in Chrome and shows its captions from what
 the host kept, and **Start** for any other. Incognito lists the tabs alone.
+
+In Default, a caption shows what each recognizer heard, one above the other,
+with k2's Chinese under them. A click on a name, on the Mac or the iPhone,
+keeps that version: the others hide and its Chinese shows. A click on the name
+again brings them back. The picks are kept on the GPU host, with the video, by
+`server/phone_service.py`, and either app can change them. A pick made on the
+iPhone with the host out of reach goes there when the host is next reached.
 
 At the top of the tab, how the Mac and the GPU host stand: whether the Mac
 is listening and how many utterances are waiting for their captions, which

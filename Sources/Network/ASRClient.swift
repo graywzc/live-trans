@@ -57,6 +57,8 @@ struct PrefetchStatus: Decodable, Equatable {
     var others: Int?
     /// What the host holds of a dev job's video for the phone: "none",
     /// "running", "done" or "failed: <why>", and seconds of it so far.
+    /// The video's folder on the host, what its picks are kept under.
+    var video: String?
     var bundle: String?
     var bundleFetched: Double?
     /// Where the phone fetches the host's bundles, the dev cache served on
@@ -66,7 +68,7 @@ struct PrefetchStatus: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case state, error, duration, start, fetched, ready, count, lines, step, analysed, worded, aligned, speakers
-        case cached, fetching, captions, others, bundle
+        case cached, fetching, captions, others, video, bundle
         case bundleFetched = "bundle_fetched"
         case bundleURL = "bundle_url"
         case bundleServeError = "bundle_serve_error"
@@ -80,10 +82,19 @@ struct OtherHearing: Decodable, Equatable {
     var end: Double
     var nemo: String?
     var qwen: String?
+    /// Each one's translation, once it is in.
+    var nemoEnglish: String?
+    var qwenEnglish: String?
+
+    enum CodingKeys: String, CodingKey {
+        case start, end, nemo, qwen
+        case nemoEnglish = "nemo_en"
+        case qwenEnglish = "qwen_en"
+    }
 
     /// The recognizers, in the order shown, with the names they are shown by.
-    static let shown: [(label: String, text: KeyPath<OtherHearing, String?>)] = [
-        ("nemo", \.nemo), ("qwen", \.qwen),
+    static let shown: [(label: String, text: KeyPath<OtherHearing, String?>, english: KeyPath<OtherHearing, String?>)] = [
+        ("nemo", \.nemo, \.nemoEnglish), ("qwen", \.qwen, \.qwenEnglish),
     ]
 }
 

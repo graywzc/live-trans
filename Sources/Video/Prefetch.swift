@@ -86,7 +86,7 @@ final class Prefetcher {
             let ruby = otherRuby[other.text] ?? Furigana.annotate(other.text)
             otherRuby[other.text] = ruby
             return (other.label, Caption(
-                id: DevPipeline.otherID(of: caption.id, index), japanese: other.text, ruby: ruby, english: "",
+                id: DevPipeline.otherID(of: caption.id, index), japanese: other.text, ruby: ruby, english: other.english,
                 moment: caption.moment
             ))
         }

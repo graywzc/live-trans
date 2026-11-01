@@ -108,6 +108,11 @@ final class DevPipeline {
     private(set) var others: [OtherHearing] = []
     /// Their texts with readings, by text, made once each.
     @ObservationIgnored private var otherRuby: [String: [RubyToken]] = [:]
+    /// The recognizer picked per caption of this video, by where it starts,
+    /// and what keeps them with the host; none in the Mac's memory after
+    /// the video.
+    private(set) var picks: [Int: String] = [:]
+    @ObservationIgnored private var pickBook: PickBook?
     /// Off at launch, until Start or Load.
     private(set) var isPaused = true
     /// The videos the host keeps captions of, as it last listed them.
@@ -233,6 +238,7 @@ final class DevPipeline {
             words = []
             speakers = []
             others = []
+            forgetPicks()
             selection = nil
             ActivityLog.tell("Forgot this video's cache: making all of it again")
             isPaused = false
@@ -384,6 +390,7 @@ final class DevPipeline {
             words = []
             speakers = []
             others = []
+            forgetPicks()
             selection = nil
             return
         }
@@ -405,6 +412,9 @@ final class DevPipeline {
                 engine.add(status.lines, tabID: current.tabID, url: current.page)
             }
             updated.seenLines = status.count
+            if let video = status.video, pickBook?.video != video {
+                openPicks(of: video)
+            }
             if let captions = status.captions, captions != updated.captions {
                 updated.captions = captions
                 if captions == "done" {
@@ -597,6 +607,7 @@ final class DevPipeline {
             words = []
             speakers = []
             others = []
+            forgetPicks()
             selection = nil
             cursor = nil
             cursorArmed = false
@@ -635,7 +646,8 @@ final class DevPipeline {
             let ruby = otherRuby[other.text] ?? Furigana.annotate(other.text)
             otherRuby[other.text] = ruby
             let sentence = Caption(
-                id: Self.otherID(of: caption.id, index), japanese: other.text, ruby: ruby, english: "", moment: caption.moment
+                id: Self.otherID(of: caption.id, index), japanese: other.text, ruby: ruby, english: other.english,
+                moment: caption.moment
             )
             return (other.label, sentence)
         }
@@ -647,13 +659,49 @@ final class DevPipeline {
         -(id * (OtherHearing.shown.count + 1) + index + 1)
     }
 
+    // MARK: Picks
+
+    /// The recognizer picked for `caption`.
+    func pickedVersion(for caption: Caption) -> String? {
+        caption.moment.flatMap { picks[PickClient.place(of: $0.seconds)] }
+    }
+
+    /// `name`'s text is the caption's from now on; nil takes the pick back,
+    /// and all of them show again.
+    func pick(_ name: String?, for caption: Caption) {
+        guard let moment = caption.moment else { return }
+        pickBook?.pick(name, at: PickClient.place(of: moment.seconds))
+    }
+
+    /// What the host holds now: back at the app, a pick may have been made
+    /// on the phone.
+    func refreshPicks() {
+        guard let pickBook else { return }
+        Task { await pickBook.refresh() }
+    }
+
+    private func openPicks(of video: String) {
+        let book = PickBook(video: video, client: PickClient.over(host: engine.client?.baseURL, video: video))
+        book.onChange = { [weak self] in self?.picks = $0 }
+        pickBook = book
+        picks = [:]
+        Task { await book.refresh() }
+    }
+
+    private func forgetPicks() {
+        pickBook = nil
+        picks = [:]
+    }
+
     /// The one of `others` heard over `caption`'s own stretch (the host
     /// tells each by the caption's times), as `others(for:)` gives it.
-    nonisolated static func heard(_ others: [OtherHearing], over caption: Caption) -> [(label: String, text: String)] {
+    nonisolated static func heard(_ others: [OtherHearing], over caption: Caption) -> [(label: String, text: String, english: String)] {
         guard let moment = caption.moment, let end = moment.end,
               let heard = others.first(where: { abs($0.start - moment.seconds) < 0.01 && abs($0.end - end) < 0.01 })
         else { return [] }
-        return OtherHearing.shown.compactMap { shown in heard[keyPath: shown.text].map { (shown.label, $0) } }
+        return OtherHearing.shown.compactMap { shown in
+            heard[keyPath: shown.text].map { (shown.label, $0, heard[keyPath: shown.english] ?? "") }
+        }
     }
 
     /// Each official line given to the caption it overlaps most in time,
