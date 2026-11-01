@@ -40,8 +40,12 @@ struct CaptionScroll: View {
     var onWord: ((WordAction, String, Caption) -> Void)? = nil
 
     @State private var follow = FollowState()
+    @Environment(\.scenePhase) private var scenePhase
 
     private static let spacing: CGFloat = 18
+    /// Further than this the list jumps: gliding there would lay out every
+    /// row on the way, and freeze the screen after a while away.
+    private static let glideRows = 4
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -59,6 +63,7 @@ struct CaptionScroll: View {
                             onAnalyze: onAnalyze.map { analyze in { analyze(caption) } },
                             onWord: onWord.map { act in { action, word in act(action, word, caption) } }
                         )
+                        .equatable()
                         .id(caption.id)
                         .overlay(alignment: .bottom) {
                             if let lull, lull.isAfter, lull.captionID == caption.id {
@@ -79,16 +84,22 @@ struct CaptionScroll: View {
                 if !follow.isFollowing, playingID != nil {
                     ReturnPill {
                         follow.returned()
-                        show(playingID, in: proxy)
+                        if let playingID { proxy.scrollTo(playingID, anchor: .center) }
                     }
                     .padding(.bottom, 12)
                     .transition(.opacity)
                 }
             }
             .animation(.easeOut(duration: 0.15), value: follow.isFollowing)
-            .onChange(of: playingID) {
-                guard follow.shouldShow(playingID) else { return }
-                show(playingID, in: proxy)
+            .onChange(of: playingID) { old, new in
+                // Put away, the list is seen to when it comes back.
+                guard scenePhase == .active, follow.shouldShow(new), let new else { return }
+                show(new, from: old, in: proxy)
+            }
+            .onChange(of: scenePhase) {
+                if scenePhase == .active, follow.shouldShow(playingID), let playingID {
+                    proxy.scrollTo(playingID, anchor: .center)
+                }
             }
             .onAppear {
                 if let playingID { proxy.scrollTo(playingID, anchor: .center) }
@@ -96,8 +107,11 @@ struct CaptionScroll: View {
         }
     }
 
-    private func show(_ id: Int?, in proxy: ScrollViewProxy) {
-        guard let id else { return }
+    private func show(_ id: Int, from old: Int?, in proxy: ScrollViewProxy) {
+        guard let old, abs(id - old) <= Self.glideRows else {
+            proxy.scrollTo(id, anchor: .center)
+            return
+        }
         withAnimation(.easeOut(duration: 0.25)) {
             proxy.scrollTo(id, anchor: .center)
         }

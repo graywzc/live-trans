@@ -3,11 +3,12 @@ import SwiftUI
 
 /// The video on top with its own controls, its captions below kept on
 /// the sentence being spoken; a tap on a caption plays the sentence
-/// again and stops at its end, Continue in the top bar goes on from
-/// there, the button at a caption's end explains it in a sheet, a long
-/// press on a word offers jisho.org, Apple's dictionary, the LLM's entry
-/// and the clipboard. Where the video was left is kept for the next
-/// opening.
+/// again and stops at its end, the top bar's button pauses the video or
+/// goes on from where it stopped, the button at a caption's end explains
+/// it in a sheet, a long press on a word offers jisho.org, Apple's
+/// dictionary, the LLM's entry and the clipboard. Where the video was
+/// left is kept for the next opening, and until the screen is ready it
+/// says how far it has got.
 struct PlayerView: View {
     let bundle: VideoBundle
 
@@ -15,8 +16,10 @@ struct PlayerView: View {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 20.0
+    @AppStorage(AppSettings.bundleHost) private var hostText = ""
     @State private var model: PlaybackModel?
     @State private var sheet = AnalysisSheetModel()
+    @State private var preparedLines = 0
 
     var body: some View {
         Group {
@@ -26,18 +29,24 @@ struct PlayerView: View {
                     onWord: word
                 )
             } else {
-                Color.clear
+                OpeningProgress(done: preparedLines, total: bundle.lines.count)
             }
         }
         .navigationTitle(bundle.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
-        .onAppear {
-            if model == nil {
-                model = PlaybackModel(bundle: bundle, video: store.videoURL(for: bundle.id))
-            }
+        .task {
+            guard model == nil else { return }
+            let captions = await PlaybackModel.captions(of: bundle) { preparedLines = $0 }
+            // Gone back meanwhile: nothing to play.
+            guard !Task.isCancelled else { return }
+            model = PlaybackModel(
+                bundle: bundle, video: store.videoURL(for: bundle.id), captions: captions,
+                timingsURL: PlaybackTimings.endpoint(host: AppSettings.hostURL(hostText))
+            )
             model?.start()
         }
+        .onAppear { model?.start() }
         .onDisappear {
             model?.stop()
             sheet.end()
@@ -82,6 +91,11 @@ struct PlayerScreen: View {
             VideoPlayer(player: model.player)
                 .aspectRatio(16 / 9, contentMode: .fit)
                 .background(Color.black)
+                .overlay {
+                    if model.video != .ready {
+                        VideoLoading(state: model.video)
+                    }
+                }
             CaptionScroll(
                 captions: model.captions, playingID: model.playingID, lull: model.lull,
                 fontSize: fontSize, showFurigana: showFurigana, onTap: model.replay, onAnalyze: onAnalyze,
@@ -90,9 +104,54 @@ struct PlayerScreen: View {
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Continue", systemImage: "play.fill", action: model.continuePlaying)
-                    .labelStyle(.titleAndIcon)
-                    .disabled(!model.canContinue)
+                if model.isPlaying {
+                    Button("Pause", systemImage: "pause.fill", action: model.pause)
+                        .labelStyle(.titleAndIcon)
+                } else {
+                    Button("Continue", systemImage: "play.fill", action: model.continuePlaying)
+                        .labelStyle(.titleAndIcon)
+                }
+            }
+        }
+    }
+}
+
+/// What the screen shows while the captions are being made.
+struct OpeningProgress: View {
+    let done: Int
+    let total: Int
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ProgressView(value: Double(done), total: Double(max(total, 1)))
+            Text("Preparing captions \(done) of \(total)")
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 48)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Over the video's place, until it is there.
+private struct VideoLoading: View {
+    let state: VideoState
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if state == .failed {
+                Label("The video can't be played", systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .tint(.white)
+                    Text("Loading video")
+                        .font(.footnote)
+                        .foregroundStyle(.white)
+                }
             }
         }
     }

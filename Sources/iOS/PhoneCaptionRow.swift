@@ -40,7 +40,7 @@ struct RubyText: View {
             let range = RubyWords.word(at: index, in: tokens)
             let word = RubyWords.text(of: range, in: tokens)
             stack.contextMenu {
-                WordMenuItems(word: word, hasDefinition: WordMenuItems.dictionaryKnows(word)) { onWord($0, word) }
+                WordMenuItems(word: word) { onWord($0, word) }
             } preview: {
                 WordPreview(tokens: Array(tokens[range]), fontSize: fontSize)
             }
@@ -55,7 +55,7 @@ struct RubyText: View {
 /// spoken. A tap plays the sentence again; the button at its end, when
 /// there is one, asks for its analysis; a long press on a word, when
 /// there is `onWord`, offers the word menu.
-struct PhoneCaptionRow: View {
+struct PhoneCaptionRow: View, Equatable {
     let caption: Caption
     let fontSize: Double
     let showFurigana: Bool
@@ -63,6 +63,14 @@ struct PhoneCaptionRow: View {
     let onTap: () -> Void
     var onAnalyze: (() -> Void)? = nil
     var onWord: ((WordAction, String) -> Void)? = nil
+
+    /// What can change what the row draws: a caption never changes, nor
+    /// does what the closures do with it. With `.equatable()` in the list
+    /// the lit caption moving on redraws its two rows, not the screenful.
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.caption.id == b.caption.id && a.fontSize == b.fontSize && a.showFurigana == b.showFurigana
+            && a.isCurrent == b.isCurrent
+    }
 
     /// The highlight reaches a little past the text, without moving it.
     static let highlightInset: CGFloat = 6

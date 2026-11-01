@@ -74,12 +74,77 @@ final class PlayerTests: XCTestCase {
     func testContinueGoesOnPastTheSentenceEnd() {
         let model = model()
         XCTAssertFalse(model.stopsAtSentenceEnd)
-        XCTAssertTrue(model.canContinue, "stopped, it can go on")
         model.replay(PlaybackModel.captions(of: bundle)[1])
         XCTAssertTrue(model.stopsAtSentenceEnd)
-        XCTAssertTrue(model.canContinue, "on its way to the stop, it can run on")
         model.continuePlaying()
         XCTAssertFalse(model.stopsAtSentenceEnd, "the stop is gone")
+    }
+
+    func testCaptionsMadeAwayFromTheScreenCountEveryLine() async {
+        var counted: [Int] = []
+        let captions = await PlaybackModel.captions(of: bundle) { counted.append($0) }
+        XCTAssertEqual(captions, PlaybackModel.captions(of: bundle))
+        XCTAssertEqual(counted, [1, 2])
+    }
+
+    func testAVideoThatCannotOpenSaysSo() async throws {
+        let missing = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "\(UUID().uuidString).mp4")
+        let model = PlaybackModel(bundle: bundle, video: missing, defaults: defaults)
+        XCTAssertEqual(model.video, .loading)
+        model.start()
+        defer { model.stop() }
+        for _ in 0..<100 where model.video == .loading {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(model.video, .failed)
+    }
+
+    func testTheVersionIsTheBuildsCommitWhenStamped() {
+        XCTAssertEqual(AppVersion.text(build: "v0.1.82-2-gabc1234\n", marketing: "0.1.0"), "v0.1.82-2-gabc1234")
+        XCTAssertEqual(AppVersion.text(build: nil, marketing: "0.1.0"), "0.1.0")
+        XCTAssertEqual(AppVersion.text(build: nil, marketing: nil), "unknown")
+    }
+
+    func testTheTimingsSumUpAPeriodAndStartAnother() {
+        var timings = PlaybackTimings()
+        XCTAssertTrue(timings.isEmpty)
+        timings.frame(ms: 16)
+        timings.frame(ms: 16)
+        timings.frame(ms: 120)
+        timings.highlight(lateMs: 30)
+        timings.highlight(lateMs: 90)
+        timings.highlight(lateMs: -5)
+        timings.tap(ms: 150)
+        let report = timings.report(seconds: 30)
+        XCTAssertEqual(report.frames, 3)
+        XCTAssertEqual(report.hitches, 1)
+        XCTAssertEqual(report.worstFrameMs, 120)
+        XCTAssertEqual(report.highlights, 3)
+        XCTAssertEqual(report.highlightLateMedianMs, 30)
+        XCTAssertEqual(report.highlightLateMaxMs, 90)
+        XCTAssertEqual(report.taps, 1)
+        XCTAssertEqual(report.tapMaxMs, 150)
+        XCTAssertTrue(timings.isEmpty)
+    }
+
+    func testTimingsGoToTheBundlesMachine() {
+        XCTAssertEqual(
+            PlaybackTimings.endpoint(host: URL(string: "https://gpu.example.ts.net/livetrans"))?.absoluteString,
+            "http://gpu.example.ts.net:8773/timings"
+        )
+        XCTAssertNil(PlaybackTimings.endpoint(host: nil))
+        XCTAssertNil(PlaybackTimings.endpoint(host: URL(string: "file:///tmp/bundles")))
+    }
+
+    func testTheReportHasTheFieldsTheHostTakes() throws {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try JSONSerialization.jsonObject(with: encoder.encode(PlaybackTimings.Report())) as? [String: Any]
+        XCTAssertEqual(Set(json?.keys ?? [:].keys), [
+            "build", "seconds", "frames", "hitches", "worst_frame_ms", "highlights", "highlight_late_median_ms",
+            "highlight_late_max_ms", "taps", "tap_median_ms", "tap_max_ms", "route", "audio_latency_ms",
+            "low_power", "thermal",
+        ])
     }
 
     func testWhereTheVideoWasLeftIsKeptForNextTimeButNotNearTheEnds() {
@@ -97,6 +162,26 @@ final class PlayerTests: XCTestCase {
         model.observe(seconds: 42)
         model.remember()
         XCTAssertEqual(PlaybackModel.restoredPosition(for: bundle, in: defaults), 42)
+    }
+
+    func testARowRedrawsOnlyForWhatItDraws() {
+        let caption = PlaybackModel.captions(of: bundle)[0]
+        func row(fontSize: Double = 20, isCurrent: Bool = false) -> PhoneCaptionRow {
+            PhoneCaptionRow(caption: caption, fontSize: fontSize, showFurigana: true, isCurrent: isCurrent, onTap: {})
+        }
+        XCTAssertEqual(row(), row(), "a new closure is not a change")
+        XCTAssertNotEqual(row(), row(isCurrent: true))
+        XCTAssertNotEqual(row(), row(fontSize: 24))
+    }
+
+    func testThePlaceIsKeptWhilePlayingInCaseTheAppIsClosed() {
+        let model = model()
+        model.observe(seconds: 30)
+        XCTAssertEqual(PlaybackModel.restoredPosition(for: bundle, in: defaults), 30)
+        model.observe(seconds: 33)
+        XCTAssertEqual(PlaybackModel.restoredPosition(for: bundle, in: defaults), 30, "not at every step")
+        model.observe(seconds: 36)
+        XCTAssertEqual(PlaybackModel.restoredPosition(for: bundle, in: defaults), 36)
     }
 
     func testTheListFollowsUntilAFingerMovesIt() {
