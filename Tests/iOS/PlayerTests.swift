@@ -184,6 +184,15 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(PlaybackModel.restoredPosition(for: bundle, in: defaults), 36)
     }
 
+    func testTheVideoIsReopenedOnlyWhenTheAppStarts() {
+        var reopen = ReopenOnce()
+        XCTAssertEqual(reopen.take("video"), "video", "started again where it was closed")
+        XCTAssertNil(reopen.take("video"), "the list again, after Back: it stays the list")
+        var nothingOpen = ReopenOnce()
+        XCTAssertNil(nothingOpen.take(""))
+        XCTAssertNil(nothingOpen.take("video"), "chosen since the app started")
+    }
+
     func testTheListFollowsUntilAFingerMovesIt() {
         var follow = FollowState()
         XCTAssertTrue(follow.shouldShow(3))
