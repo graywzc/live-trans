@@ -347,27 +347,10 @@ the bar and the time under it floats above, so a press lands where you
 meant it to. The bar is there
 whenever LiveTrans knows of a video in Chrome, captioning ahead or not. On
 it are the stretches captioned ahead (green, yellow while paused) and the
-audio fetched for the next (grey). Encrypted streams (most subscription services) cannot be fetched and
-stay on live captioning, as does any page the host cannot resolve. The live
-listener stands down over the stretch that has been fetched and picks up
-again past it. **Offer captioning a Chrome video ahead from its own audio**
-in Settings hides the button altogether. For YouTube the host needs a JavaScript runtime for
+audio fetched for the next (grey). Encrypted streams (most subscription services) cannot be fetched, nor can a page
+the host cannot resolve, and either mode says so under the captions. For YouTube the host needs a JavaScript runtime for
 yt-dlp (`deno`), and without a YouTube token the fetch runs at playback pace,
 so captions catch up rather than run ahead until you pause or go back.
-
-Anything heard from a stretch of the video that already has captions, whether
-a replayed sentence, the video played on from there with Space, or a skip
-back, is transcribed again taking its time over it (a wider search, with the
-captions before it as context) and corrects those captions rather than
-repeating them. So when a line looks wrong, click it: it is heard once more,
-and corrected if the model does better the second time. A caption that ran two sentences
-together is split where the speaker paused between them when it is heard
-again from the fetched audio, each part with its own time and translation. Something heard that
-is not the sentence again (only the context, or a line with nothing of the
-original in it, as the model produces over music or silence) leaves the
-caption as it was. Sentence times come from where Whisper heard the words,
-so this needs a current `asr_server.py` on the GPU host; an older one still
-works, with the sentences placed by their share of the text instead.
 
 ### Default and Incognito
 

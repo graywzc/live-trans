@@ -375,6 +375,12 @@ struct MediaProbe: Equatable {
     var isFetchable: Bool {
         !encrypted && (mediaURL != nil || page.hasPrefix("http"))
     }
+
+    /// Why the host cannot fetch it, for the viewer.
+    var problem: String? {
+        if encrypted { return "This video is under DRM: the host can't fetch it." }
+        return isFetchable ? nil : "The host can't fetch this video: the page gives no way to its audio."
+    }
 }
 
 /// The AppleScript side, kept free of UI so it can be tested.
