@@ -178,9 +178,9 @@ final class ActivityViewTests: XCTestCase {
             TestScreen.wait { Optional(controls(view).compactMap { $0 as? NSSegmentedControl }).flatMap { $0.count == 2 ? $0 : nil } },
             "no mode switch and panel tabs"
         )
-        // The header's Production | Dev, on Dev; the panel's Jisho | Analysis.
+        // The header's Default | Incognito, on Default; the panel's Jisho | Analysis.
         XCTAssertEqual(pickers.map(\.segmentCount), [2, 2])
-        XCTAssertEqual(pickers.map(\.selectedSegment), [1, 0])
+        XCTAssertEqual(pickers.map(\.selectedSegment), [0, 0])
 
         snapshot(view, "dev-activity")
     }

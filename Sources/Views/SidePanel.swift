@@ -20,14 +20,14 @@ final class SidePanel {
 
     /// Dev mode: one step of the pipeline run on its own over the whole
     /// video, its captions, its timeline under the captions and the list of
-    /// what goes on behind it. Off, the app is in production, making
-    /// captions and keeping no account of how. Set by the header's
-    /// Production | Dev switch; Jisho and the analysis work the same in
-    /// both.
+    /// what goes on behind it. Shown as Default, what the app opens in.
+    /// Off, the app is in production, shown as Incognito: making captions
+    /// and leaving no trace of them. Set by the header's Default | Incognito
+    /// switch; Jisho and the analysis work the same in both.
     var isDev = false {
         didSet {
             guard isDev != oldValue else { return }
-            store?.set(isDev, forKey: AppSettings.devMode)
+            store?.set(!isDev, forKey: AppSettings.incognitoMode)
             onDevChange(isDev)
         }
     }
@@ -36,10 +36,10 @@ final class SidePanel {
     /// Where the mode is kept across launches, once `restoreMode` has run.
     @ObservationIgnored private var store: UserDefaults?
 
-    /// Opens in the mode the app was last in, and keeps each change of it
-    /// in `defaults` for the next launch.
+    /// Opens in the mode the app was last in, Default the first time, and
+    /// keeps each change of it in `defaults` for the next launch.
     func restoreMode(from defaults: UserDefaults = .standard) {
-        isDev = defaults.bool(forKey: AppSettings.devMode)
+        isDev = !defaults.bool(forKey: AppSettings.incognitoMode)
         store = defaults
     }
 
