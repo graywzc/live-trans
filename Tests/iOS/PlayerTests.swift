@@ -226,6 +226,71 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(try versionsModel().picks, [:])
     }
 
+    /// The host's record, as phone_service.py keeps it.
+    @MainActor
+    private final class FakeHost {
+        var record: [Int: String] = [:]
+        var reachable = true
+
+        var client: PickClient {
+            PickClient { [self] in reachable ? record : nil } send: { [self] place, pick in
+                guard reachable else { return false }
+                record[place] = pick
+                return true
+            }
+        }
+    }
+
+    func testAPickGoesToTheHostAndThePickOfTheOtherAppComesBack() async {
+        let host = FakeHost()
+        host.record = [12340: "nemo"]
+        let book = PickBook(video: "v", client: host.client, defaults: defaults)
+        XCTAssertEqual(book.picks, [:], "nothing read yet")
+        await book.refresh()
+        XCTAssertEqual(book.picks, [12340: "nemo"])
+
+        book.pick("qwen", at: 56780)
+        XCTAssertEqual(book.picks[56780], "qwen", "shown at once")
+        await book.refresh()
+        XCTAssertEqual(host.record, [12340: "nemo", 56780: "qwen"])
+
+        host.record[12340] = nil
+        await book.refresh()
+        XCTAssertEqual(book.picks, [56780: "qwen"], "the host's record wins: unpicked on the other app")
+    }
+
+    func testAPickMadeAwayFromTheHostWaitsAndIsSentLater() async {
+        let host = FakeHost()
+        host.record = [1000: "nemo"]
+        host.reachable = false
+        var book = PickBook(video: "v", client: host.client, defaults: defaults)
+        book.pick(nil, at: 1000)
+        book.pick("k2", at: 2000)
+        await book.refresh()
+        XCTAssertEqual(book.picks, [2000: "k2"])
+        XCTAssertEqual(host.record, [1000: "nemo"])
+
+        // Closed at the gym and opened at home.
+        book = PickBook(video: "v", client: host.client, defaults: defaults)
+        XCTAssertEqual(book.picks, [2000: "k2"], "kept on the phone")
+        host.reachable = true
+        await book.refresh()
+        XCTAssertEqual(host.record, [2000: "k2"])
+        XCTAssertEqual(book.picks, [2000: "k2"])
+    }
+
+    func testAModelsPicksFollowTheHostsByWhereTheCaptionsStart() async throws {
+        let host = FakeHost()
+        let bundle = try VideoBundle.decode(Data(Fixtures.versionsBundle.utf8))
+        let model = PlaybackModel(bundle: bundle, video: nil, pickClient: host.client, defaults: defaults)
+        let caption = model.captions[1]
+        let place = PickClient.place(of: try XCTUnwrap(caption.moment).seconds)
+        host.record = [place: "nemo"]
+        model.refreshPicks()
+        for _ in 0..<50 where model.picks.isEmpty { await Task.yield() }
+        XCTAssertEqual(model.picks, [1: "nemo"])
+    }
+
     func testTheVideoIsReopenedOnlyWhenTheAppStarts() {
         var reopen = ReopenOnce()
         XCTAssertEqual(reopen.take("video"), "video", "started again where it was closed")

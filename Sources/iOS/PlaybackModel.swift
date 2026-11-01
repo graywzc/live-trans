@@ -47,6 +47,7 @@ final class PlaybackModel {
     @ObservationIgnored private var rateObservation: NSKeyValueObservation?
     @ObservationIgnored private var videoObservation: NSKeyValueObservation?
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let pickBook: PickBook
     @ObservationIgnored private var statusObservation: NSKeyValueObservation?
     @ObservationIgnored private var timings = PlaybackTimings()
     @ObservationIgnored private let timingsURL: URL?
@@ -60,7 +61,7 @@ final class PlaybackModel {
     /// while, and the screen says how far it has got (see `captions(of:onLine:)`).
     init(
         bundle: VideoBundle, video: URL?, captions: [Caption]? = nil, timingsURL: URL? = nil,
-        defaults: UserDefaults = .standard
+        pickClient: PickClient? = nil, defaults: UserDefaults = .standard
     ) {
         self.bundle = bundle
         self.defaults = defaults
@@ -68,7 +69,12 @@ final class PlaybackModel {
         self.captions = captions ?? Self.captions(of: bundle)
         player = AVPlayer(playerItem: video.map { AVPlayerItem(url: $0) })
         player.actionAtItemEnd = .pause
-        picks = Self.loadPicks(of: self.captions, for: bundle.id, in: defaults)
+        pickBook = PickBook(video: bundle.id, client: pickClient, defaults: defaults)
+        picks = Self.picks(pickBook.picks, on: self.captions)
+        pickBook.onChange = { [weak self] picks in
+            guard let self else { return }
+            self.picks = Self.picks(picks, on: self.captions)
+        }
     }
 
     /// The bundle's lines as captions: one id per line, in order, readings
@@ -137,6 +143,7 @@ final class PlaybackModel {
             Task { @MainActor in if playing { self?.tapLanded() } }
         }
         startTimings()
+        refreshPicks()
         if let kept = Self.restoredPosition(for: bundle, in: defaults) {
             seek(to: kept)
         }
@@ -289,38 +296,29 @@ final class PlaybackModel {
     /// `name`'s text is the caption's from now on; nil takes the pick back,
     /// and all of them show again.
     func pick(_ name: String?, for caption: Caption) {
-        picks[caption.id] = name
-        guard let id = caption.moment?.url else { return }
-        Self.savePicks(picks, of: captions, for: id, in: defaults)
+        guard let moment = caption.moment else { return }
+        pickBook.pick(name, at: PickClient.place(of: moment.seconds))
     }
 
-    /// Kept per bundle by when each caption starts, a place that holds
-    /// however the bundle's lines are numbered. Gone with the bundle.
-    static func picksKey(for id: String) -> String { "picks.\(id)" }
-
-    private static func place(of caption: Caption) -> String? {
-        caption.moment.map { String($0.seconds) }
+    /// Sends the picks made away from the host and reads the ones made on
+    /// the Mac: on opening, and on coming back to the app.
+    func refreshPicks() {
+        Task { await pickBook.refresh() }
     }
 
-    private static func savePicks(_ picks: [Int: String], of captions: [Caption], for id: String, in defaults: UserDefaults) {
-        var saved: [String: String] = [:]
-        for caption in captions {
-            if let name = picks[caption.id], let place = place(of: caption) { saved[place] = name }
-        }
-        defaults.set(saved, forKey: picksKey(for: id))
-    }
-
-    private static func loadPicks(of captions: [Caption], for id: String, in defaults: UserDefaults) -> [Int: String] {
-        guard let saved = defaults.dictionary(forKey: picksKey(for: id)) as? [String: String] else { return [:] }
+    /// The picks by the captions' ids, from their places in the video.
+    private static func picks(_ places: [Int: String], on captions: [Caption]) -> [Int: String] {
         var picks: [Int: String] = [:]
         for caption in captions {
-            if let place = place(of: caption), let name = saved[place] { picks[caption.id] = name }
+            if let moment = caption.moment, let name = places[PickClient.place(of: moment.seconds)] {
+                picks[caption.id] = name
+            }
         }
         return picks
     }
 
     static func forgetPicks(for id: String, in defaults: UserDefaults = .standard) {
-        defaults.removeObject(forKey: picksKey(for: id))
+        PickBook.forget(id, in: defaults)
     }
 
     // MARK: Where it was left

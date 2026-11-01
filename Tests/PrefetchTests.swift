@@ -157,11 +157,12 @@ final class PrefetchTests: XCTestCase {
         var moment = VideoMoment(tabID: 1, url: "p", seconds: 4.2)
         moment.end = 8
         let caption = Caption(id: 1, japanese: "あ", ruby: [], english: "a", moment: moment)
-        let data = Data(#"{"analysed": 3, "speech": [], "others": [{"start": 0, "end": 4, "nemo": "甲"}, {"start": 4.2, "end": 8, "qwen": "乙", "nemo": "丙"}]}"#.utf8)
+        let data = Data(#"{"analysed": 3, "speech": [], "others": [{"start": 0, "end": 4, "nemo": "甲"}, {"start": 4.2, "end": 8, "qwen": "乙", "nemo": "丙", "nemo_en": "丁"}]}"#.utf8)
         let others = try XCTUnwrap(JSONDecoder().decode(StepFindings.self, from: data).others)
         let heard = DevPipeline.heard(others, over: caption)
         XCTAssertEqual(heard.map(\.label), ["nemo", "qwen"])
         XCTAssertEqual(heard.map(\.text), ["丙", "乙"])
+        XCTAssertEqual(heard.map(\.english), ["丁", ""], "each with its own translation, once in")
         XCTAssertTrue(DevPipeline.heard(Array(others.prefix(1)), over: caption).isEmpty)
         // Analysed as captions of their own: ids no caption has, and none shared.
         let ids = (1...50).flatMap { id in (0..<OtherHearing.shown.count).map { DevPipeline.otherID(of: id, $0) } }

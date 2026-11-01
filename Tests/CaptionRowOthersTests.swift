@@ -11,6 +11,8 @@ final class CaptionRowOthersTests: XCTestCase {
     final class Model {
         var selection: Range<Int>?
         var analyzed: [String] = []
+        var picked: String?
+        var seeks = 0
     }
 
     struct Host: View {
@@ -28,13 +30,15 @@ final class CaptionRowOthersTests: XCTestCase {
                 ),
                 showFurigana: false, fontSize: 20, isAnalyzed: false,
                 selection: $model.selection, onAnalyze: { model.analyzed.append("k2") },
-                onSeek: {},
+                onSeek: { model.seeks += 1 },
                 others: [
                     ("nemo", line(-1, "明日は雨が降るらしい。")),
                     ("qwen", line(-2, "明日、雨が降るらしい。")),
                     ("vv", line(-3, "明日は飴が降るらしい")),
                 ],
-                onAnalyzeOther: { model.analyzed.append($0.japanese) }
+                onAnalyzeOther: { model.analyzed.append($0.japanese) },
+                picked: model.picked,
+                onPick: { model.picked = $0 }
             )
             .padding(16)
             .frame(width: 460, height: 220, alignment: .topLeading)
@@ -67,6 +71,30 @@ final class CaptionRowOthersTests: XCTestCase {
             click(CGPoint(x: 434, y: y))
         }
         XCTAssertEqual(model.analyzed, ["k2", "明日は雨が降るらしい。", "明日、雨が降るらしい。", "明日は飴が降るらしい"])
+    }
+
+    func testANamePicksItsLineAndAgainBringsTheOthersBack() throws {
+        let tracker = try XCTUnwrap(TestScreen.wait { window.contentView.flatMap(Self.find) })
+        tracker.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: 200, y: 60)))
+        pump()
+
+        click(CGPoint(x: 24, y: 56))
+        XCTAssertEqual(model.picked, "nemo")
+        XCTAssertEqual(model.seeks, 0, "picking does not play the sentence")
+        snapshot("row-others-picked")
+        // Alone, it takes the top line.
+        click(CGPoint(x: 434, y: 28))
+        XCTAssertEqual(model.analyzed, ["明日は雨が降るらしい。"])
+
+        click(CGPoint(x: 24, y: 28))
+        XCTAssertNil(model.picked)
+        click(CGPoint(x: 434, y: 28))
+        XCTAssertEqual(model.analyzed.last, "k2")
+
+        click(CGPoint(x: 24, y: 28))
+        XCTAssertEqual(model.picked, "k2")
+        click(CGPoint(x: 24, y: 28))
+        XCTAssertNil(model.picked)
     }
 
     private static func find(in view: NSView) -> HoverTracker.TrackerView? {

@@ -42,7 +42,8 @@ struct PlayerView: View {
             guard !Task.isCancelled else { return }
             model = PlaybackModel(
                 bundle: bundle, video: store.videoURL(for: bundle.id), captions: captions,
-                timingsURL: PlaybackTimings.endpoint(host: AppSettings.hostURL(hostText))
+                timingsURL: PlaybackTimings.endpoint(host: AppSettings.hostURL(hostText)),
+                pickClient: PickClient.over(host: AppSettings.hostURL(hostText), video: bundle.id)
             )
             model?.start()
         }
@@ -65,6 +66,7 @@ struct PlayerView: View {
             // Put away, the app may not come back: where the video is goes
             // on record now.
             if scenePhase != .active { model?.remember() }
+            if scenePhase == .active { model?.refreshPicks() }
         }
     }
 

@@ -124,10 +124,15 @@ struct ContentView: View {
                 official: panel.isDev ? dev.official(for: caption) : nil,
                 others: panel.isDev ? dev.others(for: caption) : prefetch.others(for: caption),
                 isOtherAnalyzed: { panel.isPresented && panel.tab == .analysis && analyzer.hasAnalyzed($0) },
-                onAnalyzeOther: { analyze($0) }
+                onAnalyzeOther: { analyze($0) },
+                picked: panel.isDev ? dev.pickedVersion(for: caption) : nil,
+                onPick: panel.isDev ? { dev.pick($0, for: caption) } : nil
             )
         }
         .selectionActions(onLookUp: lookUp)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            dev.refreshPicks()
+        }
         .overlay {
             if engine.captions.isEmpty, engine.partialText.isEmpty {
                 placeholder
@@ -712,17 +717,26 @@ private struct OtherHearingLine: View {
     /// The side panel has this line's analysis.
     var isAnalyzed = false
     var onAnalyze: () -> Void = {}
+    /// This line is the caption's, the others hidden.
+    var isPicked = false
+    /// A click on the name picks the line, or takes the pick back.
+    var onPick: ((String?) -> Void)?
+    /// Where the sentence is, shown on a line that stands for the caption.
+    var span: String?
 
     @State private var selection: Range<Int>?
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
-            Self.name(label, fontSize: fontSize, showFurigana: showFurigana)
+            Self.name(label, fontSize: fontSize, showFurigana: showFurigana, isPicked: isPicked, onPick: onPick)
             FuriganaText(
                 tokens: ruby, fontSize: fontSize, showReadings: showFurigana, selection: $selection, onClick: onClick
             )
             .help("What \(label) heard over the same stretch")
             Spacer(minLength: 8)
+            if let span {
+                CaptionRow.spanLabel(span, fontSize: fontSize, showFurigana: showFurigana)
+            }
             Button(action: onAnalyze) {
                 Image(systemName: AnalysisView.symbol)
                     .font(.system(size: fontSize * 0.7))
@@ -737,13 +751,24 @@ private struct OtherHearingLine: View {
     }
 
     /// A recognizer's name at the left of its line, on the baseline of its
-    /// first line, below the row of readings.
-    static func name(_ label: String, fontSize: Double, showFurigana: Bool) -> some View {
-        Text(label)
+    /// first line, below the row of readings. With `onPick`, a button that
+    /// picks the line, or takes the pick back when it is the one picked.
+    @ViewBuilder
+    static func name(
+        _ label: String, fontSize: Double, showFurigana: Bool, isPicked: Bool = false, onPick: ((String?) -> Void)? = nil
+    ) -> some View {
+        let text = Text(label)
             .font(.system(size: fontSize * 0.5).monospaced())
-            .foregroundStyle(.gray)
+            .foregroundStyle(isPicked ? Color.green : Color.gray)
             .frame(width: fontSize * 1.6, alignment: .leading)
-            .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
+        if let onPick {
+            Button { onPick(isPicked ? nil : label) } label: { text.contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .help(isPicked ? "Show all three again" : "Keep \(label)'s version and hide the others")
+                .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
+        } else {
+            text.padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
+        }
     }
 }
 
@@ -769,54 +794,46 @@ struct CaptionRow: View {
     /// asking for it.
     var isOtherAnalyzed: (Caption) -> Bool = { _ in false }
     var onAnalyzeOther: (Caption) -> Void = { _ in }
+    /// The recognizer picked, of "k2" and `others`: its line alone shows,
+    /// with its translation. Nil, all of them with the caption's own.
+    var picked: String?
+    /// A click on a name picks it, or takes the pick back; none, in
+    /// Incognito, and the names are only names.
+    var onPick: ((String?) -> Void)?
 
     @State private var isHovered = false
+
+    /// The other recognizer picked, when its text is among `others`.
+    private var pickedOther: (label: String, sentence: Caption)? {
+        others.first { $0.label == picked }
+    }
+
+    private var isOwnPicked: Bool { picked == "k2" && !others.isEmpty }
+
+    /// The lines of the others under the caption's own, with no pick.
+    private var othersShown: [(label: String, sentence: Caption)] {
+        pickedOther.map { [$0] } ?? (isOwnPicked ? [] : others)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .top, spacing: 6) {
-                    // With the other recognizers under it, the caption's own
-                    // line is named too: ReazonSpeech k2's.
-                    if !others.isEmpty {
-                        OtherHearingLine.name("k2", fontSize: fontSize, showFurigana: showFurigana)
-                            .help("What ReazonSpeech k2, the captions' own recognizer, heard")
-                    }
-                    FuriganaText(
-                        tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
-                        selection: $selection, onClick: onSeek
-                    )
-                    Spacer(minLength: 8)
-                    if onSeek != nil, let moment = caption.moment {
-                        Text(Self.span(of: moment))
-                            .font(.system(size: fontSize * 0.55).monospacedDigit())
-                            .foregroundStyle(.gray)
-                            // On the Japanese's baseline, below the row of readings.
-                            .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
-                            // Clicks go through it to the row.
-                            .allowsHitTesting(false)
-                    }
-                    Button(action: onAnalyze) {
-                        Image(systemName: AnalysisView.symbol)
-                            .font(.system(size: fontSize * 0.7))
-                            .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Explain this sentence")
-                    // Level with the Japanese, below the row of readings.
-                    .padding(.top, showFurigana ? fontSize * 0.6 : 0)
-                    .opacity(isHovered || isAnalyzed ? 1 : 0)
+                if pickedOther == nil {
+                    ownLine
                 }
-                ForEach(others, id: \.label) { other in
+                ForEach(othersShown, id: \.label) { other in
                     OtherHearingLine(
                         label: other.label, ruby: other.sentence.ruby, fontSize: fontSize, showFurigana: showFurigana,
                         onClick: onSeek, isRowHovered: isHovered, isAnalyzed: isOtherAnalyzed(other.sentence),
-                        onAnalyze: { onAnalyzeOther(other.sentence) }
+                        onAnalyze: { onAnalyzeOther(other.sentence) }, isPicked: other.label == picked, onPick: onPick,
+                        // Standing for the caption, it says where it is.
+                        span: other.label == picked ? momentSpan : nil
                     )
                 }
-                if !caption.english.isEmpty {
+                let english = pickedOther?.sentence.english ?? caption.english
+                if !english.isEmpty {
                     // Not SwiftUI's selectable text, which keeps its clicks.
-                    SelectableText(caption.english, size: fontSize * 0.82, color: .systemGreen, onClick: onSeek)
+                    SelectableText(english, size: fontSize * 0.82, color: .systemGreen, onClick: onSeek)
                 }
                 if let official {
                     SelectableText(official, size: fontSize * 0.82, color: .systemOrange, onClick: onSeek)
@@ -838,6 +855,54 @@ struct CaptionRow: View {
         )
         .background(HoverTracker(isHovered: $isHovered, onClick: onSeek))
         .padding(-Self.highlightInset)
+    }
+
+    /// The caption's own line, with its place and analysis.
+    private var ownLine: some View {
+        HStack(alignment: .top, spacing: 6) {
+            // With the other recognizers under it, the caption's own
+            // line is named too: ReazonSpeech k2's.
+            if !others.isEmpty {
+                OtherHearingLine.name(
+                    "k2", fontSize: fontSize, showFurigana: showFurigana, isPicked: isOwnPicked, onPick: onPick
+                )
+                .help("What ReazonSpeech k2, the captions' own recognizer, heard")
+            }
+            FuriganaText(
+                tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
+                selection: $selection, onClick: onSeek
+            )
+            Spacer(minLength: 8)
+            if let momentSpan {
+                Self.spanLabel(momentSpan, fontSize: fontSize, showFurigana: showFurigana)
+            }
+            Button(action: onAnalyze) {
+                Image(systemName: AnalysisView.symbol)
+                    .font(.system(size: fontSize * 0.7))
+                    .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
+            }
+            .buttonStyle(.plain)
+            .help("Explain this sentence")
+            // Level with the Japanese, below the row of readings.
+            .padding(.top, showFurigana ? fontSize * 0.6 : 0)
+            .opacity(isHovered || isAnalyzed ? 1 : 0)
+        }
+    }
+
+    private var momentSpan: String? {
+        guard onSeek != nil, let moment = caption.moment else { return nil }
+        return Self.span(of: moment)
+    }
+
+    /// Where a sentence is, at the right of its line.
+    static func spanLabel(_ span: String, fontSize: Double, showFurigana: Bool) -> some View {
+        Text(span)
+            .font(.system(size: fontSize * 0.55).monospacedDigit())
+            .foregroundStyle(.gray)
+            // On the Japanese's baseline, below the row of readings.
+            .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.3)
+            // Clicks go through it to the row.
+            .allowsHitTesting(false)
     }
 
     static let highlightInset: CGFloat = 6
