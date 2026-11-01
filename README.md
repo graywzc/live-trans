@@ -424,8 +424,9 @@ findings at once. The crossed-out bin on the timeline's row has the host
 forget it all. Production keeps nothing. `-sidePanel dev` starts the app in dev
 mode for one run.
 
-Settings also has furigana on/off, text size, and **Keep window on top** for
-floating the captions over a video. Nothing of a session outlives the app: the
+The pin in the header floats the captions over a video, or lets other windows
+cover them; it is **Keep window on top** in Settings, which also has furigana
+on/off and text size. Nothing of a session outlives the app: the
 captions, analyses and lookups exist only in memory, network responses and the
 Jisho panel's pages are never cached on disk, and the app empties its cache
 and cookie folders at launch and at quit. On the GPU host the fetched audio

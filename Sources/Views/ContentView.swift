@@ -102,6 +102,7 @@ struct ContentView: View {
                     .foregroundStyle(.gray.opacity(0.7))
                     .help("LiveTrans version")
             }
+            KeepOnTopButton()
             SettingsLink {
                 Image(systemName: "gearshape")
             }
@@ -1056,8 +1057,24 @@ private struct LevelMeter: View {
     }
 }
 
+/// The header's pin: whether the window floats over the video or other
+/// windows may cover it. The same setting as the switch in Settings.
+struct KeepOnTopButton: View {
+    @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
+
+    var body: some View {
+        Button {
+            keepOnTop.toggle()
+        } label: {
+            Image(systemName: keepOnTop ? "pin.fill" : "pin")
+        }
+        .accessibilityLabel("Keep window on top")
+        .help(keepOnTop ? "On top of other windows; click to let them cover it" : "Keep this window on top of other windows")
+    }
+}
+
 /// Window behaviour SwiftUI has no modifiers for.
-private struct WindowLevel: NSViewRepresentable {
+struct WindowLevel: NSViewRepresentable {
     let floating: Bool
 
     final class Coordinator {
