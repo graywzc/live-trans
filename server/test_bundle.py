@@ -504,6 +504,30 @@ print("[download] 100.0% of 1.00MiB at 1.00MiB/s ETA 00:00", flush=True)
     assert kept_for_phone(job.cache.dir) == ["bundle.json", "video.mp4"]
 
 
+def test_the_videos_with_captions_kept_are_listed_for_the_app():
+    job = test_a_step_job_keeps_its_video_and_captions_for_the_phone()
+    index = os.path.join(srv.DEV_CACHE_DIR, srv.VIDEO_INDEX)
+    job.cache.title = "An invented title"
+    job.cache.note_video()
+    with open(index, encoding="utf-8") as f:
+        assert [(v["page"], v["title"]) for v in json.load(f)] == [(job.page, "An invented title")]
+    # A folder from before pages were noted is left out until run again.
+    about = os.path.join(job.cache.dir, "audio.json")
+    with open(about, encoding="utf-8") as f:
+        kept = json.load(f)
+    kept.pop("page")
+    with open(about, "w", encoding="utf-8") as f:
+        json.dump(kept, f)
+    assert srv.write_video_index() == []
+    job.cache.note_video()
+    assert [v["page"] for v in srv.write_video_index()] == [job.page]
+    # With no captions kept there is nothing to load.
+    os.remove(os.path.join(job.cache.dir, "captions-speech.json"))
+    assert srv.write_video_index() == []
+    assert not os.path.exists(index)
+    srv.clear_dev_cache()
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

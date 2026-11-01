@@ -523,7 +523,7 @@ def test_a_step_job_captions_the_video_with_its_speech_finder_and_keeps_no_text(
     assert 0 <= line["start"] < line["end"] <= 3.0, line
     # Batches and stretches both found by the step's model.
     assert models and set(models) == {srv._firered}, models
-    folder = os.path.join(cache, os.listdir(cache)[0])
+    folder = next(entry.path for entry in os.scandir(cache) if entry.is_dir())
     for name in os.listdir(folder):
         if name.endswith(".json"):
             assert "ことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name

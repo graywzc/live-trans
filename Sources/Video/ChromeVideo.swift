@@ -203,6 +203,22 @@ final class ChromeVideo {
         save(tab)
     }
 
+    /// Opens `url` in a new tab of Chrome's front window, and stays on it.
+    /// Nil when Chrome would not.
+    func open(_ video: ProcessedVideo) async -> ChromeScript.Tab? {
+        let source = ChromeScript.openSource(video.page)
+        let outcome = await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: try? ChromeScript.runForText(source).get()) }
+        }
+        guard let outcome, let id = ChromeScript.tabID(Substring(outcome.trimmingCharacters(in: .whitespacesAndNewlines))) else {
+            return nil
+        }
+        hasReachedChrome = true
+        let tab = ChromeScript.Tab(id: id, title: video.label, url: video.page)
+        pin(tab)
+        return tab
+    }
+
     /// Automatic found its video: kept from now on, until another tab is
     /// chosen or this one closes.
     private func keep(_ tab: ChromeScript.Tab) {
@@ -622,6 +638,20 @@ enum ChromeScript {
                 end repeat
             end repeat
             return out
+        end tell
+        """
+    }
+
+    /// Opens `url` in a new tab, in a new window if Chrome has none, and
+    /// gives the tab's id.
+    static func openSource(_ url: String) -> String {
+        """
+        tell application id "\(bundleID)"
+            if (count windows) = 0 then make new window
+            tell window 1
+                set t to make new tab with properties {URL:\(appleScriptString(url))}
+                return id of t as text
+            end tell
         end tell
         """
     }

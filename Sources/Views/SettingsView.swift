@@ -11,7 +11,6 @@ struct SettingsView: View {
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.sensitivity) private var sensitivity = 0.5
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
-    @AppStorage(AppSettings.prefetchVideo) private var prefetchVideo = true
     @AppStorage(AppSettings.analysisURL) private var analysisURL = ""
     @AppStorage(AppSettings.analysisModel) private var analysisModel = ""
     @AppStorage(AppSettings.translationTarget) private var translationTarget = ServerConfig.Target.english.rawValue
@@ -89,10 +88,6 @@ struct SettingsView: View {
                     Text("Text size")
                 }
                 Toggle("Keep window on top", isOn: $keepOnTop)
-                Toggle("Offer captioning a Chrome video ahead from its own audio", isOn: $prefetchVideo)
-                Text("While captioning, Caption ahead under the captions has the GPU host fetch the video's audio ahead of you and caption it before you get there; Pause holds it. It starts paused. Encrypted streams stay on live captioning.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

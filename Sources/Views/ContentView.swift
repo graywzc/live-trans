@@ -12,7 +12,6 @@ struct ContentView: View {
     @AppStorage(AppSettings.showFurigana) private var showFurigana = true
     @AppStorage(AppSettings.captionFontSize) private var fontSize = 22.0
     @AppStorage(AppSettings.keepOnTop) private var keepOnTop = false
-    @AppStorage(AppSettings.prefetchVideo) private var prefetchVideo = true
     @AppStorage(AppSettings.sidePanelWidth) private var panelWidth = 440.0
 
     /// One selection for the whole window, as in any text view.
@@ -112,8 +111,7 @@ struct ContentView: View {
     private var captionList: some View {
         CaptionList(
             captions: engine.captions, partialText: engine.partialText, fontSize: fontSize,
-            playingID: prefetch.playingCaptionID, lull: prefetch.lull, lullRehearing: prefetch.lullRehearing,
-            gapRehearing: { prefetch.gapRehearing(after: $0) }
+            playingID: prefetch.playingCaptionID, lull: prefetch.lull
         ) { caption in
             CaptionRow(
                 caption: caption, showFurigana: showFurigana, fontSize: fontSize,
@@ -121,7 +119,7 @@ struct ContentView: View {
                     && analyzer.hasAnalyzed(caption),
                 selection: selectionBinding(for: caption),
                 onAnalyze: { analyze(caption) },
-                onSeek: caption.moment.map { moment in { replay(caption, at: moment) } },
+                onSeek: caption.moment.map { moment in { video.send(.seek(moment)) } },
                 isCurrent: prefetch.currentCaptionID == caption.id,
                 official: panel.isDev ? dev.official(for: caption) : nil,
                 others: panel.isDev ? dev.others(for: caption) : prefetch.others(for: caption),
@@ -135,16 +133,6 @@ struct ContentView: View {
                 placeholder
             }
         }
-    }
-
-    /// Plays the sentence again, its own stretch and no more: the neighbour
-    /// it runs on into is taken into the re-hearing for context, not into
-    /// the playback. One fetched ahead is also heard again from the fetched
-    /// audio, which corrects it; a live one is heard again through the
-    /// speakers as it plays.
-    private func replay(_ caption: Caption, at moment: VideoMoment) {
-        video.send(.seek(moment))
-        prefetch.rehear(caption)
     }
 
     private func selectionBinding(for caption: Caption) -> Binding<Range<Int>?> {
@@ -174,8 +162,8 @@ struct ContentView: View {
             )
         case .listening, .reconnecting:
             ContentUnavailableView(
-                "Listening…", systemImage: "waveform",
-                description: Text("Japanese speech will be captioned here.")
+                "Waiting for a video", systemImage: "waveform",
+                description: Text("The Chrome video's captions will come here.")
             )
         case .connecting(let message):
             ContentUnavailableView {
@@ -186,22 +174,18 @@ struct ContentView: View {
         case .idle:
             ContentUnavailableView(
                 "LiveTrans", systemImage: "captions.bubble",
-                description: Text(
-                    panel.isDev
-                        ? "Press Load to show the Chrome video's captions, made before or made now."
-                        : "Press Start to caption and translate Japanese speech."
-                )
+                description: Text("Press Start to caption and translate the Chrome video.")
             )
         }
     }
 
     private var footer: some View {
         VStack(spacing: 12) {
-            let canCaptionAhead = engine.isRunning && engine.serverCanPrefetch && prefetchVideo
             let isDev = panel.isDev
-            if canCaptionAhead || prefetch.playhead != nil {
+            let canRerun = isDev && engine.isRunning && engine.serverCanPrefetch
+            if canRerun || prefetch.playhead != nil {
                 HStack(spacing: 10) {
-                    if canCaptionAhead && isDev {
+                    if canRerun {
                         // Dev mode: Load and Stop below run the step; this
                         // makes it all again.
                         Button {
@@ -218,29 +202,13 @@ struct ContentView: View {
                         } message: {
                             Text("The host forgets what it kept of this video and fetches and makes it all again, which takes several minutes.")
                         }
-                    } else if canCaptionAhead {
-                        Button {
-                            prefetch.toggle()
-                        } label: {
-                            Label(
-                                prefetch.isPaused ? "Caption ahead" : "Pause",
-                                systemImage: prefetch.isPaused ? "forward.fill" : "pause.fill"
-                            )
-                            .frame(minWidth: 104)
-                        }
-                        .controlSize(.small)
-                        .help(
-                            prefetch.isPaused
-                                ? "Fetch the Chrome video's audio from where you are and caption it before you get there"
-                                : "Stop captioning ahead; what is fetched stays"
-                        )
                     }
                     if let playhead = prefetch.playhead {
                         VideoBar(
                             duration: prefetch.job?.duration ?? dev.job?.duration ?? playhead.duration,
                             playhead: prefetch.position,
                             captioned: prefetch.captioned, fetched: prefetch.fetchedAhead ?? dev.fetched(on: playhead),
-                            isPaused: prefetch.isPaused,
+                            isPaused: isDev && dev.isPaused,
                             onSeek: { prefetch.scrub(to: $0) }
                         )
                     } else {
@@ -263,12 +231,16 @@ struct ContentView: View {
                     isSpeaking: engine.isSpeaking
                 )
             }
-            // In dev mode, Load: the host started and the step run over the
-            // Chrome video, from what it kept of it.
+            // In dev mode the host starts and the step runs over the video,
+            // Load for one it has processed, from what it kept of it.
             let loading = isDev ? engine.isRunning && !dev.isPaused : engine.isRunning
+            let processed = isDev && dev.isProcessed(dev.picked?.page ?? video.controlled?.url)
             HStack(spacing: 12) {
                 TabPicker()
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .task(id: isDev) {
+                        if isDev { await dev.refreshProcessed() }
+                    }
                 Button {
                     if loading {
                         if isDev { dev.hold() }
@@ -281,8 +253,8 @@ struct ContentView: View {
                     }
                 } label: {
                     Label(
-                        loading ? "Stop" : isDev ? "Load" : "Start",
-                        systemImage: loading ? "stop.fill" : isDev ? "tray.and.arrow.down.fill" : "mic.fill"
+                        loading ? "Stop" : processed ? "Load" : "Start",
+                        systemImage: loading ? "stop.fill" : processed ? "tray.and.arrow.down.fill" : "play.fill"
                     )
                     .font(.headline)
                     .frame(maxWidth: 240)
@@ -292,7 +264,7 @@ struct ContentView: View {
                 .controlSize(.large)
                 .tint(loading ? .red : .green)
                 .keyboardShortcut(.return, modifiers: .command)
-                .help(isDev && !loading ? "Show the Chrome video's captions and step from what the host kept of it, making only what is missing" : "")
+                .help(loading ? "" : processed ? "Show this video's captions from what the host kept of it, making only what is missing" : "Fetch the Chrome video's audio and caption it")
                 // Keeps the button in the middle.
                 Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
             }
@@ -556,6 +528,7 @@ struct OutputList: View {
 /// chosen from all of Chrome's tabs.
 private struct TabPicker: View {
     @Environment(ChromeVideo.self) private var video
+    @Environment(DevPipeline.self) private var dev
     @State private var isOpen = false
 
     var body: some View {
@@ -563,7 +536,7 @@ private struct TabPicker: View {
             isOpen.toggle()
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: video.pinned == nil ? "sparkle.magnifyingglass" : "play.rectangle.fill")
+                Image(systemName: video.pinned == nil && dev.picked == nil ? "sparkle.magnifyingglass" : "play.rectangle.fill")
                 Text(label)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -577,13 +550,14 @@ private struct TabPicker: View {
             .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.1)))
         }
         .buttonStyle(.plain)
-        .help("The Chrome tab whose video the app captions and controls: it stays on it until you choose another")
+        .help("The video the app captions and controls: a Chrome tab, or one the host has processed. It stays on it until you choose another")
         .popover(isPresented: $isOpen, arrowEdge: .top) {
             TabList { isOpen = false }
         }
     }
 
     private var label: String {
+        if let picked = dev.picked { return picked.label }
         if let pinned = video.pinned { return pinned.title.isEmpty ? pinned.url : pinned.title }
         return "Find the video"
     }
@@ -591,18 +565,23 @@ private struct TabPicker: View {
 
 private struct TabList: View {
     @Environment(ChromeVideo.self) private var video
+    @Environment(DevPipeline.self) private var dev
+    @Environment(SidePanel.self) private var panel
     let dismiss: () -> Void
 
     var body: some View {
         // Only tabs with a video, and the chosen one even without.
         let shown = video.tabs.filter { $0.video != nil || $0.id == video.pinned?.id }
         let windows = Dictionary(grouping: shown, by: \.window)
+        // A video open in a tab is that tab's row.
+        let processed = panel.isDev ? dev.processed.filter { video in !shown.contains { $0.url == video.page } } : []
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
                 row(
                     title: "Find the video", detail: "The front tab of a Chrome window that has a video, kept from then on",
-                    symbol: "sparkle.magnifyingglass", isChosen: video.pinned == nil, isControlled: false
+                    symbol: "sparkle.magnifyingglass", isChosen: video.pinned == nil && dev.picked == nil, isControlled: false
                 ) {
+                    dev.picked = nil
                     video.pin(nil)
                 }
                 ForEach(windows.keys.sorted(), id: \.self) { window in
@@ -614,12 +593,29 @@ private struct TabList: View {
                     ForEach(windows[window] ?? []) { tab in
                         row(
                             title: tab.title.isEmpty ? tab.url : tab.title,
-                            detail: Self.detail(tab, isControlled: video.controlled?.id == tab.id),
+                            detail: Self.detail(tab, isControlled: video.controlled?.id == tab.id)
+                                + (panel.isDev && dev.isProcessed(tab.url) ? " · processed" : ""),
                             symbol: video.controlled?.id == tab.id ? "play.rectangle.fill" : "play.rectangle",
-                            isChosen: video.pinned?.id == tab.id,
+                            isChosen: dev.picked == nil && video.pinned?.id == tab.id,
                             isControlled: video.controlled?.id == tab.id
                         ) {
+                            dev.picked = nil
                             video.pin(tab)
+                        }
+                    }
+                }
+                if !processed.isEmpty {
+                    Divider().padding(.vertical, 4)
+                    Text("Processed on the host")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                    ForEach(processed) { video in
+                        row(
+                            title: video.label, detail: "Load opens it in Chrome",
+                            symbol: "tray.and.arrow.down", isChosen: dev.picked?.id == video.id, isControlled: false
+                        ) {
+                            dev.picked = video
                         }
                     }
                 }
@@ -646,6 +642,9 @@ private struct TabList: View {
         .frame(maxHeight: 480)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear(perform: video.refreshTabs)
+        .task {
+            if panel.isDev { await dev.refreshProcessed() }
+        }
     }
 
     private func row(

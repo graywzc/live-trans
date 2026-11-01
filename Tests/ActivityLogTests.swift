@@ -132,9 +132,8 @@ final class ActivityViewTests: XCTestCase {
             ActivityView.hostStatus(.listening("GPU · large-v3"), job: job),
             "GPU · large-v3\nJob 1a2b3c running · fetched to 6:52 · captioned to 6:20 of 24:00"
         )
-        job.paused = true
         job.duration = nil
-        XCTAssertEqual(ActivityView.jobStatus(job), "Job 1a2b3c paused · fetched to 6:52 · captioned to 6:20")
+        XCTAssertEqual(ActivityView.jobStatus(job), "Job 1a2b3c running · fetched to 6:52 · captioned to 6:20")
     }
 
     /// Dev mode in the real window, its activity unfolded under the

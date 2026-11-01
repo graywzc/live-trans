@@ -88,12 +88,6 @@ final class CaptionEngine {
     /// that resembles it less than a correction would. A line fused with a
     /// neighbour's is not its own: it must keep the caption's words.
     static let rehearingFullCover = 0.9
-    /// A gap between captions this long or longer can hold a sentence that
-    /// went unheard, and is offered to be heard again.
-    static let rehearingGapMinimum: TimeInterval = 2.0
-    /// At most this much of a gap is heard again at once: a gap can be
-    /// minutes of music, over which Whisper is slow and invents lines.
-    static let rehearingGapLength: TimeInterval = 20.0
 
     private var session: ServerSession?
     private var source: AudioSource?
@@ -162,19 +156,17 @@ final class CaptionEngine {
         return Task { await session?.stop() }
     }
 
-    /// Captions from elsewhere than the live audio (fetched ahead, or a
-    /// stretch heard again from the fetched audio), put among the others by
-    /// where in the video they are.
-    func add(_ lines: [CaptionPair], tabID: Int, url: String, heardAgain: Bool) {
+    /// Captions fetched ahead, put among the others by where in the video
+    /// they are.
+    func add(_ lines: [CaptionPair], tabID: Int, url: String) {
         let captions = lines.compactMap { line -> Caption? in
             guard !line.ja.isEmpty, let start = line.start, let end = line.end else { return nil }
             var moment = VideoMoment(tabID: tabID, url: url, seconds: start)
             moment.end = end
             return makeCaption(japanese: line.ja, english: line.en, moment: moment)
         }
-        guard let first = captions.first?.moment else { return }
-        let prompt = heardAgain ? contextPrompt(before: first, spoken: 0) : ""
-        self.captions = Self.merge(captions, into: self.captions, prompt: prompt)
+        guard !captions.isEmpty else { return }
+        self.captions = Self.merge(captions, into: self.captions, prompt: "")
     }
 
     private func makeCaption(japanese: String, english: String, moment: VideoMoment?) -> Caption {
@@ -462,39 +454,6 @@ final class CaptionEngine {
     nonisolated static func overlap(_ a: VideoMoment, _ b: VideoMoment) -> TimeInterval {
         guard a.tabID == b.tabID, a.url == b.url, let aEnd = a.end, let bEnd = b.end else { return 0 }
         return max(min(aEnd, bEnd) - max(a.seconds, b.seconds), 0)
-    }
-
-    /// The stretch of a page's video to hear again for the gap in its
-    /// captions at `seconds`: from the end of the last caption that starts
-    /// by then to the start of the first after it, or the edge of the
-    /// fetched audio where there is no caption. Of the `fetched` stretches
-    /// it is kept to the one that holds most of the gap, and to
-    /// `rehearingGapLength`, around `seconds`. Nil when what is left is
-    /// shorter than `rehearingGapMinimum`.
-    nonisolated static func gapStretch(
-        at seconds: Double, among captions: [Caption], tabID: Int, url: String, within fetched: [ClosedRange<Double>]
-    ) -> (from: Double, to: Double)? {
-        var before: VideoMoment?
-        var after: VideoMoment?
-        for caption in captions {
-            guard let moment = caption.moment, moment.tabID == tabID, moment.url == url else { continue }
-            if moment.seconds <= seconds {
-                if before.map({ $0.seconds <= moment.seconds }) ?? true { before = moment }
-            } else if after.map({ moment.seconds < $0.seconds }) ?? true {
-                after = moment
-            }
-        }
-        let gaps = fetched.map { stretch -> (from: Double, to: Double) in
-            (max(before.map { $0.end ?? $0.seconds } ?? stretch.lowerBound, stretch.lowerBound),
-             min(after?.seconds ?? stretch.upperBound, stretch.upperBound))
-        }
-        guard let longest = gaps.max(by: { $0.to - $0.from < $1.to - $1.from }),
-              longest.to - longest.from >= rehearingGapMinimum
-        else { return nil }
-        let (from, to) = longest
-        guard to - from > rehearingGapLength else { return (from, to) }
-        let start = min(max(seconds - rehearingGapLength / 2, from), to - rehearingGapLength)
-        return (start, start + rehearingGapLength)
     }
 
     /// Whether `spoken` seconds heard from `moment` are of a stretch of the

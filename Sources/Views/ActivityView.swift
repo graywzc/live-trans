@@ -160,7 +160,7 @@ struct ActivityView: View {
             captioned += " of \(CaptionRow.timestamp(duration))"
         }
         return [
-            "Job \(job.id.prefix(6)) \(job.paused ? "paused" : job.state)",
+            "Job \(job.id.prefix(6)) \(job.state)",
             "fetched to \(CaptionRow.timestamp(job.fetched))", captioned,
         ].joined(separator: " · ")
     }

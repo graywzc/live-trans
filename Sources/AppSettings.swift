@@ -40,7 +40,6 @@ extension AppSettings {
     static let autoRouteOutput = "autoRouteOutput"
     static let sensitivity = "sensitivity"
     static let keepOnTop = "keepOnTop"
-    static let prefetchVideo = "prefetchVideo"
     /// The panel was Jisho's alone when the key was named.
     static let sidePanelWidth = "jishoPanelWidth"
     static let demoAudioPath = "demoAudioPath"
@@ -48,11 +47,6 @@ extension AppSettings {
     /// The Chrome tab last chosen or found, {"id", "url"}, to go back to at
     /// the next launch.
     static let lastVideoTab = "lastVideoTab"
-    /// Whether production also listens to the Mac's audio, where the host
-    /// cannot fetch the video itself. Off for now, to see which videos the
-    /// host cannot fetch; `defaults write <app> listenToMacInProduction -bool
-    /// true` turns it back on.
-    static let listenToMacInProduction = "listenToMacInProduction"
     /// Whether the app was last in Incognito, to open in it again; else
     /// it opens in Default, dev mode.
     static let incognitoMode = "incognitoMode"
@@ -77,11 +71,10 @@ extension AppSettings {
             captionFontSize: 22.0,
             sensitivity: 0.5,
             keepOnTop: false,
-            prefetchVideo: true,
             sidePanelWidth: 440.0,
             analysisURL: "",
             analysisModel: "",
-            pipelineStep: "speech",
+            pipelineStep: DevPipeline.Step.speechMean.rawValue,
             activityTimelineHeight: 180.0,
             activityLogShown: false,
             translationTarget: ServerConfig.Target.english.rawValue,

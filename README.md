@@ -306,13 +306,11 @@ configuration.
 When the sound is a video playing in Chrome, each caption notes where in the
 video its sentence was said, and shows when it starts and ends. Click a caption to
 play its
-sentence again from there; the video pauses when the sentence ends. What is
+sentence again from there; the video pauses when the sentence ends.
+
 When the video is one whose audio the GPU host can fetch (a plain file, an
 HLS or DASH stream, or a page yt-dlp knows), LiveTrans can caption it **ahead
-of you** from that audio instead of listening. It starts paused: while
-captioning, press **Caption ahead** under the captions to begin, and **Pause**
-to hold it (the host stops transcribing, the captions already fetched stay,
-and taking it up again goes on from there). Running, the host fetches the audio
+of you** from that audio. Press **Start** and the host fetches the audio
 from where you are in the video, not from its start, finds the speech in it,
 and transcribes and translates that about a minute of speech at a time, each
 batch ending in a pause, so the captions are in place before the video gets there, with exact
@@ -321,17 +319,7 @@ lit and kept in view. Between sentences an orange line, with the video's time
 at its right end, sits after the last one spoken. Pause, seek and replay as you like; the fetch never touches the
 player.
 
-A sentence can go uncaptioned: the model drops one now and then, and the
-live listener stands down over a fetched stretch, so playing through the
-gap does not catch it. Where the gap between two captions is two seconds
-or more, resting the pointer in it shows a grey line with an ear button at
-its right end; the orange line has the same button while the video is in
-such a gap. Press it and the gap is heard again from the fetched audio,
-with the wider search and the captions before it as context, and anything
-found lands where it was said. Only the speech in the gap is decoded, so a
-gap of music or silence gives nothing rather than invented lines; of a
-long gap, at most twenty seconds are heard at once, from the sentence
-before it or around where the video is. When you jump to a part it has not captioned and is not about to
+When you jump to a part it has not captioned and is not about to
 reach, it starts again from there, keeping the captions it has; a part you
 skipped over is captioned when you go back to it, and a stretch already
 captioned is passed over rather than done twice.
@@ -372,6 +360,11 @@ is what the app opens in the first time, and after that it opens in the mode
 last chosen. **Incognito**, called production elsewhere in this file, leaves
 no trace: nothing is listed or kept of how the captions come about, on the
 Mac or on the host. Only videos kept in Default reach the iPhone.
+
+In Default the menu at the bottom left lists the Chrome tabs with a video and
+the videos the host has processed. The button reads **Load** for one of those,
+which opens a video not in a tab in Chrome and shows its captions from what
+the host kept, and **Start** for any other. Incognito lists the tabs alone.
 
 At the top of the tab, how the Mac and the GPU host stand: whether the Mac
 is listening and how many utterances are waiting for their captions, which
