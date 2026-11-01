@@ -9,6 +9,7 @@ struct LibraryView: View {
     /// it starts at the list.
     @SceneStorage("openBundle") private var openID = ""
     @State private var path: [String] = []
+    @State private var reopen = ReopenOnce()
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -51,7 +52,7 @@ struct LibraryView: View {
             }
             .onChange(of: path) { openID = path.first ?? "" }
             .onAppear {
-                if path.isEmpty, store.bundle(openID) != nil { path = [openID] }
+                if let id = reopen.take(openID), store.bundle(id) != nil { path = [id] }
             }
         }
     }
@@ -73,6 +74,17 @@ struct LibraryView: View {
         } else {
             BundleRow(item: item, download: nil) { store.download(item.id) }
         }
+    }
+}
+
+/// The video to go back to when the app starts again: asked each time the
+/// list appears, as it does after Back, and answering only the first time.
+struct ReopenOnce {
+    private var isTaken = false
+
+    mutating func take(_ saved: String) -> String? {
+        defer { isTaken = true }
+        return isTaken || saved.isEmpty ? nil : saved
     }
 }
 
