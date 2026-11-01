@@ -31,8 +31,13 @@ struct CaptionScroll: View {
     let lull: Lull?
     let fontSize: Double
     let showFurigana: Bool
+    /// The recognizer picked for each caption that has one.
+    var picks: [Int: String] = [:]
     /// A tap on a row: plays the sentence again.
     let onTap: (Caption) -> Void
+    /// A version's name tapped in a row: picks it, or with nil takes the
+    /// pick back.
+    var onPick: ((String?, Caption) -> Void)? = nil
     /// The button at a row's end; none, and there is no button.
     var onAnalyze: ((Caption) -> Void)? = nil
     /// The word menu's items, for the word pressed in the caption; none,
@@ -59,9 +64,10 @@ struct CaptionScroll: View {
                         }
                         PhoneCaptionRow(
                             caption: caption, fontSize: fontSize, showFurigana: showFurigana,
-                            isCurrent: caption.id == playingID, onTap: { onTap(caption) },
-                            onAnalyze: onAnalyze.map { analyze in { analyze(caption) } },
-                            onWord: onWord.map { act in { action, word in act(action, word, caption) } }
+                            isCurrent: caption.id == playingID, picked: picks[caption.id], onTap: { onTap(caption) },
+                            onPick: onPick.map { pick in { pick($0, caption) } },
+                            onAnalyze: onAnalyze.map { analyze in { analyze(caption.heard(by: picks[caption.id])) } },
+                            onWord: onWord
                         )
                         .equatable()
                         .id(caption.id)

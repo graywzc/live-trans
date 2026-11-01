@@ -147,6 +147,7 @@ final class BundleStore {
     func delete(_ id: String) {
         guard Self.isSafeID(id) else { return }
         PlaybackModel.forgetPosition(for: id)
+        PlaybackModel.forgetPicks(for: id)
         cancelTasks(for: id)
         if downloads[id] != nil { discarded.insert(id) }
         downloads[id] = nil

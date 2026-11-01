@@ -7,6 +7,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import time
 import wave
 
@@ -561,11 +562,16 @@ def test_a_step_job_s_captions_are_kept_and_shown_again_without_hearing():
 def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_time():
     cache = fresh_cache()
     original = (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,
-                srv.run_devtool_lines, srv.unload_ollama)
+                srv.run_devtool_lines, srv.unload_ollama, srv.translate_text)
     asked = []
+    translated = []
 
     def heard(grid, audio, start, **kwargs):
         return [{"ja": "ことば", "en": "words", "start": a, "end": b} for a, b in grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)]
+
+    def translate(text):
+        translated.append(text)
+        return f"译:{text}"
 
     def other(name, header, audio, on_line):
         asked.append((name, header["clips"]))
@@ -586,28 +592,64 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     srv.speech_stretches, srv.hear_pieces, srv.DEV_CAPTIONS = (lambda audio, model=None: loud_stretches(audio)), heard, True
     srv.sound_events = lambda audio: {"singing": [], "music": []}
     srv.run_devtool_lines, srv.unload_ollama = other, lambda: asked.append(("unload", None))
+    srv.translate_text = translate
     try:
         url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
         status, found = run("https://example.com/o")
         names, clip = [a[0] for a in asked], asked[0][1][0]
         del asked[:]
+        translated_first = list(translated)
         # Again over the same video: what was heard is taken from the cache,
         # and only the recognizer that failed is asked again.
         status_again, found_again = run("https://example.com/o")
     finally:
         (srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS,
-         srv.run_devtool_lines, srv.unload_ollama) = original
+         srv.run_devtool_lines, srv.unload_ollama, srv.translate_text) = original
     # nemo and qwen, with the translator kept; no VibeVoice.
     assert names[:2] == ["hear_nemo", "hear_qwen"], names
     line = status["lines"][0]
     # From half a second before the caption (or the audio's start) to 0.3 s after.
     assert abs(clip[0] - max(line["start"] - 0.5, 0)) < 0.01 and abs(clip[1] - (line["end"] + 0.3)) < 0.01, (clip, line)
     assert found["others"][0] == {"start": line["start"], "end": line["end"],
-                                  "nemo": "hear_nemoのことば"}, found["others"]
-    assert status["others"] == len(status["lines"]), status["others"]
+                                  "nemo": "hear_nemoのことば", "nemo_en": "译:hear_nemoのことば"}, found["others"]
+    assert status["others"] == 2 * len(status["lines"]), status["others"]
     assert [a[0] for a in asked] == ["hear_qwen"], asked
     assert found_again["others"] == found["others"], found_again
+    # The translation is kept with the text, and not asked for again.
+    assert translated_first and translated == translated_first, (translated_first, translated)
     srv.clear_dev_cache()
+
+
+def test_the_others_are_translated_but_for_the_caption_s_own_text_and_what_fails():
+    original = srv.translate_text, srv.DEV_OTHER_HEARERS
+    asked = []
+
+    def translate(text):
+        asked.append(text)
+        if text == "遅い":
+            raise TimeoutError("took too long")
+        return {"かな": "かなかな"}.get(text, f"译:{text}")
+
+    span = (1.0, 2.0)
+    line = {"ja": "雨だね。", "en": "下雨了", "start": 1.0, "end": 2.0}
+    job = srv.PrefetchJob.__new__(srv.PrefetchJob)
+    job.id, job.cache, job.caption_error = "t", None, None
+    job.stop_event, job.lines, job.others_kept = threading.Event(), [line], {}
+    srv.DEV_OTHER_HEARERS = [("a", ""), ("b", ""), ("c", ""), ("d", ""), ("e", "")]
+    srv.translate_text = translate
+    try:
+        job.others = {span: {"a": "雨だね", "b": "遅い", "c": "かな", "d": "晴れ", "e": "晴れ"}}
+        job._translate_others()
+        versions = srv.with_versions([line], job.others)[0]["versions"]
+    finally:
+        srv.translate_text, srv.DEV_OTHER_HEARERS = original
+    texts = job.others[span]
+    assert texts["a_en"] == "下雨了", "the caption's own text is not asked about"
+    assert "b_en" not in texts, "too slow, and it does not stop the rest"
+    assert texts["c_en"] == "", "the Japanese again is no translation"
+    assert texts["d_en"] == texts["e_en"] == "译:晴れ", texts
+    assert asked == ["遅い", "かな", "晴れ"], asked
+    assert versions["a"] == {"ja": "雨だね", "en": "下雨了"} and versions["b"] == {"ja": "遅い", "en": ""}, versions
 
 
 def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_them_heard_again():
