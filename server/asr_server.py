@@ -1834,7 +1834,9 @@ def clear_dev_cache(page=None, bundle_only=False):
 # cache: "video.mp4", its streams copied as they are, so that its timeline
 # is the stream's own, the one the browser's player and the captions are
 # on (joining the segments afresh re-spaces them, seconds out by the end
-# of an episode); "bundle.json" beside it with the step job's captions;
+# of an episode); "bundle.json" beside it with the step job's captions,
+# each with the other recognizers' text and its translation (see
+# with_versions);
 # and "index.json" at the top of the cache listing the bundles that are
 # whole, newest first, for the app to show. Whatever serves the cache
 # folder on the user's own network (tailscale serve, say) hands them to
@@ -1949,7 +1951,9 @@ class BundleFetch:
         self.state = "done"
         print(f"bundle {os.path.basename(self.folder)}: {seconds:.0f}s of video kept in "
               f"{time.time() - self.started:.0f}s, {len(self.lines)} captions", flush=True)
-        tell(f"bundle: {clock(seconds)} of video kept for the phone, with {len(self.lines)} captions")
+        versions = sum(bool(line.get("versions")) for line in self.lines)
+        tell(f"bundle: {clock(seconds)} of video kept for the phone, with {len(self.lines)} captions, "
+             f"{versions} of them in other recognizers' versions too")
 
     def _copy_streams(self):
         """The direct link's streams copied into the mp4; whether it ended
@@ -2020,7 +2024,7 @@ class BundleFetch:
             "video": BUNDLE_VIDEO,
             "size": os.path.getsize(os.path.join(self.folder, BUNDLE_VIDEO)),
             "step": self.step,
-            "lines": [{key: line.get(key) for key in ("ja", "en", "start", "end")} for line in self.lines],
+            "lines": [bundle_line(line) for line in self.lines],
         }
         path = os.path.join(self.folder, BUNDLE_FILE)
         with open(path + ".part", "w", encoding="utf-8") as f:
@@ -2028,6 +2032,28 @@ class BundleFetch:
         os.replace(path + ".part", path)
         write_bundle_index()
         ensure_bundle_serving()
+
+
+def bundle_line(line):
+    """A caption as the bundle holds it: "versions" only when other
+    recognizers heard it."""
+    kept = {key: line.get(key) for key in ("ja", "en", "start", "end")}
+    if line.get("versions"):
+        kept["versions"] = line["versions"]
+    return kept
+
+
+def with_versions(lines, others):
+    """`lines`, each with what the other recognizers heard over it and that
+    text's translation: "versions": {"nemo": {"ja": ..., "en": ...}, ...}.
+    `others` as a job holds them, by (start, end)."""
+    result = []
+    for line in lines:
+        texts = others.get((line.get("start"), line.get("end")), {})
+        versions = {name: {"ja": texts[name], "en": texts.get(f"{name}_en", "")}
+                    for name, _ in DEV_OTHER_HEARERS if texts.get(name)}
+        result.append({**line, "versions": versions})
+    return result
 
 
 def start_bundle(job, title=None, url=None, duration=None):
@@ -2044,6 +2070,8 @@ def start_bundle(job, title=None, url=None, duration=None):
         return 409, {"error": f"the captions failed: {job.caption_error}"}
     if not job.captioned:
         return 409, {"error": "the captions have not reached the end yet"}
+    if DEV_OTHER_HEARING and not job.others_done:
+        return 409, {"error": "the other recognizers are still on the captions: keep it again when they are done"}
     lines = list(job.lines)
     if not lines:
         kept = job.cache.load_findings(f"captions-{job.step}")
@@ -2060,6 +2088,11 @@ def start_bundle(job, title=None, url=None, duration=None):
         return 409, {"error": f"the page is playing something {duration:.0f}s long, not the {expected:.0f}s video: "
                               "let the video itself play, then keep again"}
     media_duration = (duration if url else job.duration) or 0
+    others = job.others
+    if not others:
+        found = job.cache.load_findings("others") or {}
+        others = {(a, b): texts for a, b, texts in found.get("others", [])}
+    lines = with_versions(lines, others)
     with _bundle_lock:
         current = _bundle_fetches.get(job.cache.dir)
         if current and current.state == "running":
@@ -2988,6 +3021,11 @@ class PrefetchJob:
         # made: by the caption's (start, end), {name: text}. Kept in the dev
         # cache (DEV_OTHER_HEARERS).
         self.others = {}
+        # What the cache held of the others, over captions cut as they
+        # are now or not; and whether they have all been heard and
+        # translated, or passed over.
+        self.others_kept = {}
+        self.others_done = False
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
         self.cache = DevCache(page, url) if step and self.offset == 0 else None
@@ -3506,18 +3544,27 @@ class PrefetchJob:
         return True
 
     def _hear_others(self):
+        """The other recognizers' text for each caption, then its
+        translation."""
+        try:
+            self._hear_other_texts()
+            self._translate_others()
+        finally:
+            self.others_done = True
+
+    def _hear_other_texts(self):
         """Each caption heard again by DEV_OTHER_HEARERS, one after another,
         once the captions have reached the end; a recognizer that is not
         set up or fails is passed over. What they heard before over a
         caption cut the same way is given it from the cache as it comes."""
-        kept = {}
+        kept = self.others_kept
         if self.cache:
             while not self.stop_event.is_set() and not self.captioned and not self.cache.audio_seconds():
                 time.sleep(1)
             if (found := self.cache.load_findings("others")):
                 # (Less what VibeVoice heard, when it was one of them.)
-                names = {name for name, _ in DEV_OTHER_HEARERS}
-                kept = {(a, b): {n: t for n, t in texts.items() if n in names} for a, b, texts in found.get("others", [])}
+                names = {key for name, _ in DEV_OTHER_HEARERS for key in (name, f"{name}_en")}
+                kept.update({(a, b): {n: t for n, t in texts.items() if n in names} for a, b, texts in found.get("others", [])})
 
         def spans():
             return [(line["start"], line["end"]) for line in list(self.lines) if line.get("start") is not None and line.get("end") is not None]
@@ -3552,12 +3599,58 @@ class PrefetchJob:
                 print(f"prefetch {self.id}: {len(todo)} captions heard by {name} in {time.time() - t0:.0f}s", flush=True)
             except (RuntimeError, OSError, ValueError, KeyError, IndexError) as exc:
                 print(f"prefetch {self.id}: {name}: {exc}", flush=True)
-            if self.cache:
-                try:
-                    every = {**kept, **self.others}
-                    self.cache.save_findings("others", {"others": [[a, b, texts] for (a, b), texts in every.items()]})
-                except OSError as exc:
-                    print(f"prefetch {self.id}: others not cached: {exc}", flush=True)
+            self._save_others()
+
+    def _save_others(self):
+        if not self.cache:
+            return
+        try:
+            every = {**self.others_kept, **self.others}
+            self.cache.save_findings("others", {"others": [[a, b, texts] for (a, b), texts in every.items()]})
+        except OSError as exc:
+            print(f"prefetch {self.id}: others not cached: {exc}", flush=True)
+
+    def _translate_others(self):
+        """What the other recognizers heard translated, into "nemo_en" and
+        the like beside the text, so the phone can show a caption's
+        translation with whichever text is picked. Each by itself, without
+        the sentences around it; a text that is the caption's own but for
+        its punctuation takes the caption's translation. One that takes
+        too long is left for the next time the job is run."""
+        if self.stop_event.is_set() or self.caption_error:
+            return
+        t0 = time.time()
+        done, asked, added = {}, 0, 0
+        try:
+            for line in list(self.lines):
+                texts = self.others.get((line.get("start"), line.get("end")), {})
+                for name, _ in DEV_OTHER_HEARERS:
+                    text = texts.get(name)
+                    if not text or f"{name}_en" in texts:
+                        continue
+                    if self.stop_event.is_set():
+                        return
+                    content = _content(text)
+                    if content == _content(line["ja"]):
+                        done[content] = line.get("en") or ""
+                    if content not in done:
+                        try:
+                            english = translate_text(text)
+                        except Exception as exc:
+                            if not _is_timeout(exc):
+                                raise
+                            continue
+                        done[content] = "" if _left_in_japanese(english) else english
+                        asked += 1
+                    texts[f"{name}_en"] = done[content]
+                    added += 1
+        except Exception as exc:
+            print(f"prefetch {self.id}: the others not translated: {exc}", flush=True)
+        finally:
+            if added:
+                self._save_others()
+            if asked:
+                print(f"prefetch {self.id}: {asked} of the others translated in {time.time() - t0:.0f}s", flush=True)
 
     def wav(self, start, end):
         """The fetched audio from `start` to `end` of the video, as a WAV

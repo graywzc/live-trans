@@ -9,6 +9,14 @@ struct VideoBundle: Decodable, Equatable, Identifiable {
         let en: String
         let start: Double
         let end: Double
+        /// The other recognizers' text and its translation, by recognizer,
+        /// when they heard the line.
+        var versions: [String: Version]? = nil
+    }
+
+    struct Version: Decodable, Equatable {
+        let ja: String
+        let en: String
     }
 
     /// The one format this app reads.

@@ -90,6 +90,21 @@ enum Fixtures {
          ]}
         """
 
+    /// Heard by the other recognizers too: the first line by both, the
+    /// second by one, a third by none.
+    static let versionsBundle = """
+        {"version": 1, "id": "aaaa456789abcdef", "title": "Lesson two", "duration": 95.5,
+         "created": "2026-10-27T18:00:00Z", "video": "video.mp4", "size": 4096, "step": "speech-mean",
+         "lines": [
+           {"ja": "窓の外で鳥が歌っている", "en": "窗外有鸟在唱歌", "start": 1.2, "end": 3.8,
+            "versions": {"qwen": {"ja": "窓の外で鳥が歌ってる", "en": "窗外鸟儿在唱"},
+                         "nemo": {"ja": "窓の外で鳥が歌っている。", "en": "窗外有鸟在歌唱。"}}},
+           {"ja": "お茶を一杯いかがですか", "en": "来杯茶吗", "start": 4.5, "end": 6.9,
+            "versions": {"nemo": {"ja": "お茶を一杯いかがです", "en": ""}}},
+           {"ja": "明日は図書館に行きます", "en": "明天去图书馆", "start": 7.5, "end": 9.0}
+         ]}
+        """
+
     static let untitledBundle = """
         {"version": 1, "id": "fedcba9876543210", "duration": 40, "created": "2026-10-26T09:30:00Z",
          "video": "video.mp4", "size": 2048,

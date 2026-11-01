@@ -172,6 +172,9 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(row(), row(), "a new closure is not a change")
         XCTAssertNotEqual(row(), row(isCurrent: true))
         XCTAssertNotEqual(row(), row(fontSize: 24))
+        var picked = row()
+        picked.picked = "nemo"
+        XCTAssertNotEqual(row(), picked)
     }
 
     func testThePlaceIsKeptWhilePlayingInCaseTheAppIsClosed() {
@@ -182,6 +185,45 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(PlaybackModel.restoredPosition(for: bundle, in: defaults), 30, "not at every step")
         model.observe(seconds: 36)
         XCTAssertEqual(PlaybackModel.restoredPosition(for: bundle, in: defaults), 36)
+    }
+
+    private func versionsModel() throws -> PlaybackModel {
+        PlaybackModel(bundle: try VideoBundle.decode(Data(Fixtures.versionsBundle.utf8)), video: nil, defaults: defaults)
+    }
+
+    func testEachRecognizersTextComesWithItsTranslationAndTheCaptionsOwnFirst() throws {
+        let captions = try versionsModel().captions
+        XCTAssertEqual(captions[0].versions.map(\.name), ["k2", "nemo", "qwen"])
+        XCTAssertEqual(captions[0].versions[1].english, "窗外有鸟在歌唱。")
+        XCTAssertEqual(captions[0].versions[2].ruby.map(\.base).joined(), "窓の外で鳥が歌ってる")
+        XCTAssertEqual(captions[1].versions.map(\.name), ["k2", "nemo"])
+        XCTAssertTrue(captions[2].versions.isEmpty, "heard by k2 alone, the row is as ever")
+        XCTAssertTrue(PlaybackModel.captions(of: bundle)[0].versions.isEmpty, "an older bundle")
+    }
+
+    func testAPickedVersionIsTheCaptionAndCanBeTakenBack() throws {
+        let model = try versionsModel()
+        let caption = model.captions[0]
+        XCTAssertEqual(caption.heard(by: nil), caption)
+        let heard = caption.heard(by: "qwen")
+        XCTAssertEqual(heard.japanese, "窓の外で鳥が歌ってる")
+        XCTAssertEqual(heard.english, "窗外鸟儿在唱")
+        XCTAssertEqual(heard.moment, caption.moment)
+        XCTAssertEqual(heard.id, caption.id)
+
+        model.pick("qwen", for: caption)
+        XCTAssertEqual(model.picks, [0: "qwen"])
+        model.pick(nil, for: caption)
+        XCTAssertEqual(model.picks, [:])
+    }
+
+    func testPicksAreKeptWithTheVideoUntilItIsDeleted() throws {
+        let model = try versionsModel()
+        model.pick("nemo", for: model.captions[1])
+        XCTAssertEqual(try versionsModel().picks, [1: "nemo"], "the next opening")
+        XCTAssertEqual(self.model().picks, [:], "another video has its own")
+        PlaybackModel.forgetPicks(for: model.bundle.id, in: defaults)
+        XCTAssertEqual(try versionsModel().picks, [:])
     }
 
     func testTheVideoIsReopenedOnlyWhenTheAppStarts() {
@@ -210,6 +252,32 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(PhoneCaptionRow.timestamp(245.7), "4:05")
         XCTAssertEqual(PhoneCaptionRow.timestamp(3725), "1:02:05")
         XCTAssertEqual(PhoneCaptionRow.timestamp(-3), "0:00")
+    }
+
+    /// A row of three versions, and rows with one picked, for a look.
+    func testTheVersionsStackAndAPickHidesTheOthers() throws {
+        let captions = try versionsModel().captions
+        func height(picked: String?) throws -> CGFloat {
+            let renderer = ImageRenderer(
+                content: PhoneCaptionRow(caption: captions[0], fontSize: 20, showFurigana: true, picked: picked, onTap: {})
+                    .frame(width: 390)
+            )
+            return try XCTUnwrap(renderer.uiImage).size.height
+        }
+        XCTAssertGreaterThan(try height(picked: nil), try height(picked: "nemo") * 2, "three texts against one")
+        let rows = VStack(alignment: .leading, spacing: 18) {
+            PhoneCaptionRow(caption: captions[0], fontSize: 20, showFurigana: true, isCurrent: true, onTap: {})
+            PhoneCaptionRow(caption: captions[1], fontSize: 20, showFurigana: true, picked: "nemo", onTap: {})
+            PhoneCaptionRow(caption: captions[2], fontSize: 20, showFurigana: true, onTap: {})
+        }
+        .padding(16)
+        .frame(width: 390)
+        .background(Color(.systemBackground))
+        let renderer = ImageRenderer(content: rows)
+        renderer.scale = 2
+        if let dir = ProcessInfo.processInfo.environment["SNAPSHOT_DIR"], let png = renderer.uiImage?.pngData() {
+            try? png.write(to: URL(fileURLWithPath: "\(dir)/phone-versions.png"))
+        }
     }
 
     /// The rows as the screen draws them, rendered to a picture for a look

@@ -7,6 +7,24 @@ struct Caption: Identifiable, Equatable {
     let english: String
     /// Where the sentence starts in the video it was heard from.
     var moment: VideoMoment?
+    /// What each recognizer heard, the caption's own first, when others
+    /// heard it too.
+    var versions: [CaptionVersion] = []
+
+    /// The caption as the recognizer `name` heard it; as it is for a name
+    /// it does not have.
+    func heard(by name: String?) -> Caption {
+        guard let version = versions.first(where: { $0.name == name }) else { return self }
+        return Caption(id: id, japanese: version.japanese, ruby: version.ruby, english: version.english, moment: moment)
+    }
+}
+
+/// One recognizer's text of a caption, with its translation.
+struct CaptionVersion: Equatable {
+    let name: String
+    let japanese: String
+    let ruby: [RubyToken]
+    let english: String
 }
 
 /// A stretch of a video: where a sentence was said.

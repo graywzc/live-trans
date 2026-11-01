@@ -38,6 +38,9 @@ final class PlaybackModel {
     /// The video's state: until it is ready its place shows what it is
     /// doing.
     private(set) var video = VideoState.loading
+    /// The recognizer picked for a caption, by the caption's id: its text
+    /// is shown, the others hidden until the pick is taken back.
+    private(set) var picks: [Int: String] = [:]
 
     @ObservationIgnored private var timeObserver: Any?
     private var stopObserver: Any?
@@ -65,6 +68,7 @@ final class PlaybackModel {
         self.captions = captions ?? Self.captions(of: bundle)
         player = AVPlayer(playerItem: video.map { AVPlayerItem(url: $0) })
         player.actionAtItemEnd = .pause
+        picks = Self.loadPicks(of: self.captions, for: bundle.id, in: defaults)
     }
 
     /// The bundle's lines as captions: one id per line, in order, readings
@@ -94,8 +98,19 @@ final class PlaybackModel {
         var moment = VideoMoment(tabID: tabID, url: bundle.id, seconds: line.start)
         moment.end = line.end
         moment.duration = bundle.duration
-        return Caption(id: index, japanese: line.ja, ruby: Furigana.annotate(line.ja), english: line.en, moment: moment)
+        let ruby = Furigana.annotate(line.ja)
+        var versions: [CaptionVersion] = []
+        if let others = line.versions, !others.isEmpty {
+            versions = [CaptionVersion(name: ownRecognizer, japanese: line.ja, ruby: ruby, english: line.en)]
+            versions += others.sorted { $0.key < $1.key }.map { name, version in
+                CaptionVersion(name: name, japanese: version.ja, ruby: Furigana.annotate(version.ja), english: version.en)
+            }
+        }
+        return Caption(id: index, japanese: line.ja, ruby: ruby, english: line.en, moment: moment, versions: versions)
     }
+
+    /// Who wrote a bundle line's own text.
+    private nonisolated static let ownRecognizer = "k2"
 
     // MARK: Following the video
 
@@ -267,6 +282,45 @@ final class PlaybackModel {
         guard let tapStart else { return }
         self.tapStart = nil
         timings.tap(ms: (ContinuousClock.now - tapStart) / .milliseconds(1))
+    }
+
+    // MARK: Picks
+
+    /// `name`'s text is the caption's from now on; nil takes the pick back,
+    /// and all of them show again.
+    func pick(_ name: String?, for caption: Caption) {
+        picks[caption.id] = name
+        guard let id = caption.moment?.url else { return }
+        Self.savePicks(picks, of: captions, for: id, in: defaults)
+    }
+
+    /// Kept per bundle by when each caption starts, a place that holds
+    /// however the bundle's lines are numbered. Gone with the bundle.
+    static func picksKey(for id: String) -> String { "picks.\(id)" }
+
+    private static func place(of caption: Caption) -> String? {
+        caption.moment.map { String($0.seconds) }
+    }
+
+    private static func savePicks(_ picks: [Int: String], of captions: [Caption], for id: String, in defaults: UserDefaults) {
+        var saved: [String: String] = [:]
+        for caption in captions {
+            if let name = picks[caption.id], let place = place(of: caption) { saved[place] = name }
+        }
+        defaults.set(saved, forKey: picksKey(for: id))
+    }
+
+    private static func loadPicks(of captions: [Caption], for id: String, in defaults: UserDefaults) -> [Int: String] {
+        guard let saved = defaults.dictionary(forKey: picksKey(for: id)) as? [String: String] else { return [:] }
+        var picks: [Int: String] = [:]
+        for caption in captions {
+            if let place = place(of: caption), let name = saved[place] { picks[caption.id] = name }
+        }
+        return picks
+    }
+
+    static func forgetPicks(for id: String, in defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: picksKey(for: id))
     }
 
     // MARK: Where it was left

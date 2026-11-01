@@ -319,6 +319,32 @@ def test_the_bundles_are_served_to_the_phone_once_one_is_kept():
     assert "served to the tailnet under /livetrans" in out.getvalue() and TAILNET_HOST not in out.getvalue(), out.getvalue()
 
 
+def test_the_bundle_holds_every_recognizer_s_version_of_a_caption():
+    cache = fresh_cache()
+    url, _ = hls_stream(6)
+    job = step_job(url, "https://example.com/watch/versions", 6)
+    first, second = LINES[0], LINES[1]
+    job.cache.save_findings("captions-speech", {"lines": LINES})
+    job.others = {(first["start"], first["end"]): {"nemo": "雨だね。", "nemo_en": "下雨了", "qwen": "雨だ"}}
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert srv.start_bundle(job, TITLE)[0] == 200
+        assert wait_for_bundle(job) == "done"
+    with open(os.path.join(job.cache.dir, "bundle.json"), encoding="utf-8") as f:
+        lines = json.load(f)["lines"]
+    assert lines[0]["versions"] == {"nemo": {"ja": "雨だね。", "en": "下雨了"}, "qwen": {"ja": "雨だ", "en": ""}}, lines[0]
+    assert lines[0]["ja"] == first["ja"] and lines[0]["en"] == first["en"], lines[0]
+    assert lines[1] == second, "heard by no other recognizer, the line is as it was"
+
+    # Still at them, the job has to be asked again.
+    job.others_done = False
+    srv.DEV_OTHER_HEARING = True
+    try:
+        code, payload = srv.start_bundle(job, TITLE)
+    finally:
+        srv.DEV_OTHER_HEARING = False
+    assert code == 409 and "other recognizers" in payload["error"], payload
+
+
 def test_a_media_much_shorter_than_the_captions_is_not_taken_for_the_video():
     # The job began while a 2-second pre-roll played: its own link and
     # length are the ad's, and the audio and captions kept are the 6-second
