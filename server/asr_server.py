@@ -18,7 +18,9 @@ POST /shutdown     exit now and release the GPU (unloads the ollama model too)
 POST /prefetch     body: {"url": media or page URL, "page": page URL,
                           "headers": {"Referer": ..., "User-Agent": ...},
                           "duration": seconds or null,
-                          "start": seconds into the video, 0 if absent}
+                          "start": seconds into the video, 0 if absent,
+                          "step": a dev step, "title": the page's, for the
+                          list of processed videos, both optional}
                    -> {"job": id}. Fetches the audio from there on with
                    ffmpeg (a page URL is resolved with yt-dlp first), and
                    finds the speech in it as it arrives, and transcribes
@@ -26,8 +28,7 @@ POST /prefetch     body: {"url": media or page URL, "page": page URL,
                    in a pause (see choose_batch), the words of each put
                    into the pieces of a grid of cuts made at the pauses in
                    the audio (see CutGrid). A job running for the
-                   same page is stopped; what it captioned can still be
-                   heard again.
+                   same page is stopped.
 GET  /prefetch/<id>?since=N
                    -> {"state": "running"|"paused"|"done"|"failed", "error": ...,
                        "duration": seconds or null, "start": seconds,
@@ -35,12 +36,6 @@ GET  /prefetch/<id>?since=N
                        the video, like "start"), "count": lines so far,
                        "lines": the lines from index N on, with absolute
                        "start"/"end"}
-POST /prefetch/<id>/rehear?from=&to=[&vad=1]
-                   -> {"lines": [...]} the pieces of the grid at that
-                   stretch heard again from the fetched audio, with a wider
-                   search, their context, and the neighbours that follow on
-                   in the audio heard with them; the lines come back on the
-                   same cuts as before, or finer, never otherwise.
 POST /prefetch/<id>/stop
 POST /prefetch/<id>/pause, /prefetch/<id>/resume
                    holds or lets go the transcription (the GPU work); the
@@ -1697,8 +1692,10 @@ class DevCache:
         24-minute episode), so within 3%."""
         return not duration or duration <= 0 or seconds >= duration * 0.97
 
-    def __init__(self, page, url):
-        self.dir = os.path.join(DEV_CACHE_DIR, hashlib.sha256((page or url).encode("utf-8")).hexdigest()[:16])
+    def __init__(self, page, url, title=None):
+        self.page = page or url
+        self.title = title
+        self.dir = os.path.join(DEV_CACHE_DIR, hashlib.sha256(self.page.encode("utf-8")).hexdigest()[:16])
 
     def load_audio(self, unclocked=False):
         """The whole audio kept for the video, from its start, the video's
@@ -1733,7 +1730,24 @@ class DevCache:
         (np.clip(audio, -1, 1) * 32767).astype("<i2").tofile(os.path.join(self.dir, "audio.s16.part"))
         os.replace(os.path.join(self.dir, "audio.s16.part"), os.path.join(self.dir, "audio.s16"))
         with open(os.path.join(self.dir, "audio.json"), "w", encoding="utf-8") as f:
-            json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration, "clock": clock}, f)
+            json.dump({"seconds": audio.size / SAMPLE_RATE, "duration": duration, "clock": clock,
+                       "page": self.page, "title": self.title}, f)
+
+    def note_video(self):
+        """Its captions are kept: audio kept before pages were noted gets
+        its page and title, and the list of processed videos is made again."""
+        path = os.path.join(self.dir, "audio.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                about = json.load(f)
+            if about.get("page") != self.page or (self.title and about.get("title") != self.title):
+                about.update(page=self.page, title=self.title or about.get("title"))
+                with open(path + ".part", "w", encoding="utf-8") as f:
+                    json.dump(about, f)
+                os.replace(path + ".part", path)
+        except (OSError, ValueError) as exc:
+            print(f"video not noted: {exc}", flush=True)
+        write_video_index()
 
     def audio_seconds(self):
         """How long the audio kept for the video is, or None."""
@@ -1802,6 +1816,48 @@ def reference_lines(page):
         return None
 
 
+# videos.json at the top of the dev cache: the videos with captions kept, for
+# the app to offer. Read over ssh, as the app lists them with no server up.
+VIDEO_INDEX = "videos.json"
+
+
+def write_video_index():
+    """The videos whose captions are kept, by the page they were made from,
+    the last processed first; a folder from before pages were noted is left
+    out until its video is run again. The entries."""
+    entries = []
+    try:
+        names = os.listdir(DEV_CACHE_DIR)
+    except OSError:
+        return entries
+    for name in names:
+        folder = os.path.join(DEV_CACHE_DIR, name)
+        try:
+            with open(os.path.join(folder, "audio.json"), encoding="utf-8") as f:
+                about = json.load(f)
+        except (OSError, ValueError):
+            continue
+        cache = DevCache(about.get("page"), None) if about.get("page") else None
+        if cache is None or cache.dir != folder or not any(cache.load_findings(f"captions-{step}") for step in DEV_STEPS):
+            continue
+        entries.append((os.path.getmtime(os.path.join(folder, "audio.json")), {
+            "id": name, "page": about["page"], "title": about.get("title") or "", "duration": about.get("duration"),
+        }))
+    entries = [entry for _, entry in sorted(entries, key=lambda e: e[0], reverse=True)]
+    path = os.path.join(DEV_CACHE_DIR, VIDEO_INDEX)
+    try:
+        if not entries:
+            if os.path.isfile(path):
+                os.remove(path)
+            return entries
+        with open(path + ".part", "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False)
+        os.replace(path + ".part", path)
+    except OSError as exc:
+        print(f"video index not written: {exc}", flush=True)
+    return entries
+
+
 def clear_dev_cache(page=None, bundle_only=False):
     """Forgets every video dev mode kept, or the one at `page` alone; with
     `bundle_only`, only what that one holds for the phone (the video and
@@ -1817,6 +1873,7 @@ def clear_dev_cache(page=None, bundle_only=False):
             shutil.rmtree(folder, ignore_errors=True)
             had = 1
         write_bundle_index()
+        write_video_index()
         return had
     try:
         kept = [d for d in os.listdir(DEV_CACHE_DIR) if os.path.isdir(os.path.join(DEV_CACHE_DIR, d))]
@@ -1827,6 +1884,7 @@ def clear_dev_cache(page=None, bundle_only=False):
         stop_bundle_fetch(folder)
         shutil.rmtree(folder, ignore_errors=True)
     write_bundle_index()
+    write_video_index()
     return len(kept)
 
 
@@ -2955,7 +3013,7 @@ class PacketClock:
 
 
 class PrefetchJob:
-    def __init__(self, url, page, headers, duration, start=0.0, step=None):
+    def __init__(self, url, page, headers, duration, start=0.0, step=None, title=None):
         if step is not None and step not in DEV_STEPS:
             raise ValueError(f"no such step: {step}")
         self.id = uuid.uuid4().hex[:12]
@@ -3028,7 +3086,7 @@ class PrefetchJob:
         self.others_done = False
         # Dev mode's keeping of the video, for a step job from the start;
         # `cached`, whether the audio came from it rather than a fetch.
-        self.cache = DevCache(page, url) if step and self.offset == 0 else None
+        self.cache = DevCache(page, url, title) if step and self.offset == 0 else None
         self.cached = False
         self.state = "running"
         self.error = None
@@ -3074,8 +3132,8 @@ class PrefetchJob:
         return lines
 
     def retire(self):
-        """Stopped for another stretch of the same video. What it captioned
-        can still be heard again; the audio past that is let go."""
+        """Stopped for another stretch of the same video. The audio past
+        what it looked at is let go."""
         self.stop()
         with self.audio_lock:
             kept = max(self.ready, self._samples(self.analysed)) - self.offset
@@ -3218,6 +3276,7 @@ class PrefetchJob:
                     if self.cache and self.cache.audio_seconds():
                         try:
                             self.cache.save_findings(f"captions-{self.step}", {"lines": self.lines})
+                            self.cache.note_video()
                         except OSError as exc:
                             print(f"prefetch {self.id}: captions not cached: {exc}", flush=True)
                     self.captioned = True
@@ -3536,6 +3595,7 @@ class PrefetchJob:
         if not kept or not kept.get("lines"):
             return False
         self.lines = kept["lines"]
+        self.cache.note_video()
         self.feed = list(self.lines)
         self.text = "".join(line["ja"] for line in self.lines)
         self.captioned = True
@@ -3690,14 +3750,13 @@ class PrefetchJob:
         self.text += ja
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
 
-    def rehear(self, start, end, vad=False):
+    def rehear(self, start, end):
         """The pieces of the grid at `start`..`end` heard again from the
-        fetched audio, with the wider search, the lines before them as
-        context, and the neighbours that follow on in the audio heard with
-        them, so a sentence is heard whole; only those pieces' lines come
-        back. Only the speech of the pieces is decoded, so `vad` (once
-        asking for that, for a gap in the captions that may be music)
-        changes nothing. `start` and `end` are times in the video."""
+        fetched audio, for cutting a caption where the speaker changes,
+        with the lines before them as context and the neighbours that
+        follow on in the audio heard with them, so a sentence is heard
+        whole; only those pieces' lines come back. `start` and `end` are
+        times in the video."""
         before = [line["ja"] for line in self.lines if line.get("end", 0) <= start + 0.05][-2:]
         if self.clock:
             start, end = self.clock.to_samples(start), self.clock.to_samples(end)
@@ -3778,7 +3837,7 @@ class PrefetchJob:
         return found
 
 
-def start_prefetch(url, page, headers, duration, start=0.0, step=None):
+def start_prefetch(url, page, headers, duration, start=0.0, step=None, title=None):
     with _jobs_lock:
         for job in _jobs.values():
             if job.page == page and job.state == "running":
@@ -3787,7 +3846,7 @@ def start_prefetch(url, page, headers, duration, start=0.0, step=None):
             oldest = min(_jobs.values(), key=lambda j: j.started)
             oldest.stop()
             del _jobs[oldest.id]
-        job = PrefetchJob(url, page, headers, duration, start, step=step)
+        job = PrefetchJob(url, page, headers, duration, start, step=step, title=title)
         _jobs[job.id] = job
         return job
 
@@ -3874,7 +3933,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _do_prefetch(self):
-        from urllib.parse import parse_qs, urlparse
+        from urllib.parse import urlparse
 
         parts = urlparse(self.path)
         pieces = parts.path.split("/")
@@ -3884,7 +3943,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = start_prefetch(
                     request.get("url") or "", request.get("page") or "",
                     request.get("headers") or {}, request.get("duration"), request.get("start") or 0,
-                    step=request.get("step") or None,
+                    step=request.get("step") or None, title=request.get("title") or None,
                 )
             except Exception as exc:
                 self._send(400, {"error": f"{type(exc).__name__}: {exc}"})
@@ -3918,14 +3977,6 @@ class Handler(BaseHTTPRequestHandler):
                 float(duration) if isinstance(duration, (int, float)) and duration > 0 else None,
             )
             self._send(code, payload)
-        elif action == "rehear":
-            query = parse_qs(parts.query)
-            try:
-                start, end = float(query["from"][0]), float(query["to"][0])
-                vad = query.get("vad", ["0"])[0] == "1"
-                self._send(200, {"lines": job.rehear(start, end, vad=vad)})
-            except Exception as exc:
-                self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
         else:
             self._send(404, {"error": "not found"})
 
@@ -4003,6 +4054,7 @@ def start_idle_watchdog(timeout):
 
 def main():
     global TARGET
+    write_video_index()
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)

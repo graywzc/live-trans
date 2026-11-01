@@ -6,9 +6,7 @@ import Observation
 /// fetches and transcribes it in chunks from where the viewer is, and the
 /// lines land among the captions by where in the video they are, before the
 /// video gets there. When the viewer jumps to somewhere not captioned it
-/// starts again from there, keeping what it has. The live listener stands
-/// down over the stretches this covers. Nothing is fetched until asked for,
-/// and it can be paused and taken up again.
+/// starts again from there, keeping what it has. It runs from Start to Stop.
 ///
 /// It also keeps track of where the video is, for the bar that shows it and
 /// moves it.
@@ -28,8 +26,6 @@ final class Prefetcher {
         var state = "running"
         /// Lines taken so far.
         var seen = 0
-        /// Whether the host was told to hold its transcription.
-        var paused = false
         /// Whether the host can begin anywhere but the top. One that can't
         /// is left to run on when the viewer jumps.
         var seeks = true
@@ -37,10 +33,8 @@ final class Prefetcher {
         var others = 0
     }
 
-    /// A stretch of the video captioned ahead, and the job that holds its
-    /// audio for hearing a sentence again.
+    /// A stretch of the video captioned ahead.
     struct Stretch: Equatable {
-        let job: String
         let from: Double
         let to: Double
 
@@ -77,8 +71,6 @@ final class Prefetcher {
     private(set) var lull: Lull?
 
     var isActive: Bool { job != nil }
-    /// Off at launch: the video is only fetched ahead once asked to.
-    private(set) var isPaused = true
     /// Why the host could not fetch the video it was to caption ahead, for
     /// the viewer; nil while it can, or before it has tried.
     private(set) var problem: String?
@@ -165,16 +157,6 @@ final class Prefetcher {
         }
     }
 
-    /// Starts fetching ahead, or pauses it. Paused, the captions already
-    /// fetched stay and the host stops transcribing; taken up again, it goes
-    /// on from where it stopped, or from the viewer if they have moved away.
-    func toggle() {
-        isPaused.toggle()
-        if !isPaused { jumped = true }
-        lastProbe = .distantPast
-        Task { await tick() }
-    }
-
     /// Where the video is put in place without asking Chrome, for tests.
     func show(playhead: VideoMoment, at date: Date = Date()) {
         self.playhead = playhead
@@ -222,72 +204,11 @@ final class Prefetcher {
         stretch(holding: moment) != nil
     }
 
-    /// The caption's sentence heard again from the fetched audio, with the
-    /// wider search and its context; the server hears the neighbours it
-    /// follows on from with it, so a sentence cut in two is heard whole,
-    /// and gives back the caption's own pieces of its grid, on the same
-    /// cuts as before or finer. What comes back corrects the caption.
-    func rehear(_ caption: Caption) {
-        guard let moment = caption.moment, let end = moment.end, let stretch = stretch(holding: moment),
-              let client = engine.client
-        else { return }
-        let from = max(moment.seconds, stretch.from), to = min(end, stretch.to)
-        Task {
-            do {
-                let lines = try await client.rehear(job: stretch.job, from: from, to: to)
-                engine.add(lines, tabID: moment.tabID, url: moment.url, heardAgain: true)
-            } catch {
-                print("rehear failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// Hears the gap in the captions at `seconds` of a page's video again
-    /// from the fetched audio, for a sentence that went unheard there, as
-    /// the action to do so; what comes back goes among the captions. Only
-    /// the speech in it is given to Whisper, which over music invents
-    /// lines. Nil when the gap is too short to hold a sentence, or its
-    /// audio was never fetched.
-    func gapRehearing(at seconds: Double, tabID: Int, url: String) -> (() -> Void)? {
-        guard let finishedIn, tabID == finishedIn.tabID, url == finishedIn.page, let client = engine.client,
-              let gap = CaptionEngine.gapStretch(
-                  at: seconds, among: engine.captions, tabID: tabID, url: url,
-                  within: stretches.map { $0.from...$0.to }
-              ),
-              let stretch = stretches.first(where: { $0.holds((gap.from + gap.to) / 2) })
-        else { return nil }
-        let engine = self.engine
-        return {
-            Task {
-                do {
-                    let lines = try await client.rehear(job: stretch.job, from: gap.from, to: gap.to, speechOnly: true)
-                    engine.add(lines, tabID: tabID, url: url, heardAgain: true)
-                } catch {
-                    print("gap rehear failed: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-
-    /// The gap under `caption`, before the one after it, heard again: the
-    /// action, or nil when there is nothing there to hear.
-    func gapRehearing(after caption: Caption) -> (() -> Void)? {
-        guard let moment = caption.moment, let end = moment.end else { return nil }
-        return gapRehearing(at: end, tabID: moment.tabID, url: moment.url)
-    }
-
-    /// The gap the video is in, heard again: the action, or nil when there
-    /// is nothing there to hear.
-    var lullRehearing: (() -> Void)? {
-        guard let lull, let playhead else { return nil }
-        return gapRehearing(at: Double(lull.seconds), tabID: playhead.tabID, url: playhead.url)
-    }
-
     /// Every stretch captioned ahead: the job's own first, then those of
     /// the jobs before it.
     private var stretches: [Stretch] {
         guard let job, job.ready > job.start else { return finished }
-        return [Stretch(job: job.id, from: job.start, to: job.ready)] + finished
+        return [Stretch(from: job.start, to: job.ready)] + finished
     }
 
     private var isOnFetchedVideo: Bool {
@@ -335,9 +256,7 @@ final class Prefetcher {
 
     private func manageJob() async {
         // In dev mode the pipeline is run a step at a time, by DevPipeline.
-        guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client,
-              UserDefaults.standard.bool(forKey: AppSettings.prefetchVideo), !isDev()
-        else {
+        guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client, !isDev() else {
             await stopJob()
             return
         }
@@ -351,12 +270,12 @@ final class Prefetcher {
                     problem = nil
                 }
                 lastMedia = probe
-                if !isPaused, !probe.isFetchable {
+                if !probe.isFetchable {
                     problem = probe.encrypted
                         ? "This video is under DRM: the host can't fetch it."
                         : "The host can't fetch this video: the page gives no way to its audio."
                 }
-                if job == nil, !isPaused, probe.isFetchable, !failedPages.contains(probe.page) {
+                if job == nil, probe.isFetchable, !failedPages.contains(probe.page) {
                     await startJob(for: probe, client: client)
                 }
             }
@@ -371,18 +290,6 @@ final class Prefetcher {
             await client.stopPrefetch(job: current.id)
             lastProbe = .distantPast
             return
-        }
-        if current.paused != isPaused {
-            do {
-                try await client.setPrefetch(job: current.id, paused: isPaused)
-                if job?.id == current.id { job?.paused = isPaused }
-            } catch {
-                // A host that cannot pause is stopped instead, and a job it
-                // no longer has is started afresh.
-                print("prefetch \(isPaused ? "pause" : "resume"): \(error.localizedDescription)")
-                if isPaused { await stopJob() } else if job?.id == current.id { retire() }
-                return
-            }
         }
         do {
             let status = try await client.prefetchStatus(job: current.id, since: current.seen)
@@ -407,7 +314,7 @@ final class Prefetcher {
                 return !finished.contains { $0.holds(start) }
             }
             if !lines.isEmpty {
-                engine.add(lines, tabID: current.tabID, url: current.page, heardAgain: false)
+                engine.add(lines, tabID: current.tabID, url: current.page)
             }
             if status.state == "failed" {
                 print("prefetch failed: \(status.error ?? "unknown")")
@@ -459,7 +366,7 @@ final class Prefetcher {
     private func retire() {
         guard let job else { return }
         if job.ready > job.start {
-            finished.insert(Stretch(job: job.id, from: job.start, to: job.ready), at: 0)
+            finished.insert(Stretch(from: job.start, to: job.ready), at: 0)
         }
         self.job = nil
     }

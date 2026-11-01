@@ -108,8 +108,13 @@ final class DevPipeline {
     private(set) var others: [OtherHearing] = []
     /// Their texts with readings, by text, made once each.
     @ObservationIgnored private var otherRuby: [String: [RubyToken]] = [:]
-    /// Off at launch, like captioning ahead.
+    /// Off at launch, until Start or Load.
     private(set) var isPaused = true
+    /// The videos the host keeps captions of, as it last listed them.
+    private(set) var processed: [ProcessedVideo] = []
+    /// The one of them chosen under the captions, which Load opens in
+    /// Chrome; nil for a Chrome tab.
+    var picked: ProcessedVideo?
     /// The stretch of the video picked out on the timeline.
     var selection: ClosedRange<Double>?
     /// Where the pointer was put on the timeline by a click, for playing
@@ -129,7 +134,7 @@ final class DevPipeline {
     /// The step run, kept across launches. Choosing another while a job
     /// runs stops that job, and the chosen step starts over the same video,
     /// from the audio the host kept of it.
-    var step = Step(rawValue: UserDefaults.standard.string(forKey: AppSettings.pipelineStep) ?? "") ?? .speech {
+    var step = Step(rawValue: UserDefaults.standard.string(forKey: AppSettings.pipelineStep) ?? "") ?? .speechMean {
         didSet {
             guard step != oldValue else { return }
             UserDefaults.standard.set(step.rawValue, forKey: AppSettings.pipelineStep)
@@ -179,7 +184,24 @@ final class DevPipeline {
         Task { await tick() }
     }
 
-    /// Dev mode's Load: runs the step over the Chrome video, which takes
+    /// Asks the host what it has processed.
+    func refreshProcessed() async {
+        guard let listed = await ProcessedVideo.list(host: AppSettings.serverConfig.sshHost) else { return }
+        processed = listed
+    }
+
+    /// Whether the host keeps captions of the video at `page`.
+    func isProcessed(_ page: String?) -> Bool {
+        processed.contains { $0.page == page }
+    }
+
+    /// Nothing is offered once out of Default.
+    func forgetProcessed() {
+        processed = []
+        picked = nil
+    }
+
+    /// Dev mode's Start and Load: runs the step over the video, which takes
     /// from the host's cache whatever it made before over the video, and
     /// makes only what is missing.
     func load() {
@@ -331,6 +353,10 @@ final class DevPipeline {
         guard let current = job else {
             guard !isPaused, Date().timeIntervalSince(lastProbe) >= Self.probeInterval else { return }
             lastProbe = Date()
+            if let picked {
+                await open(picked, client: client)
+                return
+            }
             guard let probe = await video.probeMedia(), probe.isFetchable, !failedPages.contains(Self.failure(probe.page, step)) else {
                 return
             }
@@ -376,13 +402,14 @@ final class DevPipeline {
             // The captions the step's speech finder led to, on the caption
             // list as production's would be.
             if !status.lines.isEmpty {
-                engine.add(status.lines, tabID: current.tabID, url: current.page, heardAgain: false)
+                engine.add(status.lines, tabID: current.tabID, url: current.page)
             }
             updated.seenLines = status.count
             if let captions = status.captions, captions != updated.captions {
                 updated.captions = captions
                 if captions == "done" {
                     ActivityLog.tell("Step \(current.step.title): \(status.count) captions, the whole video")
+                    await refreshProcessed()
                 } else if captions.hasPrefix("failed") {
                     ActivityLog.tell("Step \(current.step.title): captions \(captions)")
                 }
@@ -520,21 +547,47 @@ final class DevPipeline {
         }
     }
 
+    /// A processed video opened in Chrome and its job started: the host
+    /// has its audio, so the page need not give a way to it.
+    private func open(_ picked: ProcessedVideo, client: ASRClient) async {
+        self.picked = nil
+        guard let tab = await video.open(picked) else {
+            ActivityLog.tell("Could not open the video in Chrome")
+            isPaused = true
+            return
+        }
+        await startJob(
+            url: nil, page: picked.page, headers: [:], duration: picked.duration, tabID: tab.id, title: picked.title,
+            client: client
+        )
+    }
+
     private func startJob(for probe: MediaProbe, client: ASRClient) async {
-        let step = step
         var headers = ["User-Agent": probe.userAgent]
         if probe.mediaURL != nil { headers["Referer"] = probe.page }
+        let title = video.tabs.first { $0.id == probe.tabID }?.title
+            ?? video.pinned.flatMap { $0.id == probe.tabID ? $0.title : nil }
+        await startJob(
+            url: probe.mediaURL, page: probe.page, headers: headers, duration: probe.duration, tabID: probe.tabID,
+            title: title, client: client
+        )
+    }
+
+    private func startJob(
+        url: String?, page: String, headers: [String: String], duration: Double?, tabID: Int, title: String?,
+        client: ASRClient
+    ) async {
+        let step = step
         do {
             let id = try await client.startPrefetch(
-                url: probe.mediaURL, page: probe.page, headers: headers, duration: probe.duration, start: 0,
-                step: step.rawValue
+                url: url, page: page, headers: headers, duration: duration, start: 0, step: step.rawValue, title: title
             )
-            job = Job(id: id, tabID: probe.tabID, page: probe.page, step: step, duration: probe.duration)
+            job = Job(id: id, tabID: tabID, page: page, step: step, duration: duration)
             // The list shows this step's captions alone.
             engine.clear()
-            if referencePage != probe.page {
-                referencePage = probe.page
-                reference = await client.reference(page: probe.page)
+            if referencePage != page {
+                referencePage = page
+                reference = await client.reference(page: page)
                 if !reference.isEmpty {
                     ActivityLog.tell("\(reference.count) official subtitle lines to set beside the captions")
                 }
@@ -547,12 +600,12 @@ final class DevPipeline {
             selection = nil
             cursor = nil
             cursorArmed = false
-            let length = probe.duration.map { ", \(Self.clock($0)) long" } ?? ""
+            let length = duration.map { ", \(Self.clock($0)) long" } ?? ""
             ActivityLog.tell("Step \(step.title): fetching the whole video\(length), from its start")
-            print("step \(step.rawValue) \(id): \(probe.mediaURL ?? probe.page)")
+            print("step \(step.rawValue) \(id): \(url ?? page)")
         } catch {
             ActivityLog.tell("Step \(step.title) could not start: \(error.localizedDescription)")
-            failedPages.insert(Self.failure(probe.page, step))
+            failedPages.insert(Self.failure(page, step))
         }
     }
 

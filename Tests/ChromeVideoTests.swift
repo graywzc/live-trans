@@ -18,6 +18,12 @@ final class ChromeVideoTests: XCTestCase {
         XCTAssertEqual(ChromeScript.outcome(fromResult: "missing value|1|x"), .noVideo)
     }
 
+    func testAProcessedVideoOpensInANewTab() {
+        let source = ChromeScript.openSource(#"https://example.tv/play/"x""#)
+        XCTAssertTrue(source.contains(#"make new tab with properties {URL:"https://example.tv/play/\"x\""}"#), source)
+        XCTAssertTrue(source.contains("return id of t as text"))
+    }
+
     func testListingKeepsEveryTab() {
         let listing = [
             ["1", "1173479941", "paused", "https://example.tv/play/x", "Video 12 | example"],

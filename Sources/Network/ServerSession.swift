@@ -45,6 +45,30 @@ struct ServerConfig: Equatable {
     }
 }
 
+/// A video whose captions the host keeps from Default.
+struct ProcessedVideo: Decodable, Equatable, Identifiable {
+    let id: String
+    let page: String
+    var title = ""
+    var duration: Double?
+
+    var label: String { title.isEmpty ? page : title }
+
+    /// What the host lists: read over ssh, as with no server up there is
+    /// nothing else to ask. The server writes it (write_video_index).
+    static let listCommand = "cat ~/livetrans/devcache/videos.json 2>/dev/null || echo '[]'"
+
+    /// The list on `host`, or nil when it cannot be read.
+    static func list(host: String) async -> [ProcessedVideo]? {
+        guard !host.isEmpty, let text = await SSH.output(host: host, command: listCommand) else { return nil }
+        return decoded(from: Data(text.utf8))
+    }
+
+    static func decoded(from data: Data) -> [ProcessedVideo]? {
+        try? JSONDecoder().decode([ProcessedVideo].self, from: data)
+    }
+}
+
 enum SSH {
     static let baseArguments = ["-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
 

@@ -239,7 +239,7 @@ struct ASRClient {
     /// pipeline alone over the whole of the audio, making no captions.
     func startPrefetch(
         url: String?, page: String, headers: [String: String], duration: Double?, start: Double = 0,
-        step: String? = nil
+        step: String? = nil, title: String? = nil
     ) async throws -> String {
         var request = URLRequest(url: baseURL.appending(path: "prefetch"))
         request.httpMethod = "POST"
@@ -248,6 +248,7 @@ struct ASRClient {
         var body: [String: Any] = ["url": url ?? "", "page": page, "headers": headers, "start": start]
         if let duration { body["duration"] = duration }
         if let step { body["step"] = step }
+        if let title, !title.isEmpty { body["title"] = title }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)
         struct Payload: Decodable { var job: String?; var error: String? }
@@ -263,25 +264,6 @@ struct ASRClient {
         request.timeoutInterval = 20
         let (data, response) = try await session.data(for: request)
         return try Self.decode(PrefetchStatus.self, from: data, statusCode: response)
-    }
-
-    /// The stretch heard again from the fetched audio. With `speechOnly`
-    /// the host's voice filter picks the speech out of it first, and music
-    /// or silence gives nothing rather than invented lines.
-    func rehear(job: String, from start: Double, to end: Double, speechOnly: Bool = false) async throws -> [CaptionPair] {
-        var components = URLComponents(url: baseURL.appending(path: "prefetch/\(job)/rehear"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [
-            URLQueryItem(name: "from", value: String(start)), URLQueryItem(name: "to", value: String(end)),
-        ]
-        if speechOnly {
-            components.queryItems?.append(URLQueryItem(name: "vad", value: "1"))
-        }
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        let (data, response) = try await session.data(for: request)
-        struct Payload: Decodable { var lines: [CaptionPair] }
-        return try Self.decode(Payload.self, from: data, statusCode: response).lines
     }
 
     /// What a dev job's step has found so far.

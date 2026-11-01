@@ -186,6 +186,20 @@ final class StepTimelineTests: XCTestCase {
         )
     }
 
+    func testTheHostsListOfProcessedVideosDecidesLoad() throws {
+        let list = Data(#"[{"id": "a1", "page": "https://example.tv/1", "title": "One", "duration": 60}, {"id": "b2", "page": "https://example.tv/2", "title": ""}]"#.utf8)
+        let videos = try XCTUnwrap(ProcessedVideo.decoded(from: list))
+        XCTAssertEqual(videos.map(\.label), ["One", "https://example.tv/2"])
+        XCTAssertNil(ProcessedVideo.decoded(from: Data("not json".utf8)))
+        XCTAssertTrue(ProcessedVideo.listCommand.contains("|| echo '[]'"), "no list yet is an empty list, not a failure")
+    }
+
+    func testAFreshAppFindsTheSpeechAsIncognitoDoes() {
+        UserDefaults.standard.removeObject(forKey: AppSettings.pipelineStep)
+        AppSettings.registerDefaults()
+        XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.pipelineStep), "speech-mean")
+    }
+
     func testTheStepsAreTheHostsAndTheChoiceIsKept() {
         // The names the host's DEV_STEPS knows them by.
         XCTAssertEqual(DevPipeline.Step.allCases.map(\.rawValue), ["speech", "speech-firered", "speech-mean"])
