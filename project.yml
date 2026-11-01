@@ -90,8 +90,15 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         ITSAppUsesNonExemptEncryption: false
+    # Settings shows the commit the build came from (AppVersion).
+    postBuildScripts:
+      - name: Stamp the build
+        basedOnDependencyAnalysis: false
+        script: |
+          git -C "$SRCROOT" describe --tags --always > "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/build.txt" || true
     settings:
       base:
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
         PRODUCT_BUNDLE_IDENTIFIER: com.larrywang.livetrans.ios
         PRODUCT_NAME: LiveTrans
         PRODUCT_MODULE_NAME: LiveTransMobile
@@ -100,6 +107,12 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
+      # The nightly refresh installs the Debug configuration: optimized all
+      # the same, or the phone runs far slower than the release would.
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+          SWIFT_COMPILATION_MODE: wholemodule
   LiveTransMobileTests:
     type: bundle.unit-test
     platform: iOS

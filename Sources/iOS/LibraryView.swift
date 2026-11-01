@@ -4,9 +4,14 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(BundleStore.self) private var store
     @AppStorage(AppSettings.bundleHost) private var hostText = ""
+    /// The video on screen. Kept with the scene, so when iOS closes the
+    /// app in the background it comes back there; swiped away by hand,
+    /// it starts at the list.
+    @SceneStorage("openBundle") private var openID = ""
+    @State private var path: [String] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 if let error = store.error {
                     Section {
@@ -34,10 +39,19 @@ struct LibraryView: View {
                 }
             }
             .navigationTitle("Library")
+            .navigationDestination(for: String.self) { id in
+                if let bundle = store.bundle(id) {
+                    PlayerView(bundle: bundle)
+                }
+            }
             .refreshable { await store.refresh() }
             .task(id: hostText) {
                 store.host = AppSettings.hostURL(hostText)
                 await store.refresh()
+            }
+            .onChange(of: path) { openID = path.first ?? "" }
+            .onAppear {
+                if path.isEmpty, store.bundle(openID) != nil { path = [openID] }
             }
         }
     }
@@ -45,9 +59,7 @@ struct LibraryView: View {
     @ViewBuilder
     private func row(_ item: BundleStore.Item) -> some View {
         if let bundle = store.bundle(item.id) {
-            NavigationLink {
-                PlayerView(bundle: bundle)
-            } label: {
+            NavigationLink(value: bundle.id) {
                 BundleRow(item: item, download: nil, onDownload: nil)
             }
             .swipeActions(edge: .trailing) {

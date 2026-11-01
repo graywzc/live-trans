@@ -45,6 +45,10 @@ struct MobileSettingsView: View {
                 } footer: {
                     Text("Readings over the kanji come from the system's Japanese tokenizer, offline.")
                 }
+
+                Section {
+                    LabeledContent("Version", value: AppVersion.current)
+                }
             }
             .navigationTitle("Settings")
         }
@@ -56,5 +60,24 @@ struct MobileSettingsView: View {
             .textContentType(.URL)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
+    }
+}
+
+/// What this build is: the commit it was made from, as `git describe`
+/// wrote it into the app at build time (last tag, commits since, the
+/// commit's hash). The refresh that installs the app sets no marketing
+/// version, so that alone would always read the same.
+enum AppVersion {
+    static let buildFile = "build.txt"
+
+    static var current: String {
+        let build = Bundle.main.url(forResource: buildFile, withExtension: nil)
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        return text(build: build, marketing: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+    }
+
+    static func text(build: String?, marketing: String?) -> String {
+        if let build = build?.trimmingCharacters(in: .whitespacesAndNewlines), !build.isEmpty { return build }
+        return marketing ?? "unknown"
     }
 }

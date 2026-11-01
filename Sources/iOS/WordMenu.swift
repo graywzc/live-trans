@@ -16,15 +16,16 @@ enum WordAction: Equatable {
 /// The menu's items. Apple's dictionaries are downloaded by the user in
 /// Settings, so a word may have no definition yet: then that item is
 /// greyed out, the way the Mac greys Grammar while it cannot be asked.
+/// That is asked only when the menu opens: half a millisecond a word,
+/// every word on screen, would hold up each change of caption.
 struct WordMenuItems: View {
     let word: String
-    let hasDefinition: Bool
     let onAction: (WordAction) -> Void
 
     var body: some View {
         Button("Jisho", systemImage: "character.book.closed") { onAction(.jisho) }
         Button("Dictionary", systemImage: "book.closed") { onAction(.dictionary) }
-            .disabled(!hasDefinition)
+            .disabled(!Self.dictionaryKnows(word))
         Button("Grammar", systemImage: "text.book.closed") { onAction(.grammar) }
         Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = word }
     }
