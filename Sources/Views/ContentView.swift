@@ -222,7 +222,7 @@ struct ContentView: View {
                     }
                 }
             }
-            if !isDev, let problem = prefetch.problem {
+            if let problem = isDev ? dev.problem : prefetch.problem {
                 // With the Mac's audio not heard, a video the host can't fetch
                 // gets no captions: said here, not left to look like silence.
                 Label(problem, systemImage: "exclamationmark.triangle")

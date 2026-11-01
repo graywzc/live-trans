@@ -270,11 +270,7 @@ final class Prefetcher {
                     problem = nil
                 }
                 lastMedia = probe
-                if !probe.isFetchable {
-                    problem = probe.encrypted
-                        ? "This video is under DRM: the host can't fetch it."
-                        : "The host can't fetch this video: the page gives no way to its audio."
-                }
+                if let unfetchable = probe.problem { problem = unfetchable }
                 if job == nil, probe.isFetchable, !failedPages.contains(probe.page) {
                     await startJob(for: probe, client: client)
                 }

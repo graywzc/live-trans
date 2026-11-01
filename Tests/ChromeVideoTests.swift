@@ -425,10 +425,12 @@ final class MediaProbeTests: XCTestCase {
         let drm = try XCTUnwrap(ChromeScript.mediaProbe(fromResult: "drm 100   \(encoded("https://x/")) ua|1|T"))
         XCTAssertTrue(drm.encrypted)
         XCTAssertFalse(drm.isFetchable)
+        XCTAssertEqual(drm.problem, "This video is under DRM: the host can't fetch it.")
         // A player that assembles its own stream, on a page the host can ask about.
         let page = try XCTUnwrap(ChromeScript.mediaProbe(fromResult: "clear 100   \(encoded("https://x/")) ua|1|T"))
         XCTAssertNil(page.mediaURL)
         XCTAssertTrue(page.isFetchable)
+        XCTAssertNil(page.problem)
         XCTAssertNil(ChromeScript.mediaProbe(fromResult: "none"))
         XCTAssertNil(ChromeScript.mediaProbe(fromResult: "gone"))
     }

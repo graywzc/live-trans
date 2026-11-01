@@ -115,6 +115,10 @@ final class DevPipeline {
     @ObservationIgnored private var pickBook: PickBook?
     /// Off at launch, until Start or Load.
     private(set) var isPaused = true
+    /// Why the host could not fetch or run over the video, as
+    /// `Prefetcher.problem`; kept until a job starts, as such a video is
+    /// not tried again.
+    private(set) var problem: String?
     /// The videos the host keeps captions of, as it last listed them.
     private(set) var processed: [ProcessedVideo] = []
     /// The one of them chosen under the captions, which Load opens in
@@ -363,9 +367,12 @@ final class DevPipeline {
                 await open(picked, client: client)
                 return
             }
-            guard let probe = await video.probeMedia(), probe.isFetchable, !failedPages.contains(Self.failure(probe.page, step)) else {
+            guard let probe = await video.probeMedia() else { return }
+            if let unfetchable = probe.problem {
+                problem = unfetchable
                 return
             }
+            guard !failedPages.contains(Self.failure(probe.page, step)) else { return }
             await startJob(for: probe, client: client)
             return
         }
@@ -465,6 +472,7 @@ final class DevPipeline {
             job = updated
             if status.state == "failed" {
                 ActivityLog.tell("Step \(current.step.title) failed: \(status.error ?? "unknown")")
+                problem = "The host couldn't fetch this video: \(status.error ?? "no reason given")"
                 failedPages.insert(Self.failure(current.page, current.step))
                 job = nil
             }
@@ -563,6 +571,7 @@ final class DevPipeline {
         self.picked = nil
         guard let tab = await video.open(picked) else {
             ActivityLog.tell("Could not open the video in Chrome")
+            problem = "Chrome could not open this video."
             isPaused = true
             return
         }
@@ -593,6 +602,7 @@ final class DevPipeline {
                 url: url, page: page, headers: headers, duration: duration, start: 0, step: step.rawValue, title: title
             )
             job = Job(id: id, tabID: tabID, page: page, step: step, duration: duration)
+            problem = nil
             // The list shows this step's captions alone.
             engine.clear()
             if referencePage != page {
@@ -616,6 +626,7 @@ final class DevPipeline {
             print("step \(step.rawValue) \(id): \(url ?? page)")
         } catch {
             ActivityLog.tell("Step \(step.title) could not start: \(error.localizedDescription)")
+            problem = "The host couldn't start fetching this video: \(error.localizedDescription)"
             failedPages.insert(Self.failure(page, step))
         }
     }

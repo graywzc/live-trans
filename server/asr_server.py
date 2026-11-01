@@ -1649,7 +1649,9 @@ def step_speech_model(step):
     return {"speech-firered": _firered, "speech-mean": _firered_and_segmentation}.get(step)
 # Whether a step job's captions are also cut where DiariZen hears the
 # speaker change (one line held two speakers' words: a question and its
-# answer, run together with no pause).
+# answer, run together with no pause), once all are made, as a production
+# job's are: over two episodes that cut as well as speakers found first,
+# and the captions need not wait for the whole fetch.
 DEV_SPEAKER_CUTS = os.getenv("LIVETRANS_SPEAKER_CUTS", "1") != "0"
 # Whether a step job also captions the video, as production would with the
 # step's speech finder cutting the batches.
@@ -3244,18 +3246,12 @@ class PrefetchJob:
     def _transcribe(self):
         """The captions, a batch at a time as the audio comes. A step job's
         own state is its step's, which may be done before the captions. A
-        step job's waits for the speakers first (DiariZen needs all the
-        audio), to cut its lines where the speaker changes; or takes the
-        captions made before over the same audio, from the dev cache, and
-        keeps those it makes there."""
+        step job's are cut where the speaker changes once all are made
+        (DiariZen needs all the audio); or it takes the captions made before
+        over the same audio, from the dev cache, and keeps those it makes
+        there."""
         if self.step and self._captions_from_cache():
             return
-        if self.step and DEV_SPEAKER_CUTS:
-            waited = time.time()
-            while self.turns is None and not self.stop_event.is_set() and time.time() - waited < DEVTOOL_TIMEOUT:
-                time.sleep(0.5)
-            if self.turns:
-                print(f"prefetch {self.id}: captions cut at {len(self.turns)} speaker turns", flush=True)
         position = 0.0
         # How far the audio had come when it was last looked at for a batch.
         looked = -1.0
@@ -3265,6 +3261,17 @@ class PrefetchJob:
                 done = self.fetch_done
             if done and have <= position + 0.05:
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
+                if self.step and DEV_SPEAKER_CUTS:
+                    waited = time.time()
+                    while self.turns is None and not self.stop_event.is_set() and time.time() - waited < DEVTOOL_TIMEOUT:
+                        time.sleep(0.5)
+                    if self.stop_event.is_set():
+                        return
+                    if self.turns:
+                        recut = self._cut_at_speakers()
+                        print(f"prefetch {self.id}: {recut} captions cut at {len(self.turns)} speaker turns", flush=True)
+                        if self.stop_event.is_set():
+                            return
                 if self.step and self.turns:
                     # Where the speaker cuts went, in seconds of the video
                     # (no text), for measuring them.
@@ -3559,30 +3566,38 @@ class PrefetchJob:
             self.turns = [(self.offset + a, self.offset + b, who) for a, b, who in found]
             self.speakers = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3), who)
                              for a, b, who in found]
-            floor = steady_floor(self.turns)
-            changes = [self._video(end) for (_, end, before), (_, _, after) in zip(floor, floor[1:]) if before != after]
-            recut = 0
-            for line in list(self.lines):
-                if self.stop_event.is_set():
-                    return
-                if line.get("start") is None or not any(
-                        line["start"] + SPEAKER_SNAP < t < line["end"] - SPEAKER_SNAP for t in changes):
-                    continue
-                try:
-                    new = self.rehear(line["start"], line["end"])
-                except Exception as exc:
-                    print(f"prefetch {self.id}: not cut: {type(exc).__name__}: {exc}", flush=True)
-                    continue
-                if len(new) > 1 and line in self.lines:
-                    at = self.lines.index(line)
-                    self.lines[at:at + 1] = new
-                    # What was heard over it whole is no caption's now.
-                    self.others.pop((line["start"], line["end"]), None)
-                    self.feed.extend(new)
-                    recut += 1
+            recut = self._cut_at_speakers()
+            if self.stop_event.is_set():
+                return
             print(f"prefetch {self.id}: {len(self.speakers)} speaker turns in {time.time() - t0:.0f}s, "
                   f"{recut} captions cut where the speaker changes", flush=True)
         self._hear_round(early)
+
+    def _cut_at_speakers(self):
+        """Each caption a change of speaker falls inside heard again and cut
+        there, the new pieces given to the client. How many were cut."""
+        floor = steady_floor(self.turns)
+        changes = [self._video(end) for (_, end, before), (_, _, after) in zip(floor, floor[1:]) if before != after]
+        recut = 0
+        for line in list(self.lines):
+            if self.stop_event.is_set():
+                break
+            if line.get("start") is None or not any(
+                    line["start"] + SPEAKER_SNAP < t < line["end"] - SPEAKER_SNAP for t in changes):
+                continue
+            try:
+                new = self.rehear(line["start"], line["end"])
+            except Exception as exc:
+                print(f"prefetch {self.id}: not cut: {type(exc).__name__}: {exc}", flush=True)
+                continue
+            if len(new) > 1 and line in self.lines:
+                at = self.lines.index(line)
+                self.lines[at:at + 1] = new
+                # What was heard over it whole is no caption's now.
+                self.others.pop((line["start"], line["end"]), None)
+                self.feed.extend(new)
+                recut += 1
+        return recut
 
     def _captions_from_cache(self):
         """Whether the captions came from the dev cache: made before by the

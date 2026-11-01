@@ -703,6 +703,52 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
     assert not os.listdir(cache), "a production job keeps nothing"
 
 
+def test_a_step_job_s_captions_come_at_once_and_are_cut_and_kept_when_the_speakers_are_told():
+    fresh_cache()
+    original = srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.DEV_CAPTIONS, srv.sound_events
+    speakers = threading.Event()
+
+    def heard(grid, audio, start, turns=None, within=None, **kwargs):
+        pieces = grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)
+        if within:
+            a, b = pieces[0]
+            return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": 2.0},
+                    {"ja": "はい", "en": "yes", "start": 2.0, "end": round(b, 2)}]
+        return [{"ja": "ことばはい", "en": "words yes", "start": round(a, 2), "end": round(b, 2)} for a, b in pieces]
+
+    def tool(name, header, audio):
+        if name != "diarize":
+            raise RuntimeError(f"{name} is not set up")
+        speakers.wait(15)
+        return {"segments": [[1.0, 1.9, "S1"], [2.1, 2.9, "S2"]]}
+
+    srv.speech_stretches, srv.hear_pieces, srv.run_devtool = (lambda audio, model=None: loud_stretches(audio)), heard, tool
+    srv.DEV_CAPTIONS, srv.DEV_SPEAKER_CUTS = True, True
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (2, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/first", {}, 4.0, step="speech")
+        deadline = time.time() + 15
+        while not job.lines and time.time() < deadline:
+            time.sleep(0.05)
+        # Made while the speakers are still being told, and not done yet.
+        assert [l["ja"] for l in job.lines] == ["ことばはい"], job.lines
+        time.sleep(0.5)
+        assert job.status()["captions"] == "running", "kept only once cut"
+        assert job.cache.load_findings("captions-speech") is None
+        speakers.set()
+        while not job.captioned and time.time() < deadline:
+            time.sleep(0.05)
+        status = job.status()
+    finally:
+        speakers.set()
+        srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.DEV_CAPTIONS, srv.sound_events = original
+        srv.DEV_SPEAKER_CUTS = False
+    assert status["captions"] == "done", status
+    assert [l["ja"] for l in status["lines"]] == ["ことばはい", "ことば", "はい"], status["lines"]
+    assert [l["ja"] for l in job.cache.load_findings("captions-speech")["lines"]] == ["ことば", "はい"]
+
+
 def test_a_server_s_temporary_files_are_erased_at_its_exit_and_by_the_next_after_a_crash():
     tmp = tempfile.gettempdir()
     mine, gone, running = os.getpid(), 999999999, os.getppid()
