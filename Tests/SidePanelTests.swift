@@ -70,18 +70,20 @@ final class SidePanelTests: XCTestCase {
         defaults.removePersistentDomain(forName: "SidePanelTests.mode")
         let first = SidePanel()
         first.restoreMode(from: defaults)
-        XCTAssertFalse(first.isDev, "production at first")
-        first.isDev = true
+        XCTAssertTrue(first.isDev, "Default at first")
+        first.isDev = false
         let next = SidePanel()
         var told: [Bool] = []
         next.onDevChange = { told.append($0) }
         next.restoreMode(from: defaults)
-        XCTAssertTrue(next.isDev)
-        XCTAssertEqual(told, [true], "entered as if switched to")
-        next.isDev = false
+        XCTAssertFalse(next.isDev, "Incognito again")
+        XCTAssertEqual(told, [], "a panel starts out of dev mode")
+        next.isDev = true
         let third = SidePanel()
+        third.onDevChange = { told.append($0) }
         third.restoreMode(from: defaults)
-        XCTAssertFalse(third.isDev)
+        XCTAssertTrue(third.isDev)
+        XCTAssertEqual(told, [true, true], "entered as if switched to")
         defaults.removePersistentDomain(forName: "SidePanelTests.mode")
     }
 

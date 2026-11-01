@@ -365,13 +365,13 @@ caption as it was. Sentence times come from where Whisper heard the words,
 so this needs a current `asr_server.py` on the GPU host; an older one still
 works, with the sentences placed by their share of the text instead.
 
-### Dev
+### Default and Incognito
 
-The third tab of the panel, **Dev**, is dev mode: the app is in it for as
-long as that tab is being shown, and in production, captioning ahead as
-above, on any other tab or with the panel closed. An ordinary launch is
-production. In production nothing is listed or kept of how the captions
-come about, on the Mac or on the host.
+The switch in the header picks the mode. **Default**, called dev mode below,
+is what the app opens in the first time, and after that it opens in the mode
+last chosen. **Incognito**, called production elsewhere in this file, leaves
+no trace: nothing is listed or kept of how the captions come about, on the
+Mac or on the host. Only videos kept in Default reach the iPhone.
 
 At the top of the tab, how the Mac and the GPU host stand: whether the Mac
 is listening and how many utterances are waiting for their captions, which

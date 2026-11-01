@@ -53,8 +53,9 @@ extension AppSettings {
     /// host cannot fetch; `defaults write <app> listenToMacInProduction -bool
     /// true` turns it back on.
     static let listenToMacInProduction = "listenToMacInProduction"
-    /// Whether the app was last in dev mode, to open in it again.
-    static let devMode = "devMode"
+    /// Whether the app was last in Incognito, to open in it again; else
+    /// it opens in Default, dev mode.
+    static let incognitoMode = "incognitoMode"
     /// The step dev mode runs, by `DevPipeline.Step`.
     static let pipelineStep = "pipelineStep"
     static let activityTimelineHeight = "activityTimelineHeight"

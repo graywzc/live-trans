@@ -71,14 +71,14 @@ struct ContentView: View {
         HStack(spacing: compact ? 10 : 16) {
             StatusPill(status: engine.status)
             Picker("Mode", selection: Binding(get: { panel.isDev }, set: { panel.isDev = $0 })) {
-                Text(compact ? "Prod" : "Production").tag(false)
-                Text("Dev").tag(true)
+                Text("Default").tag(true)
+                Text("Incognito").tag(false)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
             .controlSize(.small)
-            .help("Production captions what you watch; Dev runs one step of the pipeline over the whole video, its timeline under the captions")
+            .help("Default runs a step of the pipeline over the whole video and keeps what it finds, for the iPhone too; Incognito captions what you watch and leaves no trace")
             Spacer(minLength: 0)
             OutputPicker()
             VideoControls()
