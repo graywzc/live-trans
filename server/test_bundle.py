@@ -339,6 +339,7 @@ def test_the_bundle_holds_every_recognizer_s_version_of_a_caption():
     job.others_done = False
     srv.DEV_OTHER_HEARING = True
     try:
+        assert job.status(0)["others_ready"] is False
         code, payload = srv.start_bundle(job, TITLE)
     finally:
         srv.DEV_OTHER_HEARING = False

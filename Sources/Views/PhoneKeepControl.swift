@@ -18,6 +18,12 @@ struct PhoneKeepControl: View {
     /// them, or why it could not: for the menu and the tooltip.
     var address: String? = nil
     var serveError: String? = nil
+    /// The host is still hearing and translating the other versions, which
+    /// the video is kept with.
+    var isMakingVersions = false
+    /// Why the host would not keep the video, until it has been read.
+    var refusal: String? = nil
+    var onRefusalRead: () -> Void = {}
 
     var body: some View {
         if bundle == "done" {
@@ -40,16 +46,30 @@ struct PhoneKeepControl: View {
             .help(Self.help(bundle: bundle, canKeep: canKeep, address: address, serveError: serveError))
         } else {
             Button(action: onKeep) {
-                Label(Self.title(bundle: bundle, fetched: fetched, duration: duration), systemImage: "iphone")
+                Label(
+                    Self.title(bundle: bundle, fetched: fetched, duration: duration, isMakingVersions: isMakingVersions),
+                    systemImage: "iphone"
+                )
             }
             .disabled(!canKeep || bundle == "running")
-            .help(Self.help(bundle: bundle, canKeep: canKeep, address: address, serveError: serveError))
+            .help(Self.help(
+                bundle: bundle, canKeep: canKeep, address: address, serveError: serveError,
+                isMakingVersions: isMakingVersions
+            ))
+            .alert(
+                "Could not keep the video for the iPhone",
+                isPresented: Binding(get: { refusal != nil }, set: { if !$0 { onRefusalRead() } })
+            ) {
+                Button("OK") {}
+            } message: {
+                Text(refusal ?? "")
+            }
         }
     }
 
     /// What the control reads: the ask, the fetch's progress, or that the
     /// video is there.
-    static func title(bundle: String, fetched: Double, duration: Double?) -> String {
+    static func title(bundle: String, fetched: Double, duration: Double?, isMakingVersions: Bool = false) -> String {
         switch bundle {
         case "done":
             return "On the host for the iPhone"
@@ -58,14 +78,16 @@ struct PhoneKeepControl: View {
             let percent = min(max(Int((fetched / duration * 100).rounded()), 0), 99)
             return "Keeping for iPhone · \(percent)%"
         default:
-            return "Keep for iPhone"
+            return isMakingVersions ? "Translating the other versions…" : "Keep for iPhone"
         }
     }
 
     /// Its tooltip: what pressing does, or why it cannot be pressed yet;
     /// for a video kept, where the phone fetches it from, or why it
     /// cannot yet.
-    static func help(bundle: String, canKeep: Bool, address: String? = nil, serveError: String? = nil) -> String {
+    static func help(
+        bundle: String, canKeep: Bool, address: String? = nil, serveError: String? = nil, isMakingVersions: Bool = false
+    ) -> String {
         if bundle == "done" {
             let kept = "The video is on the host with its captions, for the iPhone app to download"
             if let address {
@@ -78,6 +100,9 @@ struct PhoneKeepControl: View {
         }
         if bundle == "running" {
             return "The host is fetching the video for the iPhone"
+        }
+        if isMakingVersions {
+            return "The host is still hearing and translating the other recognizers' versions; the video can be kept once they are done"
         }
         let ask = canKeep
             ? "Have the host keep this video with its captions, for the iPhone app to download"

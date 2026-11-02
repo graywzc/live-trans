@@ -57,6 +57,9 @@ struct PrefetchStatus: Decodable, Equatable {
     var others: Int?
     /// What the host holds of a dev job's video for the phone: "none",
     /// "running", "done" or "failed: <why>", and seconds of it so far.
+    /// Whether the other recognizers are done, translated too; a server
+    /// from before says nothing.
+    var othersReady: Bool?
     /// The video's folder on the host, what its picks are kept under.
     var video: String?
     var bundle: String?
@@ -73,6 +76,7 @@ struct PrefetchStatus: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case state, error, duration, start, fetched, ready, count, lines, step, analysed, worded, aligned, speakers
         case cached, fetching, captions, others, video, bundle, running
+        case othersReady = "others_ready"
         case bundleFetched = "bundle_fetched"
         case bundleURL = "bundle_url"
         case bundleServeError = "bundle_serve_error"
