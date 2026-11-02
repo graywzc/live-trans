@@ -77,6 +77,9 @@ final class DevPipeline {
         var bundleServeError: String?
         /// What the host is busy with for it right now.
         var running: [String] = []
+        /// Whether the other recognizers are done, translated too, which
+        /// the host waits for before keeping the video.
+        var othersReady = true
     }
 
     /// What FireRedVAD's event model hears besides speech, drawn over the
@@ -481,6 +484,7 @@ final class DevPipeline {
                 updated.aligned = findings.aligned ?? false
                 updated.spoken = findings.speakers != nil
             }
+            updated.othersReady = status.othersReady ?? true
             if let bundle = status.bundle, bundle != updated.bundle {
                 if let news = Self.phoneCopyNews(from: updated.bundle, to: bundle) { ActivityLog.tell(news) }
                 updated.bundle = bundle
@@ -510,11 +514,18 @@ final class DevPipeline {
     // MARK: The video kept for the phone
 
     /// Whether the host can be asked to keep the job's video for the
-    /// phone: the step's captions have reached the end, and it is not
-    /// fetching the video already.
+    /// phone: the step's captions have reached the end, the other
+    /// recognizers' versions with them, and it is not fetching the video
+    /// already.
     var canKeepForPhone: Bool {
         guard let job else { return false }
-        return job.captions == "done" && job.bundle != "running"
+        return job.captions == "done" && job.othersReady && job.bundle != "running"
+    }
+
+    /// The captions are done and the host is still on the other versions.
+    var isMakingVersions: Bool {
+        guard let job else { return false }
+        return job.captions == "done" && !job.othersReady
     }
 
     /// What to tell when the host's word on the phone's copy changes;
@@ -542,6 +553,9 @@ final class DevPipeline {
         return nil
     }
 
+    /// Why the host would not keep the video, until read.
+    var keepRefusal: String?
+
     /// Has the host keep the job's video for the phone, with its captions:
     /// fetched as it is, beside the audio in the dev cache, with the tab's
     /// title for the phone's list. Dev mode only, as the whole cache is.
@@ -565,6 +579,7 @@ final class DevPipeline {
                 }
                 ActivityLog.tell("Keeping the video for the iPhone: the host is fetching it as it is")
             } catch {
+                keepRefusal = error.localizedDescription
                 ActivityLog.tell("Could not keep the video for the iPhone: \(error.localizedDescription)")
             }
         }

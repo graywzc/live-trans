@@ -3858,6 +3858,9 @@ class PrefetchJob:
             "speakers": self.speakers is not None,
             # How many texts the other recognizers have given so far.
             "others": sum(len(texts) for texts in list(self.others.values())),
+            # Whether they are all heard and translated, which keeping the
+            # video for the phone waits for.
+            "others_ready": not DEV_OTHER_HEARING or self.others_done,
             "cached": self.cached,
             # The video's folder in the dev cache, what its picks are kept
             # under (see phone_service.py).

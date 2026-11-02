@@ -135,6 +135,33 @@ final class PhoneKeepTests: XCTestCase {
         )
     }
 
+    func testWhileTheOtherVersionsAreComingTheControlSaysSoAndWaits() throws {
+        XCTAssertEqual(
+            PhoneKeepControl.title(bundle: "none", fetched: 0, duration: 60, isMakingVersions: true),
+            "Translating the other versions…"
+        )
+        XCTAssertEqual(PhoneKeepControl.title(bundle: "none", fetched: 0, duration: 60), "Keep for iPhone")
+        XCTAssertTrue(
+            PhoneKeepControl.help(bundle: "none", canKeep: false, isMakingVersions: true).contains("translating")
+        )
+        let waiting = try JSONDecoder().decode(PrefetchStatus.self, from: Data("""
+        {"state": "done", "fetched": 60, "ready": 60, "count": 0, "lines": [], "others_ready": false}
+        """.utf8))
+        XCTAssertEqual(waiting.othersReady, false)
+
+        let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())
+        var job = DevPipeline.Job(id: "a", tabID: 1, page: "p", step: .speech, duration: 60)
+        job.captions = "done"
+        job.othersReady = false
+        dev.show(job: job, speech: [])
+        XCTAssertFalse(dev.canKeepForPhone)
+        XCTAssertTrue(dev.isMakingVersions)
+        job.othersReady = true
+        dev.show(job: job, speech: [])
+        XCTAssertTrue(dev.canKeepForPhone)
+        XCTAssertFalse(dev.isMakingVersions)
+    }
+
     func testWhenTheHostCanBeAsked() {
         let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())
         XCTAssertFalse(dev.canKeepForPhone, "no job")
