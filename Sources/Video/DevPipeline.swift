@@ -378,6 +378,29 @@ final class DevPipeline {
             await startJob(for: probe, client: client)
             return
         }
+        // Another video, while one is started or loaded: its job goes with
+        // its captions, and the new one's starts at once, which takes from
+        // the host's cache whatever was made of it before.
+        if let picked {
+            await leaveVideo()
+            await open(picked, client: client)
+            return
+        }
+        if Date().timeIntervalSince(lastProbe) >= Self.probeInterval {
+            lastProbe = Date()
+            if let probe = await video.probeMedia(), Self.isAnotherVideo(probe, than: current) {
+                guard job?.id == current.id else { return }
+                ActivityLog.tell("Another video: leaving the one before, and its captions")
+                await leaveVideo()
+                if let unfetchable = probe.problem {
+                    problem = unfetchable
+                    return
+                }
+                guard !failedPages.contains(Self.failure(probe.page, step)) else { return }
+                await startJob(for: probe, client: client)
+                return
+            }
+        }
         if current.step != step {
             // Another step was chosen: this job goes, and the next tick
             // starts the chosen one over the audio the host kept. The host
@@ -632,6 +655,29 @@ final class DevPipeline {
             problem = "The host couldn't start fetching this video: \(error.localizedDescription)"
             failedPages.insert(Self.failure(page, step))
         }
+    }
+
+    /// Whether `probe` is of another video than the job's: another tab, or
+    /// another page in its tab.
+    nonisolated static func isAnotherVideo(_ probe: MediaProbe, than job: Job) -> Bool {
+        probe.tabID != job.tabID || probe.page != job.page
+    }
+
+    /// Stops the job and clears what it showed, its captions too, for
+    /// another video to take its place.
+    private func leaveVideo() async {
+        await stopJob()
+        engine.clear()
+        problem = nil
+        speech = []
+        events = SoundEvents()
+        words = []
+        speakers = []
+        others = []
+        forgetPicks()
+        selection = nil
+        cursor = nil
+        cursorArmed = false
     }
 
     private func stopJob() async {
