@@ -295,6 +295,11 @@ final class SpaceKeyTests: XCTestCase {
         web.addSubview(inside)
         XCTAssertTrue(SpaceKey.typesSpace(web))
         XCTAssertTrue(SpaceKey.typesSpace(inside))
+        // The Jisho page types only while one of its text boxes has focus.
+        let jisho = ClickFocusedWebView()
+        XCTAssertFalse(SpaceKey.typesSpace(jisho))
+        jisho.isEditingText = true
+        XCTAssertTrue(SpaceKey.typesSpace(jisho))
         XCTAssertFalse(SpaceKey.typesSpace(NSWindow()))
         XCTAssertFalse(SpaceKey.typesSpace(nil))
     }
