@@ -75,6 +75,8 @@ final class DevPipeline {
         /// them, or why it could not.
         var bundleURL: String?
         var bundleServeError: String?
+        /// What the host is busy with for it right now.
+        var running: [String] = []
     }
 
     /// What FireRedVAD's event model hears besides speech, drawn over the
@@ -469,6 +471,7 @@ final class DevPipeline {
             }
             updated.bundleURL = status.bundleURL
             updated.bundleServeError = status.bundleServeError
+            updated.running = status.running ?? []
             job = updated
             if status.state == "failed" {
                 ActivityLog.tell("Step \(current.step.title) failed: \(status.error ?? "unknown")")

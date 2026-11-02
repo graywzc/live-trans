@@ -271,8 +271,8 @@ struct ContentView: View {
                 .tint(loading ? .red : .green)
                 .keyboardShortcut(.return, modifiers: .command)
                 .help(loading ? "" : processed ? "Show this video's captions from what the host kept of it, making only what is missing" : "Fetch the Chrome video's audio and caption it")
-                // Keeps the button in the middle.
-                Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
+                // As wide as the picker, which keeps the button in the middle.
+                RunningStatus(items: (isDev ? dev.job?.running : prefetch.job?.running) ?? [])
             }
         }
         .padding()

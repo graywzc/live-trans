@@ -823,6 +823,64 @@ def test_a_failed_fetch_falls_back_to_audio_kept_without_a_clock():
         srv.speech_stretches = original
     srv.clear_dev_cache()
 
+
+def test_a_job_says_what_it_is_busy_with_right_now():
+    fresh_cache()
+    original = srv.speech_stretches, srv.run_devtool
+    srv.speech_stretches = loud_stretches
+    let_go = threading.Event()
+
+    def tool(name, header, audio):
+        if name != "diarize":
+            return _not_set_up(name, header, audio)
+        let_go.wait(10)
+        return {"segments": [[1.0, 2.0, "S1"]]}
+
+    srv.run_devtool = tool
+    try:
+        url = wav_file(noise_and_silence([(1, False), (2, True)]))
+        job = srv.PrefetchJob(url, "https://example.com/busy", {}, 3.0, step="speech")
+        # (Polled: a job of an earlier test may be the one let into the tool.)
+        deadline = time.time() + 15
+        while "Speaker detection" not in job.status()["running"] and time.time() < deadline:
+            time.sleep(0.05)
+        assert "Speaker detection" in job.status()["running"], job.status()["running"]
+        let_go.set()
+        deadline = time.time() + 15
+        while (job.speakers is None or job.status()["running"]) and time.time() < deadline:
+            time.sleep(0.1)
+        assert job.status()["running"] == [], job.status()["running"]
+    finally:
+        let_go.set()
+        srv.speech_stretches, srv.run_devtool = original
+    srv.clear_dev_cache()
+
+
+def test_the_innermost_work_names_a_thread_s_activity_in_the_order_begun():
+    activity = srv.Activity()
+    inside, done = threading.Event(), threading.Event()
+
+    def other():
+        with activity.doing("Audio download"):
+            inside.set()
+            done.wait(5)
+
+    with activity.doing("k2 captioning"):
+        thread = threading.Thread(target=other)
+        thread.start()
+        assert inside.wait(5)
+        assert activity.labels() == ["k2 captioning", "Audio download"]
+        with srv.doing("Translating captions"):
+            assert activity.labels() == ["Translating captions", "Audio download"]
+        assert activity.labels() == ["k2 captioning", "Audio download"]
+        done.set()
+        thread.join()
+        assert activity.labels() == ["k2 captioning"]
+    assert activity.labels() == []
+    with srv.doing("outside any job"):
+        assert activity.labels() == []
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

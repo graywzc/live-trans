@@ -87,6 +87,7 @@ GET /events?since=N
 
 import argparse
 import collections
+import contextlib
 import hashlib
 import json
 import os
@@ -2868,45 +2869,46 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
 
     pieces = grouped()
     texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
-    pairs = None
-    if TRANSLATE_BACKEND != "nllb" and _ollama_ok and any(not _is_untranslatable(t) for t in texts):
-        pairs = translate_ollama(texts)
-    if pairs:
-        # Where the LLM ended a sentence inside a piece: a cut there.
-        chars = [j for j, (text, _, _) in enumerate(words) for ch in text if ch not in _BOUNDARY_NOISE]
-        ends = [end for _, end in _content_offsets([ja for ja, _ in pairs])][:-1]
-        for end in ends:
-            if 0 < end < len(chars) and chars[end] == chars[end - 1] + 1:
-                cut_after(chars[end - 1], heard=True, why="the LLM's sentence end")
-        pieces = grouped()
-        texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
-        # Each piece's English: that of the LLM's sentences lying within it,
-        # or its own translation where a sentence straddles two pieces.
-        spans = _content_offsets(texts)
-        sentences = _content_offsets([ja for ja, _ in pairs])
-        english = []
-        for a, b in spans:
-            inside = [en for (c, d), (_, en) in zip(sentences, pairs) if a <= c and d <= b]
-            straddling = any(c < a < d or c < b < d for c, d in sentences)
-            english.append(None if straddling or not inside else " ".join(inside))
-    else:
-        english = [None] * len(texts)
-    for k, (text, en) in enumerate(zip(texts, english)):
-        if text and en is None:
+    with doing("Translating captions"):
+        pairs = None
+        if TRANSLATE_BACKEND != "nllb" and _ollama_ok and any(not _is_untranslatable(t) for t in texts):
+            pairs = translate_ollama(texts)
+        if pairs:
+            # Where the LLM ended a sentence inside a piece: a cut there.
+            chars = [j for j, (text, _, _) in enumerate(words) for ch in text if ch not in _BOUNDARY_NOISE]
+            ends = [end for _, end in _content_offsets([ja for ja, _ in pairs])][:-1]
+            for end in ends:
+                if 0 < end < len(chars) and chars[end] == chars[end - 1] + 1:
+                    cut_after(chars[end - 1], heard=True, why="the LLM's sentence end")
+            pieces = grouped()
+            texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
+            # Each piece's English: that of the LLM's sentences lying within it,
+            # or its own translation where a sentence straddles two pieces.
+            spans = _content_offsets(texts)
+            sentences = _content_offsets([ja for ja, _ in pairs])
+            english = []
+            for a, b in spans:
+                inside = [en for (c, d), (_, en) in zip(sentences, pairs) if a <= c and d <= b]
+                straddling = any(c < a < d or c < b < d for c, d in sentences)
+                english.append(None if straddling or not inside else " ".join(inside))
+        else:
+            english = [None] * len(texts)
+        for k, (text, en) in enumerate(zip(texts, english)):
+            if text and en is None:
+                try:
+                    english[k] = translate_text(text)
+                except Exception as exc:
+                    print(f"piece not translated: {exc}", flush=True)
+                    english[k] = ""
+        if pairs:
+            # Checked again piece by piece: an answer shifted by a line gives a
+            # piece the next one's meaning, which its neighbour, translated
+            # alone where a sentence of the answer straddled two pieces, then
+            # all but repeats.
             try:
-                english[k] = translate_text(text)
+                english = [en for _, en in _translate_what_is_left(list(zip(texts, english)))]
             except Exception as exc:
-                print(f"piece not translated: {exc}", flush=True)
-                english[k] = ""
-    if pairs:
-        # Checked again piece by piece: an answer shifted by a line gives a
-        # piece the next one's meaning, which its neighbour, translated
-        # alone where a sentence of the answer straddled two pieces, then
-        # all but repeats.
-        try:
-            english = [en for _, en in _translate_what_is_left(list(zip(texts, english)))]
-        except Exception as exc:
-            print(f"pieces not checked: {exc}", flush=True)
+                print(f"pieces not checked: {exc}", flush=True)
     lines = []
     for (a, b, members), text, en in zip(pieces, texts, english):
         if not text:
@@ -2918,6 +2920,54 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
                 tell(f"{'heard again ' if within else ''}{clock(start)}–{clock(end)}  {text}\n"
                      f"   starts: {grid.reasons.get(a) or '?'} · ends: {grid.reasons.get(b) or '?'}")
     return [line for line in lines if not _STOCK_LINE.search(line["ja"])]
+
+
+# What the app's status line calls the recognizers, by ASR_BACKEND.
+RECOGNIZER_NAMES = {"reazon": "k2", "hybrid": "k2 + Whisper", "whisper": "Whisper"}
+# And each dev step's speech finder.
+STEP_FINDERS = {"speech": "Silero", "speech-firered": "FireRedVAD", "speech-mean": "FireRedVAD + pyannote"}
+_activity = threading.local()
+
+
+class Activity:
+    """What a job is busy with right now, for the app's status line: one
+    label per thread at work, the latest it was given, in the order the
+    threads began. A thread waiting for audio or for another thread is at
+    work on nothing. Labels only, never text heard."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        # Thread ident -> (when it began, [labels, innermost last]).
+        self._now = {}
+
+    @contextlib.contextmanager
+    def doing(self, label):
+        key = threading.get_ident()
+        with self._lock:
+            began, labels = self._now.setdefault(key, (time.monotonic(), []))
+            labels.append(label)
+        outer = getattr(_activity, "current", None)
+        _activity.current = self
+        try:
+            yield
+        finally:
+            _activity.current = outer
+            with self._lock:
+                labels.pop()
+                if not labels:
+                    del self._now[key]
+
+    def labels(self):
+        with self._lock:
+            now = sorted(self._now.values(), key=lambda entry: entry[0])
+            return [labels[-1] for _, labels in now]
+
+
+def doing(label):
+    """Within a job's `doing`, the thread's work now named `label` until
+    the block ends; outside one, nothing."""
+    current = getattr(_activity, "current", None)
+    return current.doing(label) if current else contextlib.nullcontext()
 
 
 class PacketClock:
@@ -3096,6 +3146,8 @@ class PrefetchJob:
         self.paused = threading.Event()
         self.process = None
         self.started = time.time()
+        # What it is busy with right now, for the app's status line.
+        self.activity = Activity()
         threading.Thread(target=self._fetch, daemon=True).start()
         if not step or DEV_CAPTIONS:
             threading.Thread(target=self._transcribe, daemon=True).start()
@@ -3109,6 +3161,10 @@ class PrefetchJob:
                 threading.Thread(target=self._hear_others, daemon=True).start()
         elif PRODUCTION_FINISH:
             threading.Thread(target=self._finish, daemon=True).start()
+
+    @property
+    def _captioning(self):
+        return f"{RECOGNIZER_NAMES.get(ASR_BACKEND, ASR_BACKEND)} captioning"
 
     @property
     def fetched(self):
@@ -3177,6 +3233,10 @@ class PrefetchJob:
         if self.cache and (kept := self.cache.load_audio()):
             self._from_cache(kept)
             return
+        with self.activity.doing("Audio download"):
+            self._download()
+
+    def _download(self):
         try:
             media, error = resolve_media_url(self.url, self.page)
         except Exception as exc:
@@ -3268,7 +3328,8 @@ class PrefetchJob:
                     if self.stop_event.is_set():
                         return
                     if self.turns:
-                        recut = self._cut_at_speakers()
+                        with self.activity.doing("Cutting captions at speaker changes"):
+                            recut = self._cut_at_speakers()
                         print(f"prefetch {self.id}: {recut} captions cut at {len(self.turns)} speaker turns", flush=True)
                         if self.stop_event.is_set():
                             return
@@ -3299,7 +3360,8 @@ class PrefetchJob:
             looked = window_end
             with self.audio_lock:
                 window = self.audio[int(position * SAMPLE_RATE):int(window_end * SAMPLE_RATE)].copy()
-            speech = speech_stretches(window, model=self.speech_model)
+            with self.activity.doing(self._captioning):
+                speech = speech_stretches(window, model=self.speech_model)
             batch = choose_batch(speech, window.size / SAMPLE_RATE, more=not done, capped=capped)
             if batch is None:
                 time.sleep(0.25)
@@ -3307,11 +3369,12 @@ class PrefetchJob:
             length, reason = batch
             boundary = position + length
             try:
-                self._transcribe_batch(
-                    self.offset + position, self.offset + boundary, window[:int(length * SAMPLE_RATE)],
-                    [(self.offset + position + a, self.offset + position + min(b, length)) for a, b in speech if a < length],
-                    reason,
-                )
+                with self.activity.doing(self._captioning):
+                    self._transcribe_batch(
+                        self.offset + position, self.offset + boundary, window[:int(length * SAMPLE_RATE)],
+                        [(self.offset + position + a, self.offset + position + min(b, length)) for a, b in speech if a < length],
+                        reason,
+                    )
             except Exception as exc:
                 if self.step:
                     self.caption_error = f"{type(exc).__name__}: {exc}"
@@ -3374,9 +3437,10 @@ class PrefetchJob:
                 if not audio.size:
                     found = []
                 else:
-                    found = speech_stretches(audio, model=self.speech_model)
-                    if self.step in FIRERED_STEPS:
-                        events = sound_events(audio)
+                    with self.activity.doing(f"Speech detection ({STEP_FINDERS.get(self.step, self.step)})"):
+                        found = speech_stretches(audio, model=self.speech_model)
+                        if self.step in FIRERED_STEPS:
+                            events = sound_events(audio)
             except Exception as exc:
                 self.fail(f"{self.step}: {type(exc).__name__}: {exc}")
                 return
@@ -3411,7 +3475,8 @@ class PrefetchJob:
             with self.audio_lock:
                 piece = self.audio[int(start * SAMPLE_RATE):int((start + WORDS_PIECE) * SAMPLE_RATE)].copy()
             try:
-                heard = heard_words(piece)
+                with self.activity.doing("Whisper words"):
+                    heard = heard_words(piece)
             except Exception as exc:
                 print(f"prefetch {self.id}: words: {type(exc).__name__}: {exc}", flush=True)
                 return
@@ -3428,7 +3493,8 @@ class PrefetchJob:
                     self.word_refs.append((len(self.word_pieces) - 1, k))
             self.worded = self._video(self.offset + (end if last else start + high))
             if last:
-                self._align_words()
+                with self.activity.doing("Word alignment"):
+                    self._align_words()
                 if self.cache and self.cache.audio_seconds():
                     try:
                         self.cache.save_findings("words", {
@@ -3493,7 +3559,8 @@ class PrefetchJob:
         with self.audio_lock:
             audio = self.audio.copy()
         try:
-            found = run_devtool("diarize", {}, audio)["segments"]
+            with self.activity.doing("Speaker detection"):
+                found = run_devtool("diarize", {}, audio)["segments"]
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             print(f"prefetch {self.id}: speakers: {exc}", flush=True)
             self.turns = []
@@ -3533,7 +3600,8 @@ class PrefetchJob:
                 self.others.setdefault(todo[answer["i"]], {})[name] = answer["text"]
 
             try:
-                run_devtool_lines(tool, {"clips": clips}, audio, heard)
+                with self.activity.doing(f"{name} captioning"):
+                    run_devtool_lines(tool, {"clips": clips}, audio, heard)
                 print(f"prefetch {self.id}: {len(todo)} captions heard by {name} in {time.time() - t0:.0f}s", flush=True)
                 heard_any = True
             except (RuntimeError, OSError, ValueError, KeyError, IndexError) as exc:
@@ -3558,7 +3626,8 @@ class PrefetchJob:
             audio = self.audio.copy()
         t0 = time.time()
         try:
-            found = run_devtool("diarize", {}, audio)["segments"]
+            with self.activity.doing("Speaker detection"):
+                found = run_devtool("diarize", {}, audio)["segments"]
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             print(f"prefetch {self.id}: speakers: {exc}", flush=True)
             found = []
@@ -3566,7 +3635,8 @@ class PrefetchJob:
             self.turns = [(self.offset + a, self.offset + b, who) for a, b, who in found]
             self.speakers = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3), who)
                              for a, b, who in found]
-            recut = self._cut_at_speakers()
+            with self.activity.doing("Cutting captions at speaker changes"):
+                recut = self._cut_at_speakers()
             if self.stop_event.is_set():
                 return
             print(f"prefetch {self.id}: {len(self.speakers)} speaker turns in {time.time() - t0:.0f}s, "
@@ -3623,7 +3693,8 @@ class PrefetchJob:
         translation."""
         try:
             self._hear_other_texts()
-            self._translate_others()
+            with self.activity.doing("Translating the other recognizers"):
+                self._translate_others()
         finally:
             self.others_done = True
 
@@ -3670,7 +3741,8 @@ class PrefetchJob:
                 self.others.setdefault(todo[answer["i"]], {})[name] = answer["text"]
 
             try:
-                run_devtool_lines(tool, {"clips": clips}, audio, heard)
+                with self.activity.doing(f"{name} captioning"):
+                    run_devtool_lines(tool, {"clips": clips}, audio, heard)
                 print(f"prefetch {self.id}: {len(todo)} captions heard by {name} in {time.time() - t0:.0f}s", flush=True)
             except (RuntimeError, OSError, ValueError, KeyError, IndexError) as exc:
                 print(f"prefetch {self.id}: {name}: {exc}", flush=True)
@@ -3829,6 +3901,10 @@ class PrefetchJob:
             # "failed: <why>".
             "captions": f"failed: {self.caption_error}" if self.caption_error
             else "done" if self.captioned else "running",
+            # What the job is busy with right now, in the order begun, for
+            # the app's status line; the phone copy's fetch, which outlives
+            # the job, last.
+            "running": self.activity.labels() + (["Phone copy download"] if bundle == "running" else []),
             # The video kept for the phone, in dev mode (see BundleFetch).
             "bundle": bundle,
             "bundle_fetched": bundle_fetched,

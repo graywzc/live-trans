@@ -65,10 +65,14 @@ struct PrefetchStatus: Decodable, Equatable {
     /// the tailnet by the host itself, or why it could not be served.
     var bundleURL: String?
     var bundleServeError: String?
+    /// What the host is busy with for the job right now ("Audio download",
+    /// "k2 captioning", "Speaker detection"), in the order begun. A server
+    /// that does not say leaves it nil.
+    var running: [String]?
 
     enum CodingKeys: String, CodingKey {
         case state, error, duration, start, fetched, ready, count, lines, step, analysed, worded, aligned, speakers
-        case cached, fetching, captions, others, video, bundle
+        case cached, fetching, captions, others, video, bundle, running
         case bundleFetched = "bundle_fetched"
         case bundleURL = "bundle_url"
         case bundleServeError = "bundle_serve_error"
