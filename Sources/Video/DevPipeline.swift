@@ -49,6 +49,8 @@ final class DevPipeline {
         var duration: Double?
         /// How far the audio has come, from the video's start.
         var fetched = 0.0
+        /// Up to where k2's captions are made.
+        var ready = 0.0
         /// Up to where the step has looked.
         var analysed = 0.0
         /// Up to where the words have been heard; whether re-timed.
@@ -264,6 +266,38 @@ final class DevPipeline {
         return 0...job.fetched
     }
 
+    /// How far each recognizer has captioned the video at `playhead`, when
+    /// it is the job's: k2's, then the others', as `reached(...)` tells it.
+    func reached(on playhead: VideoMoment?) -> [(label: String, seconds: Double)] {
+        guard let job, isOnJob(playhead) else { return [] }
+        let own = engine.captions.compactMap { caption -> ClosedRange<Double>? in
+            guard let moment = caption.moment, moment.tabID == job.tabID, moment.url == job.page, let end = moment.end
+            else { return nil }
+            return moment.seconds...max(end, moment.seconds)
+        }
+        return Self.reached(
+            captions: job.captions, ready: job.ready, total: max(job.duration ?? 0, job.fetched), own: own,
+            others: others
+        )
+    }
+
+    /// How far each recognizer has come from the video's start: k2 to
+    /// where its captions are made, the whole video once they are done;
+    /// each other one to the end of the furthest caption it has heard, the
+    /// whole video once k2 is done and it has heard every caption. Each
+    /// runs on over the silences between captions, which no one hears.
+    nonisolated static func reached(
+        captions: String, ready: Double, total: Double, own: [ClosedRange<Double>], others: [OtherHearing]
+    ) -> [(label: String, seconds: Double)] {
+        let done = captions == "done"
+        let k2 = done ? max(total, ready) : max(ready, own.map(\.upperBound).max() ?? 0)
+        return [("k2", k2)] + OtherHearing.shown.map { shown in
+            let heard = others.filter { $0[keyPath: shown.text] != nil }
+            let all = done && own.allSatisfy { caption in heard.contains { abs($0.start - caption.lowerBound) < 0.01 } }
+            return (shown.label, all ? k2 : min(heard.map(\.end).max() ?? 0, k2))
+        }
+    }
+
     /// Whether the video at `playhead` is the one the job is of.
     func isOnJob(_ playhead: VideoMoment?) -> Bool {
         guard let job, let playhead else { return false }
@@ -460,6 +494,7 @@ final class DevPipeline {
                 }
             }
             updated.fetched = max(status.fetched, 0)
+            updated.ready = max(status.ready, 0)
             updated.duration = status.duration ?? updated.duration
             updated.state = status.state
             if status.cached == true, !updated.cached {

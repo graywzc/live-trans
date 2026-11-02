@@ -214,6 +214,7 @@ struct ContentView: View {
                             duration: prefetch.job?.duration ?? dev.job?.duration ?? playhead.duration,
                             playhead: prefetch.position,
                             captioned: prefetch.captioned, fetched: prefetch.fetchedAhead ?? dev.fetched(on: playhead),
+                            reached: isDev ? dev.reached(on: playhead) : [],
                             isPaused: isDev && dev.isPaused,
                             onSeek: { prefetch.scrub(to: $0) }
                         )
@@ -1190,6 +1191,9 @@ struct VideoBar: View {
     let playhead: Double?
     var captioned: [ClosedRange<Double>] = []
     var fetched: ClosedRange<Double>?
+    /// In Default, how far each recognizer has captioned from the start,
+    /// k2's first: each in its own color over the fetched audio.
+    var reached: [(label: String, seconds: Double)] = []
     var isPaused = false
     /// Called with where the thumb was dropped. The video only moves then:
     /// following the drag would play a moment of each place it passed, and
@@ -1225,6 +1229,12 @@ struct VideoBar: View {
                     ForEach(Array(captioned.enumerated()), id: \.offset) { _, range in
                         stretch(range, of: total, in: width, color: (isPaused ? Color.yellow : Color.green).opacity(0.7))
                     }
+                    // The one furthest behind drawn last, so each shows.
+                    ForEach(Self.drawingOrder(reached), id: \.label) { reach in
+                        if reach.seconds > 0 {
+                            stretch(0...reach.seconds, of: total, in: width, color: Self.color(of: reach.label))
+                        }
+                    }
                     if let at = dragged ?? playhead {
                         Circle()
                             .fill(Color.orange)
@@ -1236,9 +1246,11 @@ struct VideoBar: View {
                 .overlay {
                     BarDrag(
                         isEnabled: canSeek,
-                        help: Self.summary(
-                            duration: duration, fetched: fetched?.upperBound, ready: captioned.map(\.upperBound).max()
-                        ),
+                        help: reached.isEmpty
+                            ? Self.summary(
+                                duration: duration, fetched: fetched?.upperBound, ready: captioned.map(\.upperBound).max()
+                            )
+                            : Self.summary(duration: duration, fetched: fetched?.upperBound, reached: reached),
                         onMove: { dragged = Self.seconds(at: $0, in: width, of: total) },
                         onDrop: {
                             onSeek?(Self.seconds(at: $0, in: width, of: total))
@@ -1374,6 +1386,30 @@ struct VideoBar: View {
 
     /// What the bar says of captioning ahead, or how to use it when there
     /// is none.
+    /// Each recognizer's color on the bar: none of them the playhead's
+    /// orange, the paused yellow or Incognito's green.
+    static func color(of recognizer: String) -> Color {
+        switch recognizer {
+        case "k2": Color.blue.opacity(0.85)
+        case "nemo": Color.purple.opacity(0.9)
+        default: Color.pink.opacity(0.9)
+        }
+    }
+
+    /// Furthest first, so the one furthest behind is drawn over the others.
+    static func drawingOrder(_ reached: [(label: String, seconds: Double)]) -> [(label: String, seconds: Double)] {
+        reached.enumerated().sorted { a, b in
+            a.element.seconds != b.element.seconds ? a.element.seconds > b.element.seconds : a.offset < b.offset
+        }.map(\.element)
+    }
+
+    /// "k2 12:30 · nemo 8:10 · qwen 4:05, audio fetched to 18:05 of 24:05".
+    static func summary(duration: Double?, fetched: Double?, reached: [(label: String, seconds: Double)]) -> String {
+        let whole = duration.map { " of \(CaptionRow.timestamp($0))" } ?? ""
+        return reached.map { "\($0.label) \(CaptionRow.timestamp($0.seconds))" }.joined(separator: " · ")
+            + ", audio fetched to \(CaptionRow.timestamp(fetched ?? 0))\(whole)"
+    }
+
     static func summary(duration: Double?, fetched: Double?, ready: Double?) -> String {
         guard fetched != nil || ready != nil else { return "Drag to move the Chrome video" }
         let whole = duration.map { " of \(CaptionRow.timestamp($0))" } ?? ""
