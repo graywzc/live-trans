@@ -364,6 +364,9 @@ In Default the menu at the bottom left lists the Chrome tabs with a video and
 the videos the host has processed. The button reads **Load** for one of those,
 which opens a video not in a tab in Chrome and shows its captions from what
 the host kept, and **Start** for any other. Incognito lists the tabs alone.
+Once a video is started or loaded, going over to another one (another page in
+its tab, another tab chosen, or a processed video picked) clears the captions
+and starts the new one at once: loaded, when the host has processed it.
 
 In Default, a caption shows what each recognizer heard, one above the other,
 with k2's Chinese under them. A click on a name, on the Mac or the iPhone,

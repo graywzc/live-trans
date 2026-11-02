@@ -170,6 +170,18 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(Set(ids).count, ids.count)
     }
 
+    /// Another tab, or another page in the job's tab, is another video,
+    /// which Default goes over to; the same page again is not.
+    func testAnotherTabOrPageIsAnotherVideo() {
+        let job = DevPipeline.Job(id: "j", tabID: 1, page: "https://example.tv/watch?v=1", step: .speechMean)
+        func probe(tab: Int, page: String) -> MediaProbe {
+            MediaProbe(tabID: tab, page: page, duration: 600, source: nil, manifest: nil, encrypted: false, userAgent: "ua")
+        }
+        XCTAssertFalse(DevPipeline.isAnotherVideo(probe(tab: 1, page: "https://example.tv/watch?v=1"), than: job))
+        XCTAssertTrue(DevPipeline.isAnotherVideo(probe(tab: 1, page: "https://example.tv/watch?v=2"), than: job))
+        XCTAssertTrue(DevPipeline.isAnotherVideo(probe(tab: 2, page: "https://example.tv/watch?v=1"), than: job))
+    }
+
     /// Each official line goes to the caption it overlaps most; one too
     /// slight an overlap, or none, is left out; a caption may take several.
     func testOfficialSubtitlesAreMatchedToTheCaptionTheyOverlapMost() {
