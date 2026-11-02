@@ -615,21 +615,20 @@ def run_devtool_lines(name, header, audio, on_line):
             raise RuntimeError(f"{name} failed: {last[0][:300]}")
 
 
-# Dev mode's other recognizers, each caption's stretch heard again by each
-# to set beside the caption's own text (k2's): the name the app shows,
+# The other recognizers, each caption's stretch heard again by each to set
+# beside the caption's own text (k2's), in either mode: the name the app shows,
 # and the dev tool that hears it. Not VibeVoice, which often heard garbage
 # and on a blind judging of a whole episode was never better than all
 # three others on any caption; without it they fit beside the translator.
-# What they heard is kept in the dev cache by the caption's times, so a
-# caption cut the same way next time is not heard again.
+# In dev mode what they heard is kept in the dev cache by the caption's
+# times, so a caption cut the same way next time is not heard again.
 DEV_OTHER_HEARERS = [("nemo", "hear_nemo"), ("qwen", "hear_qwen")]
 DEV_OTHER_HEARING = os.getenv("LIVETRANS_OTHER_HEARERS", "1") != "0"
 # Whether a production job, once its captions are made, tells the speakers
 # apart, cuts its captions where they change, and has the other recognizers
-# hear each (see PrefetchJob._finish).
+# hear each and their text translated, as a step job (see
+# PrefetchJob._finish).
 PRODUCTION_FINISH = os.getenv("LIVETRANS_PRODUCTION_FINISH", "1") != "0"
-# The other recognizers a production job's captions are heard by.
-PRODUCTION_HEARERS = ("nemo", "qwen")
 # Each caption is heard from a little before its start to a little after
 # its end, as a click on it plays it.
 OTHER_LEAD, OTHER_TAIL = 0.5, 0.3
@@ -3574,54 +3573,18 @@ class PrefetchJob:
             except OSError as exc:
                 print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
 
-    def _hear_round(self, names, unload=False):
-        """The captions not yet heard by the recognizers `names` (of
-        DEV_OTHER_HEARERS), heard by each in turn; with `unload`, the
-        translator let go first. Whether any were heard."""
-        spans = [(line["start"], line["end"]) for line in list(self.lines)
-                 if line.get("start") is not None and line.get("end") is not None]
-        heard_any = False
-        for name, tool in DEV_OTHER_HEARERS:
-            if name not in names or self.stop_event.is_set():
-                continue
-            todo = [span for span in spans if name not in self.others.get(span, {})]
-            if not todo:
-                continue
-            if unload:
-                unload_ollama()
-                unload = False
-            with self.audio_lock:
-                audio = self.audio.copy()
-            clips = [[max(self._samples(a - OTHER_LEAD) - self.offset, 0), max(self._samples(b + OTHER_TAIL) - self.offset, 0)]
-                     for a, b in todo]
-            t0 = time.time()
-
-            def heard(answer, name=name, todo=todo):
-                self.others.setdefault(todo[answer["i"]], {})[name] = answer["text"]
-
-            try:
-                with self.activity.doing(f"{name} captioning"):
-                    run_devtool_lines(tool, {"clips": clips}, audio, heard)
-                print(f"prefetch {self.id}: {len(todo)} captions heard by {name} in {time.time() - t0:.0f}s", flush=True)
-                heard_any = True
-            except (RuntimeError, OSError, ValueError, KeyError, IndexError) as exc:
-                print(f"prefetch {self.id}: {name}: {exc}", flush=True)
-        return heard_any
-
     def _finish(self):
-        """A production job's other recognizers and speakers, each given to
-        the client as it is done: PRODUCTION_HEARERS hear the captions in
-        rounds as they are made, beside the translator; once all are made,
-        the speakers are told apart over all the audio (DiariZen), each
-        caption a change of speaker falls inside is heard again and cut
-        there, and the new pieces are heard too. Nothing of it is kept."""
-        early = list(PRODUCTION_HEARERS)
+        """A production job's speakers and other recognizers, each given to
+        the client as it is done, once all the captions are made: the
+        speakers told apart over all the audio (DiariZen), each caption a
+        change of speaker falls inside heard again and cut there; then, as
+        a step job's, each caption heard by the other recognizers and what
+        they heard translated (see _hear_others), with nothing beside them
+        on the GPU and each caption heard once. Nothing of it is kept."""
         while not self.stop_event.is_set() and self.state == "running":
-            if not self._hear_round(early):
-                time.sleep(2)
+            time.sleep(0.5)
         if self.stop_event.is_set() or self.state != "done":
             return
-        self._hear_round(early)
         with self.audio_lock:
             audio = self.audio.copy()
         t0 = time.time()
@@ -3641,7 +3604,12 @@ class PrefetchJob:
                 return
             print(f"prefetch {self.id}: {len(self.speakers)} speaker turns in {time.time() - t0:.0f}s, "
                   f"{recut} captions cut where the speaker changes", flush=True)
-        self._hear_round(early)
+        if self.stop_event.is_set():
+            return
+        # The captions as they will stay, which the others wait for.
+        self.captioned = True
+        if DEV_OTHER_HEARING:
+            self._hear_others()
 
     def _cut_at_speakers(self):
         """Each caption a change of speaker falls inside heard again and cut

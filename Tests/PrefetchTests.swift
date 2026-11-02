@@ -170,6 +170,21 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(Set(ids).count, ids.count)
     }
 
+    /// Incognito's picks are the captions' own, in memory, and go with them.
+    @MainActor
+    func testAPickInIncognitoLastsUntilTheCaptionsAreCleared() {
+        let prefetch = Prefetcher(engine: CaptionEngine(), video: ChromeVideo())
+        let first = caption(1, 1, 2), second = caption(2, 3, 4)
+        prefetch.pick("nemo", for: first)
+        XCTAssertEqual(prefetch.pickedVersion(for: first), "nemo")
+        XCTAssertNil(prefetch.pickedVersion(for: second))
+        prefetch.pick(nil, for: first)
+        XCTAssertNil(prefetch.pickedVersion(for: first), "taken back")
+        prefetch.pick("qwen", for: second)
+        prefetch.forget()
+        XCTAssertNil(prefetch.pickedVersion(for: second), "cleared with the captions")
+    }
+
     /// Another tab, or another page in the job's tab, is another video,
     /// which Default goes over to; the same page again is not.
     func testAnotherTabOrPageIsAnotherVideo() {

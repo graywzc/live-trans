@@ -652,10 +652,10 @@ def test_the_others_are_translated_but_for_the_caption_s_own_text_and_what_fails
     assert versions["a"] == {"ja": "雨だね", "en": "下雨了"} and versions["b"] == {"ja": "遅い", "en": ""}, versions
 
 
-def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_them_heard_again():
+def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_them_heard_and_translated():
     cache = fresh_cache()
     original = (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama,
-                srv.PRODUCTION_SPEECH_MODEL)
+                srv.PRODUCTION_SPEECH_MODEL, srv.translate_text)
     asked = []
 
     def heard(grid, audio, start, turns=None, within=None, **kwargs):
@@ -678,27 +678,31 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
 
     srv.speech_stretches, srv.hear_pieces, srv.PRODUCTION_SPEECH_MODEL = (lambda audio, model=None: loud_stretches(audio)), heard, None
     srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama = tool, other, lambda: asked.append("unload")
+    srv.translate_text = lambda ja: asked.append(("translate", ja)) or f"译:{ja}"
     srv.DEV_SPEAKER_CUTS = True
     try:
         url = wav_file(noise_and_silence([(1, False), (2, True), (1, False)]))
         job = srv.PrefetchJob(url, "https://example.com/p", {}, 4.0)
         wait_for(job, "done")
         deadline = time.time() + 15
-        while time.time() < deadline and job.status()["others"] < 2 * 2:
+        while time.time() < deadline and not job.others_done:
             time.sleep(0.1)
         status, found = job.status(), job.findings()
     finally:
         (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama,
-         srv.PRODUCTION_SPEECH_MODEL) = original
+         srv.PRODUCTION_SPEECH_MODEL, srv.translate_text) = original
         srv.DEV_SPEAKER_CUTS = False
     # The line as first made, then the two it was cut into, which take its place.
     assert [l["ja"] for l in status["lines"]] == ["ことばはい", "ことば", "はい"], status["lines"]
     assert [l["ja"] for l in job.lines] == ["ことば", "はい"], job.lines
-    # nemo and qwen as the captions come, the speakers once all are made,
-    # nemo and qwen again for the pieces cut; no VibeVoice, and the
-    # translator never let go.
-    assert asked == ["hear_nemo", "hear_qwen", "diarize", "hear_nemo", "hear_qwen"], asked
-    assert [o["nemo"] for o in found["others"]] == ["hear_nemoのことば"] * 2, found["others"]
+    # The speakers once all the captions are made, then nemo and qwen once
+    # each over the captions as cut, then their text translated, the same
+    # text once; no VibeVoice, and the translator never let go.
+    assert asked == ["diarize", "hear_nemo", "hear_qwen", ("translate", "hear_nemoのことば"),
+                     ("translate", "hear_qwenのことば")], asked
+    assert [(o["nemo"], o["nemo_en"], o["qwen_en"]) for o in found["others"]] == [
+        ("hear_nemoのことば", "译:hear_nemoのことば", "译:hear_qwenのことば")] * 2, found["others"]
+    assert status["captions"] == "done", status
     assert found["speakers"], "the speakers are told, for the timeline"
     assert not os.listdir(cache), "a production job keeps nothing"
 

@@ -126,8 +126,8 @@ struct ContentView: View {
                 others: panel.isDev ? dev.others(for: caption) : prefetch.others(for: caption),
                 isOtherAnalyzed: { panel.isPresented && panel.tab == .analysis && analyzer.hasAnalyzed($0) },
                 onAnalyzeOther: { analyze($0) },
-                picked: panel.isDev ? dev.pickedVersion(for: caption) : nil,
-                onPick: panel.isDev ? { dev.pick($0, for: caption) } : nil
+                picked: panel.isDev ? dev.pickedVersion(for: caption) : prefetch.pickedVersion(for: caption),
+                onPick: panel.isDev ? { dev.pick($0, for: caption) } : { prefetch.pick($0, for: caption) }
             )
         }
         .selectionActions(onLookUp: lookUp)
@@ -830,8 +830,8 @@ struct CaptionRow: View {
     /// The recognizer picked, of "k2" and `others`: its line alone shows,
     /// with its translation. Nil, all of them with the caption's own.
     var picked: String?
-    /// A click on a name picks it, or takes the pick back; none, in
-    /// Incognito, and the names are only names.
+    /// A click on a name picks it, or takes the pick back; none, and the
+    /// names are only names.
     var onPick: ((String?) -> Void)?
 
     @State private var isHovered = false
