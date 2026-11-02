@@ -31,6 +31,8 @@ final class Prefetcher {
         var seeks = true
         /// How many texts the other recognizers have given its captions.
         var others = 0
+        /// What the host is busy with for it right now.
+        var running: [String] = []
     }
 
     /// A stretch of the video captioned ahead.
@@ -297,6 +299,7 @@ final class Prefetcher {
             updated.duration = status.duration ?? updated.duration
             updated.state = status.state
             updated.seen = status.count
+            updated.running = status.running ?? []
             if let count = status.others, count != updated.others,
                let findings = try? await client.stepFindings(job: current.id), job?.id == current.id {
                 others = findings.others ?? []
