@@ -76,10 +76,22 @@ final class Prefetcher {
     /// Why the host could not fetch the video it was to caption ahead, for
     /// the viewer; nil while it can, or before it has tried.
     private(set) var problem: String?
-    /// The captions heard again by the other recognizers, once the host has
-    /// made them all (see the server's PrefetchJob._finish).
+    /// The captions heard again by the other recognizers, with their
+    /// Chinese, once the host has made them all (see the server's
+    /// PrefetchJob._finish).
     private(set) var others: [OtherHearing] = []
     @ObservationIgnored private var otherRuby: [String: [RubyToken]] = [:]
+    /// The recognizer picked for each caption, by its id: in memory only,
+    /// let go with the captions, where dev mode keeps its picks on the host.
+    private(set) var picks: [Int: String] = [:]
+
+    func pickedVersion(for caption: Caption) -> String? { picks[caption.id] }
+
+    /// `name`'s text is the caption's while it is shown; nil takes the pick
+    /// back, and all of them show again.
+    func pick(_ name: String?, for caption: Caption) {
+        picks[caption.id] = name
+    }
 
     /// What the other recognizers heard over `caption`, as DevPipeline's
     /// `others(for:)` gives it in dev mode.
@@ -197,6 +209,7 @@ final class Prefetcher {
     /// The captions were cleared, so nothing is covered any more.
     func forget() {
         finished = []
+        picks = [:]
         if job != nil { restartForgetting = true }
         Task { await tick() }
     }
@@ -374,6 +387,7 @@ final class Prefetcher {
         guard let job else { return }
         retire()
         others = []
+        picks = [:]
         currentCaptionID = nil
         playingCaptionID = nil
         lull = nil

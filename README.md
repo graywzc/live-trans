@@ -368,12 +368,17 @@ Once a video is started or loaded, going over to another one (another page in
 its tab, another tab chosen, or a processed video picked) clears the captions
 and starts the new one at once: loaded, when the host has processed it.
 
-In Default, a caption shows what each recognizer heard, one above the other,
+In either mode, a caption shows what each recognizer heard, one above the other,
 with k2's Chinese under them. A click on a name, on the Mac or the iPhone,
 keeps that version: the others hide and its Chinese shows. A click on the name
-again brings them back. The picks are kept on the GPU host, with the video, by
+again brings them back. Default's picks are kept on the GPU host, with the video, by
 `server/phone_service.py`, and either app can change them. A pick made on the
 iPhone with the host out of reach goes there when the host is next reached.
+
+In either mode the other recognizers hear the captions once all are made and
+cut where the speaker changes, and their text is then translated. Incognito's
+picks are in memory only, and go when the captions are cleared or the app
+quits.
 
 At the top of the tab, how the Mac and the GPU host stand: whether the Mac
 is listening and how many utterances are waiting for their captions, which
