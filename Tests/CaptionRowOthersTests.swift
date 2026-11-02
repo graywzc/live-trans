@@ -20,8 +20,8 @@ final class CaptionRowOthersTests: XCTestCase {
 
         var body: some View {
             let moment = VideoMoment(tabID: 1, url: "https://example.tv/", seconds: 754.6)
-            let line = { (id: Int, text: String) in
-                Caption(id: id, japanese: text, ruby: Furigana.annotate(text), english: "", moment: moment)
+            let line = { (id: Int, text: String, english: String) in
+                Caption(id: id, japanese: text, ruby: Furigana.annotate(text), english: english, moment: moment)
             }
             CaptionRow(
                 caption: Caption(
@@ -32,9 +32,9 @@ final class CaptionRowOthersTests: XCTestCase {
                 selection: $model.selection, onAnalyze: { model.analyzed.append("k2") },
                 onSeek: { model.seeks += 1 },
                 others: [
-                    ("nemo", line(-1, "明日は雨が降るらしい。")),
-                    ("qwen", line(-2, "明日、雨が降るらしい。")),
-                    ("vv", line(-3, "明日は飴が降るらしい")),
+                    ("nemo", line(-1, "明日は雨が降るらしい。", "Nemo says rain.")),
+                    ("qwen", line(-2, "明日、雨が降るらしい。", "Qwen says rain.")),
+                    ("vv", line(-3, "明日は飴が降るらしい", "")),
                 ],
                 onAnalyzeOther: { model.analyzed.append($0.japanese) },
                 picked: model.picked,
@@ -95,6 +95,52 @@ final class CaptionRowOthersTests: XCTestCase {
         XCTAssertEqual(model.picked, "k2")
         click(CGPoint(x: 24, y: 28))
         XCTAssertNil(model.picked)
+    }
+
+    func testEachLinesChineseButtonPutsItsTranslationUnderTheRow() throws {
+        let tracker = try XCTUnwrap(TestScreen.wait { window.contentView.flatMap(Self.find) })
+        tracker.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: 200, y: 60)))
+        pump()
+        XCTAssertEqual(translation(), "It may rain tomorrow.")
+        // vv's line has no Chinese, and no 中: a click after it does nothing.
+        click(chineseButton("明日は飴が降るらしい", y: 112))
+        XCTAssertEqual(translation(), "It may rain tomorrow.")
+
+        let seeks = model.seeks
+        click(chineseButton("明日、雨が降るらしい。", y: 84))
+        XCTAssertEqual(translation(), "Qwen says rain.")
+        XCTAssertEqual(model.seeks, seeks, "switching does not play the sentence")
+        XCTAssertNil(model.picked, "switching hides no line")
+        snapshot("row-others-qwen-chinese")
+        click(chineseButton("明日は雨が降るらしい。", y: 56))
+        XCTAssertEqual(translation(), "Nemo says rain.")
+        click(chineseButton("明日は雨が降るらしい", y: 28))
+        XCTAssertEqual(translation(), "It may rain tomorrow.")
+
+        // A pick shows its own line's Chinese, with no buttons to switch.
+        click(CGPoint(x: 24, y: 84))
+        XCTAssertEqual(model.picked, "qwen")
+        XCTAssertEqual(translation(), "Qwen says rain.")
+        // Alone, its line is at the top, with no 中 after it.
+        click(chineseButton("明日、雨が降るらしい。", y: 28))
+        XCTAssertEqual(translation(), "Qwen says rain.")
+        XCTAssertEqual(model.picked, "qwen")
+    }
+
+    /// The text under the lines: the Chinese, here English stand-ins.
+    private func translation() -> String? {
+        func find(in view: NSView) -> NSTextView? {
+            (view as? NSTextView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        return window.contentView.flatMap(find)?.string
+    }
+
+    /// Where the 中 after a line of `japanese` is, in the window's top-left
+    /// points: past the row's padding, the name and the text. (SwiftUI shows
+    /// no accessibility tree in the test process to find it by.)
+    private func chineseButton(_ japanese: String, y: CGFloat) -> CGPoint {
+        let text = NSAttributedString(string: japanese, attributes: [.font: NSFont.systemFont(ofSize: 20)])
+        return CGPoint(x: 16 + 20 * 1.6 + 6 + text.size().width + 6 + 8, y: y + 4)
     }
 
     private static func find(in view: NSView) -> HoverTracker.TrackerView? {
