@@ -727,6 +727,10 @@ private struct OtherHearingLine: View {
     var onPick: ((String?) -> Void)?
     /// Where the sentence is, shown on a line that stands for the caption.
     var span: String?
+    /// The Chinese under the row is this line's.
+    var isTranslated = false
+    /// Shows this line's Chinese under the row; none when it has none.
+    var onTranslate: (() -> Void)?
 
     @State private var selection: Range<Int>?
 
@@ -737,6 +741,11 @@ private struct OtherHearingLine: View {
                 tokens: ruby, fontSize: fontSize, showReadings: showFurigana, selection: $selection, onClick: onClick
             )
             .help("What \(label) heard over the same stretch")
+            if let onTranslate {
+                Self.translateButton(
+                    label, isTranslated: isTranslated, fontSize: fontSize, showFurigana: showFurigana, action: onTranslate
+                )
+            }
             Spacer(minLength: 8)
             if let span {
                 CaptionRow.spanLabel(span, fontSize: fontSize, showFurigana: showFurigana)
@@ -752,6 +761,26 @@ private struct OtherHearingLine: View {
             .padding(.top, showFurigana ? fontSize * 0.6 : 0)
             .opacity(isRowHovered || isAnalyzed ? 1 : 0)
         }
+    }
+
+    /// A small 中 after a recognizer's line that puts its Chinese under the
+    /// row, green while it is the one there.
+    static func translateButton(
+        _ label: String, isTranslated: Bool, fontSize: Double, showFurigana: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text("中")
+                .font(.system(size: fontSize * 0.5))
+                .foregroundStyle(isTranslated ? Color.green : Color.gray)
+                // A target a little wider than the glyph.
+                .padding(.horizontal, 4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isTranslated ? "The Chinese below is \(label)'s" : "Show \(label)'s Chinese below")
+        .accessibilityLabel("\(label)'s Chinese")
+        // On the baseline of its line, below the row of readings.
+        .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
     }
 
     /// A recognizer's name at the left of its line, on the baseline of its
@@ -806,6 +835,9 @@ struct CaptionRow: View {
     var onPick: ((String?) -> Void)?
 
     @State private var isHovered = false
+    /// The recognizer whose Chinese is under the lines, of `others`; nil,
+    /// the caption's own, k2's.
+    @State private var translatedBy: String?
 
     /// The other recognizer picked, when its text is among `others`.
     private var pickedOther: (label: String, sentence: Caption)? {
@@ -813,6 +845,16 @@ struct CaptionRow: View {
     }
 
     private var isOwnPicked: Bool { picked == "k2" && !others.isEmpty }
+
+    /// The other recognizer whose Chinese shows: the one picked, else the
+    /// one chosen by its 中, while it is still under the caption.
+    private var translatingOther: (label: String, sentence: Caption)? {
+        pickedOther ?? (isOwnPicked ? nil : others.first { $0.label == translatedBy })
+    }
+
+    /// With every line shown, each that has Chinese gets a 中 that puts it
+    /// under them.
+    private var isTranslationSwitchable: Bool { picked == nil && !others.isEmpty }
 
     /// The lines of the others under the caption's own, with no pick.
     private var othersShown: [(label: String, sentence: Caption)] {
@@ -831,10 +873,13 @@ struct CaptionRow: View {
                         onClick: onSeek, isRowHovered: isHovered, isAnalyzed: isOtherAnalyzed(other.sentence),
                         onAnalyze: { onAnalyzeOther(other.sentence) }, isPicked: other.label == picked, onPick: onPick,
                         // Standing for the caption, it says where it is.
-                        span: other.label == picked ? momentSpan : nil
+                        span: other.label == picked ? momentSpan : nil,
+                        isTranslated: translatingOther?.label == other.label,
+                        onTranslate: isTranslationSwitchable && !other.sentence.english.isEmpty
+                            ? { translatedBy = other.label } : nil
                     )
                 }
-                let english = pickedOther?.sentence.english ?? caption.english
+                let english = translatingOther?.sentence.english ?? caption.english
                 if !english.isEmpty {
                     // Not SwiftUI's selectable text, which keeps its clicks.
                     SelectableText(english, size: fontSize * 0.82, color: .systemGreen, onClick: onSeek)
@@ -876,6 +921,11 @@ struct CaptionRow: View {
                 tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
                 selection: $selection, onClick: onSeek
             )
+            if isTranslationSwitchable, !caption.english.isEmpty {
+                OtherHearingLine.translateButton(
+                    "k2", isTranslated: translatingOther == nil, fontSize: fontSize, showFurigana: showFurigana
+                ) { translatedBy = nil }
+            }
             Spacer(minLength: 8)
             if let momentSpan {
                 Self.spanLabel(momentSpan, fontSize: fontSize, showFurigana: showFurigana)
