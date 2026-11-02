@@ -23,9 +23,12 @@ final class VideoBarTests: XCTestCase {
         window = nil
     }
 
-    private func show(duration: Double?, playhead: Double? = 300) {
+    private func show(
+        duration: Double?, playhead: Double? = 300, captioned: [ClosedRange<Double>] = [240...600, 0...120],
+        fetched: ClosedRange<Double>? = 240...900, reached: [(label: String, seconds: Double)] = []
+    ) {
         let bar = VideoBar(
-            duration: duration, playhead: playhead, captioned: [240...600, 0...120], fetched: 240...900
+            duration: duration, playhead: playhead, captioned: captioned, fetched: fetched, reached: reached
         ) { [unowned self] in sought.append($0) }
         window.contentView = NSHostingView(
             rootView: bar.padding(.horizontal, 12).padding(.bottom, 8)
@@ -116,6 +119,54 @@ final class VideoBarTests: XCTestCase {
         show(duration: nil)
         drag(from: CGPoint(x: 200, y: Self.barY), to: CGPoint(x: 300, y: Self.barY))
         XCTAssertEqual(sought, [])
+    }
+
+    /// In Default each recognizer's reach has its own color from the start,
+    /// the one furthest behind on top, and the fetched audio past them grey.
+    func testEachRecognizerShowsHowFarItHasCaptionedInItsOwnColor() throws {
+        show(
+            duration: 1200, playhead: nil, captioned: [], fetched: 0...1050,
+            reached: [("k2", 900), ("nemo", 600), ("qwen", 300)]
+        )
+        let track = try trackEnds()
+        func at(_ seconds: Double) throws -> NSColor {
+            let x = track.left + (track.right - track.left) * CGFloat(seconds / 1200)
+            return try XCTUnwrap(pixel(at: CGPoint(x: x, y: Self.barY)))
+        }
+        let qwen = try at(150), nemo = try at(450), k2 = try at(750), fetched = try at(1000), empty = try at(1150)
+        XCTAssertGreaterThan(k2.blueComponent, k2.redComponent + 0.2, "k2 is blue")
+        XCTAssertGreaterThan(nemo.blueComponent, 0.3, "nemo is purple")
+        XCTAssertGreaterThan(nemo.redComponent, 0.3, "nemo is purple")
+        XCTAssertGreaterThan(qwen.redComponent, qwen.blueComponent, "qwen is pink")
+        for (a, b) in [(qwen, nemo), (nemo, k2), (k2, fetched)] {
+            XCTAssertGreaterThan(Self.distance(a, b), 0.15, "each stretch its own color")
+        }
+        XCTAssertLessThan(abs(fetched.redComponent - fetched.blueComponent), 0.05, "the fetched audio stays grey")
+        XCTAssertGreaterThan(fetched.brightnessComponent, empty.brightnessComponent, "brighter than the unfetched track")
+        snapshot("video-bar-recognizers")
+        // In the help, each with its time.
+        XCTAssertEqual(
+            VideoBar.summary(duration: 1200, fetched: 1050, reached: [("k2", 900), ("nemo", 600), ("qwen", 300)]),
+            "k2 15:00 · nemo 10:00 · qwen 5:00, audio fetched to 17:30 of 20:00"
+        )
+    }
+
+    func testTheRecognizerFurthestBehindIsDrawnLast() {
+        let order = VideoBar.drawingOrder([("k2", 900), ("nemo", 300), ("qwen", 600)]).map(\.label)
+        XCTAssertEqual(order, ["k2", "qwen", "nemo"])
+        XCTAssertEqual(VideoBar.drawingOrder([("k2", 900), ("nemo", 900), ("qwen", 0)]).map(\.label), ["k2", "nemo", "qwen"])
+    }
+
+    private func pixel(at point: CGPoint) -> NSColor? {
+        let view = window.contentView!
+        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        return rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))?.usingColorSpace(.deviceRGB)
+    }
+
+    private static func distance(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent) + abs(a.blueComponent - b.blueComponent)
     }
 
     /// Whether anything light is drawn in `rect`, from the window's top

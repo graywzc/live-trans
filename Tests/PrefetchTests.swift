@@ -182,6 +182,26 @@ final class PrefetchTests: XCTestCase {
         XCTAssertTrue(DevPipeline.isAnotherVideo(probe(tab: 2, page: "https://example.tv/watch?v=1"), than: job))
     }
 
+    /// k2 reaches where its captions are made, the others the furthest
+    /// caption each heard; once k2 is done, it and each other one that heard
+    /// every caption reach the end.
+    func testEachRecognizerReachesAsFarAsItHasCaptioned() {
+        let own = [10.0...14, 20...25, 40...44]
+        let others = [
+            OtherHearing(start: 10, end: 14, nemo: "甲", qwen: "甲"),
+            OtherHearing(start: 20, end: 25, nemo: "乙"),
+        ]
+        func reach(_ captions: String, ready: Double, _ others: [OtherHearing]) -> [String] {
+            DevPipeline.reached(captions: captions, ready: ready, total: 600, own: own, others: others)
+                .map { "\($0.label) \(Int($0.seconds))" }
+        }
+        XCTAssertEqual(reach("running", ready: 30, others), ["k2 44", "nemo 25", "qwen 14"], "k2 at least to its last caption")
+        XCTAssertEqual(reach("running", ready: 50, []), ["k2 50", "nemo 0", "qwen 0"])
+        XCTAssertEqual(reach("done", ready: 50, others), ["k2 600", "nemo 25", "qwen 14"])
+        let heardAll = others + [OtherHearing(start: 40, end: 44, nemo: "丙")]
+        XCTAssertEqual(reach("done", ready: 0, heardAll), ["k2 600", "nemo 600", "qwen 14"], "from the cache: done at once")
+    }
+
     /// Each official line goes to the caption it overlaps most; one too
     /// slight an overlap, or none, is left out; a caption may take several.
     func testOfficialSubtitlesAreMatchedToTheCaptionTheyOverlapMost() {
