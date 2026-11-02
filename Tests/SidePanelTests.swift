@@ -208,8 +208,12 @@ final class LaunchFocusTests: XCTestCase {
     func testThePageHasTheCursorOnlyOnceClicked() throws {
         let panel = SidePanel()
         let browser = JishoBrowser()
-        // Stands in for jisho.org, whose home page focuses its search box.
-        browser.webView.loadHTMLString("<input id=q autofocus>", baseURL: nil)
+        // Stands in for jisho.org, whose home page focuses its search box:
+        // the box across the top half, the page's text below.
+        browser.webView.loadHTMLString(
+            "<input id=q autofocus style='position:fixed;left:0;top:0;width:100%;height:50%'>",
+            baseURL: nil
+        )
 
         let engine = CaptionEngine()
         let video = ChromeVideo()
@@ -251,15 +255,26 @@ final class LaunchFocusTests: XCTestCase {
         // window that is not key is spent on bringing it to the front.
         window.becomeKey()
         let web = browser.webView
-        let inWindow = web.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), to: nil)
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            let click = try XCTUnwrap(NSEvent.mouseEvent(
-                with: type, location: inWindow, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
-            ))
-            NSApp.postEvent(click, atStart: false)
+        func click(atHeight fraction: CGFloat) throws {
+            // The web view is flipped: y grows down from the top.
+            let point = NSPoint(x: web.bounds.midX, y: web.bounds.height * fraction)
+            let inWindow = web.convert(point, to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let click = try XCTUnwrap(NSEvent.mouseEvent(
+                    with: type, location: inWindow, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+                ))
+                NSApp.postEvent(click, atStart: false)
+            }
+            pump(seconds: 0.5)
         }
-        pump(seconds: 0.5)
+        try click(atHeight: 0.25)
         XCTAssertTrue(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
+
+        // Clicked on the page outside the box, Space plays the video rather
+        // than scrolling the page.
+        try click(atHeight: 0.75)
+        XCTAssertTrue((window.firstResponder as? NSView)?.isDescendant(of: web) == true, "the page should still have the cursor")
+        XCTAssertFalse(SpaceKey.typesSpace(window.firstResponder), "\(String(describing: window.firstResponder))")
     }
 }

@@ -33,7 +33,11 @@ final class JishoBrowser {
         let configuration = WKWebViewConfiguration()
         // Lookups, cookies and cache stay in memory, gone with the app.
         configuration.websiteDataStore = .nonPersistent()
+        let focus = TextFocusReporter()
+        configuration.userContentController.addUserScript(TextFocusReporter.script)
+        configuration.userContentController.add(focus, name: TextFocusReporter.name)
         let webView = ClickFocusedWebView(frame: .zero, configuration: configuration)
+        focus.webView = webView
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
         observations = [
@@ -60,6 +64,10 @@ final class JishoBrowser {
 /// in front from the first frame, would have Space typing into the search
 /// box until something else was clicked, when it should play the video.
 final class ClickFocusedWebView: WKWebView {
+    /// The page's cursor is in a box that takes text, such as jisho.org's
+    /// search box, rather than on the page itself, which Space would scroll.
+    var isEditingText = false
+
     /// The event being handled is a click into this view.
     private var isBeingClicked: Bool {
         guard let event = NSApp.currentEvent, event.window === window else { return false }
@@ -77,5 +85,34 @@ final class ClickFocusedWebView: WKWebView {
     /// `acceptsFirstResponder` first, so the answer is given here too.
     override func becomeFirstResponder() -> Bool {
         isBeingClicked && super.becomeFirstResponder()
+    }
+}
+
+/// Tells the web view whether the page's focus is in a box that takes text.
+/// The page keeps that to itself, and Space should type only there.
+private final class TextFocusReporter: NSObject, WKScriptMessageHandler {
+    static let name = "textFocus"
+    static var script: WKUserScript { WKUserScript(source: """
+        (() => {
+          const kinds = /^(button|checkbox|radio|submit|reset|image|file|range|color)$/i;
+          const editing = () => {
+            const e = document.activeElement;
+            if (!e) return false;
+            if (e.isContentEditable || e.tagName === "TEXTAREA" || e.tagName === "SELECT") return true;
+            return e.tagName === "INPUT" && !kinds.test(e.type);
+          };
+          const report = () => window.webkit.messageHandlers.\(name).postMessage(editing());
+          document.addEventListener("focusin", report, true);
+          // Focus has not moved on yet while focusout is handled.
+          document.addEventListener("focusout", () => setTimeout(report, 0), true);
+          report();
+        })();
+        """, injectionTime: .atDocumentStart, forMainFrameOnly: true) }
+
+    weak var webView: ClickFocusedWebView?
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        let editing = message.body as? Bool ?? false
+        MainActor.assumeIsolated { webView?.isEditingText = editing }
     }
 }

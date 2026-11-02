@@ -336,12 +336,13 @@ private struct VideoControls: View {
 }
 
 /// Space plays and pauses, as in a video player, except where Space types:
-/// an editable text view (the follow-up box, any field being edited) or the
-/// Jisho page, whose search box can't be told apart from the outside. Each
-/// of those has the cursor only after being clicked (`ClickFocusedWebView`
-/// keeps the page from taking it as it loads), and Control-C takes the
-/// cursor back out of the text, so that the next Space reaches the video
-/// without a click somewhere else first.
+/// an editable text view (the follow-up box, any field being edited) or a
+/// text box on the Jisho page, such as its search box. Anywhere else on the
+/// page, where Space would scroll, it is the video's. Each of those has the
+/// cursor only after being clicked (`ClickFocusedWebView` keeps the page
+/// from taking it as it loads), and Control-C takes the cursor back out of
+/// the text, so that the next Space reaches the video without a click
+/// somewhere else first.
 struct SpaceKey: NSViewRepresentable {
     let action: () -> Void
 
@@ -355,7 +356,9 @@ struct SpaceKey: NSViewRepresentable {
 
     static func typesSpace(_ responder: NSResponder?) -> Bool {
         if let text = responder as? NSTextView, text.isEditable { return true }
-        return webView(around: responder) != nil
+        guard let web = webView(around: responder) else { return false }
+        // A page that doesn't say where its focus is might be typing.
+        return (web as? ClickFocusedWebView)?.isEditingText ?? true
     }
 
     private static func webView(around responder: NSResponder?) -> WKWebView? {
