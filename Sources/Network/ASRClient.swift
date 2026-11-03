@@ -258,7 +258,7 @@ struct ASRClient {
     /// pipeline alone over the whole of the audio, making no captions.
     func startPrefetch(
         url: String?, page: String, headers: [String: String], duration: Double?, start: Double = 0,
-        step: String? = nil, title: String? = nil
+        step: String? = nil, title: String? = nil, keep: Bool = true
     ) async throws -> String {
         var request = URLRequest(url: baseURL.appending(path: "prefetch"))
         request.httpMethod = "POST"
@@ -268,6 +268,8 @@ struct ASRClient {
         if let duration { body["duration"] = duration }
         if let step { body["step"] = step }
         if let title, !title.isEmpty { body["title"] = title }
+        // Incognito's: the host keeps nothing of the video.
+        if !keep { body["keep"] = false }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)
         struct Payload: Decodable { var job: String?; var error: String? }

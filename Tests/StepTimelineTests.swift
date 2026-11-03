@@ -107,7 +107,7 @@ final class StepTimelineTests: XCTestCase {
         job.fetched = 412
         job.analysed = 380
         XCTAssertEqual(
-            ActivityView.hostStatus(.listening("GPU · large-v3"), job: nil, step: job),
+            ActivityView.hostStatus(.listening("GPU · large-v3"), step: job),
             "GPU · large-v3\nStep 1 · Speech (Silero) running · fetched to 6:52 · looked to 6:20 of 24:00"
         )
     }

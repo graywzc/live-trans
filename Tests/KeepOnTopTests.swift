@@ -60,6 +60,7 @@ final class KeepOnTopTests: XCTestCase {
             .environment(video)
             .environment(Prefetcher(engine: engine, video: video))
             .environment(DevPipeline(engine: engine, video: video))
+            .environment(ActivityLog())
             .defaultAppStorage(defaults)
         window = TestScreen.window(width: 960, height: 520)
         window.contentView = NSHostingView(rootView: root)

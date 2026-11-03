@@ -529,6 +529,34 @@ def test_a_step_job_captions_the_video_with_its_speech_finder_and_keeps_no_text(
             assert "ことば" not in open(os.path.join(folder, name), encoding="utf-8").read(), name
     srv.clear_dev_cache()
 
+def test_an_incognito_step_job_runs_the_step_and_keeps_nothing():
+    cache = fresh_cache()
+    original = srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS, srv.run_devtool
+
+    def heard(grid, audio, start, **kwargs):
+        return [{"ja": "ことば", "en": "words", "start": a, "end": b} for a, b in grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)]
+
+    srv.speech_stretches, srv.hear_pieces, srv.DEV_CAPTIONS = (lambda audio, model=None: loud_stretches(audio)), heard, True
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    srv.run_devtool = lambda name, header, audio: {"segments": [[1.0, 2.0, "S1"]]}
+    try:
+        url = wav_file(noise_and_silence([(1, False), (1, True), (1, False)]))
+        job = srv.start_prefetch(url, "https://example.com/incognito", {}, 3.0, step="speech-mean", keep=False)
+        deadline = time.time() + 15
+        while (not job.captioned or job.speakers is None or job.analysed < 3.0) and time.time() < deadline:
+            time.sleep(0.1)
+        status, found = job.status(), job.findings()
+        job.stop()
+    finally:
+        srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS, srv.run_devtool = original
+    # The step's own findings and captions, as Default's ...
+    assert status["captions"] == "done" and status["count"] >= 1, status
+    assert found["speech"] and found["speakers"], found
+    # ... with nothing kept of them, nor listed.
+    assert job.cache is None and status["video"] is None and status["bundle"] == "none", status
+    assert not os.listdir(cache), os.listdir(cache)
+
+
 def test_a_step_job_s_captions_are_kept_and_shown_again_without_hearing():
     fresh_cache()
     original = srv.speech_stretches, srv.hear_pieces, srv.sound_events, srv.DEV_CAPTIONS

@@ -135,7 +135,7 @@ sherpa-onnx project converted it to ONNX (MIT, see
 FireRedVAD's; without it that step fails and nothing else changes.
 `LIVETRANS_SEGMENTATION_MODEL` points at another file.
 
-Dev mode also shows, under its timeline, who speaks when and the words
+Either mode also shows, under its timeline, who speaks when and the words
 Whisper hears, re-timed. Those need two heavier tools, each in its own
 Python beside the server's, set up once on the GPU host with
 `server/devtools/setup.sh` (uv and git needed; about 11 GB with the models,
@@ -357,8 +357,15 @@ so captions catch up rather than run ahead until you pause or go back.
 The switch in the header picks the mode. **Default**, called dev mode below,
 is what the app opens in the first time, and after that it opens in the mode
 last chosen. **Incognito**, called production elsewhere in this file, leaves
-no trace: nothing is listed or kept of how the captions come about, on the
-Mac or on the host. Only videos kept in Default reach the iPhone.
+no trace: nothing is kept on the Mac or on the host, not even in the
+server's log. Only videos kept in Default reach the iPhone. Both run the
+same pipeline (the step picked on the timeline over the whole video, its
+speakers, the other recognizers and their Chinese), with the same timeline
+and activity under the captions; anything that needs nothing kept is in
+both. What needs keeping is Default's alone: Load and the processed videos,
+Re-run, Keep for iPhone and the dev cache's bin, picks kept on the host,
+the official subtitles, and audio kept before when a fetch fails. A failed
+captioning says so under the captions in either mode.
 
 In Default the menu at the bottom left lists the Chrome tabs with a video and
 the videos the host has processed. The button reads **Load** for one of those,
@@ -384,7 +391,8 @@ In either mode DiariZen tells the speakers apart once all the audio is in,
 beside the captioning, and the other recognizers hear the captions once all
 are made and cut where the speaker changes, and their text is then translated. Incognito's
 picks are in memory only, and go when the captions are cleared or the app
-quits.
+quits. Choosing another step in Incognito fetches the video again, where
+Default takes the audio it kept.
 
 At the top of the tab, how the Mac and the GPU host stand: whether the Mac
 is listening and how many utterances are waiting for their captions, which
@@ -393,7 +401,7 @@ list in the order things happened, each line marked with the machine it is
 from; the host's are asked for every second (`GET /events`) while the tab is
 shown. Only what is worth reading goes in it, so it is short. It may quote
 what was heard, and is in memory only on both machines, never in the host's
-log; leaving the tab empties it.
+log; leaving the tab, or the mode, empties it.
 
 Dev mode runs one step of captioning ahead
 on its own over the whole video, for looking at what the step does: press
@@ -412,7 +420,7 @@ it in the Chrome video, which pauses at its end. A click also puts a white
 pointer where it landed (a click on the ruler does only that), and Space
 then plays the Chrome video from there; after that Space plays and pauses
 as usual until the pointer is put somewhere again. Unlike everything else,
-dev mode keeps what it fetched and found on the host's disk
+dev mode (Default; not Incognito) keeps what it fetched and found on the host's disk
 (`~/livetrans/devcache`, or `LIVETRANS_DEV_CACHE`): the audio under a hash
 of the page, and each step's findings with the step's version, so running
 a step again on the same video, after a restart or a change to the step,

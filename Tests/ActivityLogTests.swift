@@ -122,18 +122,9 @@ final class ActivityViewTests: XCTestCase {
     }
 
     func testWhatTheServerIsDoing() {
-        XCTAssertEqual(ActivityView.hostStatus(.idle, job: nil), "Not in use")
-        XCTAssertEqual(ActivityView.hostStatus(.reconnecting, job: nil), "Not answering, being restarted")
-        XCTAssertEqual(ActivityView.hostStatus(.listening("GPU · large-v3"), job: nil), "GPU · large-v3")
-        var job = Prefetcher.Job(id: "1a2b3c4d5e6f", tabID: 1, page: "https://example.com/watch", duration: 1440)
-        job.fetched = 412
-        job.ready = 380
-        XCTAssertEqual(
-            ActivityView.hostStatus(.listening("GPU · large-v3"), job: job),
-            "GPU · large-v3\nJob 1a2b3c running · fetched to 6:52 · captioned to 6:20 of 24:00"
-        )
-        job.duration = nil
-        XCTAssertEqual(ActivityView.jobStatus(job), "Job 1a2b3c running · fetched to 6:52 · captioned to 6:20")
+        XCTAssertEqual(ActivityView.hostStatus(.idle), "Not in use")
+        XCTAssertEqual(ActivityView.hostStatus(.reconnecting), "Not answering, being restarted")
+        XCTAssertEqual(ActivityView.hostStatus(.listening("GPU · large-v3")), "GPU · large-v3")
     }
 
     /// Dev mode in the real window, its activity unfolded under the

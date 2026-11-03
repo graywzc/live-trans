@@ -23,9 +23,7 @@ struct HostEvents: Decodable, Equatable {
 /// (`tell`), and what the server tells of its own, asked for every second
 /// while there is a server. Only what is worth reading is told: the list
 /// is for understanding how the captions come about, not a log. Like
-/// everything else of a session it is in memory only, and it is dev
-/// mode's alone: in production nothing is listed and the server is not
-/// asked.
+/// everything else of a session it is in memory only, in either mode.
 @MainActor
 @Observable
 final class ActivityLog {
