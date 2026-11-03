@@ -217,6 +217,28 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(reach("done", ready: 0, heardAll), ["k2 600", "nemo 600", "qwen 14"], "from the cache: done at once")
     }
 
+    /// Each reaches the furthest caption with its translation; once k2 is
+    /// done, the whole video for each with every caption translated.
+    func testEachRecognizerIsTranslatedAsFarAsItsTranslationsGo() {
+        let own: [(range: ClosedRange<Double>, english: Bool)] = [(10...14, true), (20...25, true), (40...44, false)]
+        var others = [
+            OtherHearing(start: 10, end: 14, nemo: "甲", qwen: "甲", nemoEnglish: "a", qwenEnglish: "a"),
+            OtherHearing(start: 20, end: 25, nemo: "乙", qwen: "乙", nemoEnglish: ""),
+            OtherHearing(start: 40, end: 44, nemo: "丙"),
+        ]
+        func reach(_ captions: String, _ own: [(range: ClosedRange<Double>, english: Bool)]) -> [String] {
+            DevPipeline.translated(captions: captions, total: 600, own: own, others: others)
+                .map { "\($0.label) \(Int($0.seconds))" }
+        }
+        // One the translator left in Japanese ("") counts as done with.
+        XCTAssertEqual(reach("running", own), ["k2 25", "nemo 25", "qwen 14"])
+        XCTAssertEqual(reach("done", own), ["k2 25", "nemo 25", "qwen 14"], "k2's last line has no translation")
+        others[2].nemoEnglish = "c"
+        let allEnglish = own.map { ($0.range, true) }
+        XCTAssertEqual(reach("done", allEnglish), ["k2 600", "nemo 600", "qwen 14"])
+        XCTAssertEqual(reach("running", allEnglish), ["k2 44", "nemo 44", "qwen 14"], "not the whole video until k2 is done")
+    }
+
     /// Each official line goes to the caption it overlaps most; one too
     /// slight an overlap, or none, is left out; a caption may take several.
     func testOfficialSubtitlesAreMatchedToTheCaptionTheyOverlapMost() {

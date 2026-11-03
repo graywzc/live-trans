@@ -215,6 +215,8 @@ struct ContentView: View {
                             playhead: prefetch.position,
                             captioned: prefetch.captioned, fetched: prefetch.fetchedAhead ?? dev.fetched(on: playhead),
                             reached: isDev ? dev.reached(on: playhead) : [],
+                            translated: isDev ? dev.translated(on: playhead) : [],
+                            speakers: isDev ? dev.speakerState(on: playhead) : nil,
                             isPaused: isDev && dev.isPaused,
                             onSeek: { prefetch.scrub(to: $0) }
                         )
@@ -1194,6 +1196,11 @@ struct VideoBar: View {
     /// In Default, how far each recognizer has captioned from the start,
     /// k2's first: each in its own color over the fetched audio.
     var reached: [(label: String, seconds: Double)] = []
+    /// Under it, in lanes of their own: how far each one's text is
+    /// translated, in the same colors, lighter; and where telling the
+    /// speakers apart is.
+    var translated: [(label: String, seconds: Double)] = []
+    var speakers: DevPipeline.SpeakerState?
     var isPaused = false
     /// Called with where the thumb was dropped. The video only moves then:
     /// following the drag would play a moment of each place it passed, and
@@ -1206,6 +1213,9 @@ struct VideoBar: View {
     @State private var pointer: CGFloat?
 
     static let thumb: CGFloat = 12
+    static let barHeight: CGFloat = 16
+    static let laneHeight: CGFloat = 3
+    static let laneGap: CGFloat = 2
     /// How far above the bar the pointer's time floats, and its size,
     /// enough for "1:02:03" in the bar's font.
     static let labelRise: CGFloat = 12
@@ -1215,34 +1225,71 @@ struct VideoBar: View {
         let total = max(duration ?? 0, fetched?.upperBound ?? 0, playhead ?? 0, 1)
         // A video with no end can't be moved about in.
         let canSeek = onSeek != nil && duration != nil
-        HStack(spacing: 8) {
+        let hasLanes = !translated.isEmpty || speakers != nil
+        HStack(alignment: .top, spacing: 8) {
             Text(CaptionRow.timestamp(dragged ?? playhead ?? 0))
                 .foregroundStyle(dragged == nil ? Color.gray : Color.orange)
+                .frame(height: Self.barHeight)
             GeometryReader { geometry in
                 let width = geometry.size.width
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.12))
-                        .frame(height: 6)
-                    if let fetched {
-                        stretch(fetched, of: total, in: width, color: Color.white.opacity(0.3))
-                    }
-                    ForEach(Array(captioned.enumerated()), id: \.offset) { _, range in
-                        stretch(range, of: total, in: width, color: (isPaused ? Color.yellow : Color.green).opacity(0.7))
-                    }
-                    // The one furthest behind drawn last, so each shows.
-                    ForEach(Self.drawingOrder(reached), id: \.label) { reach in
-                        if reach.seconds > 0 {
-                            stretch(0...reach.seconds, of: total, in: width, color: Self.color(of: reach.label))
+                VStack(alignment: .leading, spacing: Self.laneGap) {
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.12))
+                            .frame(height: 6)
+                        if let fetched {
+                            stretch(fetched, of: total, in: width, color: Color.white.opacity(0.3))
+                        }
+                        ForEach(Array(captioned.enumerated()), id: \.offset) { _, range in
+                            stretch(range, of: total, in: width, color: (isPaused ? Color.yellow : Color.green).opacity(0.7))
+                        }
+                        // The one furthest behind drawn last, so each shows.
+                        ForEach(Self.drawingOrder(reached), id: \.label) { reach in
+                            if reach.seconds > 0 {
+                                stretch(0...reach.seconds, of: total, in: width, color: Self.color(of: reach.label))
+                            }
+                        }
+                        if let at = dragged ?? playhead {
+                            Circle()
+                                .fill(Color.orange)
+                                .frame(width: Self.thumb, height: Self.thumb)
+                                .offset(x: width * Self.fraction(at, of: total) - Self.thumb / 2)
                         }
                     }
-                    if let at = dragged ?? playhead {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: Self.thumb, height: Self.thumb)
-                            .offset(x: width * Self.fraction(at, of: total) - Self.thumb / 2)
+                    .frame(height: Self.barHeight)
+                    if hasLanes {
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.08))
+                                .frame(height: Self.laneHeight)
+                            ForEach(Self.drawingOrder(translated), id: \.label) { reach in
+                                if reach.seconds > 0 {
+                                    stretch(
+                                        0...reach.seconds, of: total, in: width, color: Self.color(of: reach.label).opacity(0.5),
+                                        height: Self.laneHeight
+                                    )
+                                }
+                            }
+                        }
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.white.opacity(0.08))
+                                .frame(height: Self.laneHeight)
+                            switch speakers {
+                            case .done:
+                                Capsule().fill(Self.speakersColor).frame(width: width, height: Self.laneHeight)
+                            case .running:
+                                // Striped: under way, over all of it at once.
+                                Path { path in
+                                    path.move(to: CGPoint(x: 0, y: Self.laneHeight / 2))
+                                    path.addLine(to: CGPoint(x: width, y: Self.laneHeight / 2))
+                                }
+                                .stroke(Self.speakersColor, style: StrokeStyle(lineWidth: Self.laneHeight, dash: [4, 3]))
+                                .frame(width: width, height: Self.laneHeight)
+                            case .waiting, nil:
+                                EmptyView()
+                            }
+                        }
                     }
                 }
-                .frame(maxHeight: .infinity)
+                .frame(maxHeight: .infinity, alignment: .top)
                 .overlay {
                     BarDrag(
                         isEnabled: canSeek,
@@ -1250,7 +1297,10 @@ struct VideoBar: View {
                             ? Self.summary(
                                 duration: duration, fetched: fetched?.upperBound, ready: captioned.map(\.upperBound).max()
                             )
-                            : Self.summary(duration: duration, fetched: fetched?.upperBound, reached: reached),
+                            : Self.summary(
+                                duration: duration, fetched: fetched?.upperBound, reached: reached,
+                                translated: translated, speakers: speakers
+                            ),
                         onMove: { dragged = Self.seconds(at: $0, in: width, of: total) },
                         onDrop: {
                             onSeek?(Self.seconds(at: $0, in: width, of: total))
@@ -1278,9 +1328,10 @@ struct VideoBar: View {
                     }
                 }
             }
-            .frame(height: 16)
+            .frame(height: Self.barHeight + (hasLanes ? 2 * (Self.laneGap + Self.laneHeight) : 0))
             Text(duration.map(CaptionRow.timestamp) ?? "live")
                 .foregroundStyle(.gray)
+                .frame(height: Self.barHeight)
         }
         .font(.caption.monospacedDigit())
         .accessibilityElement()
@@ -1290,11 +1341,13 @@ struct VideoBar: View {
         )
     }
 
-    private func stretch(_ range: ClosedRange<Double>, of total: Double, in width: CGFloat, color: Color) -> some View {
+    private func stretch(
+        _ range: ClosedRange<Double>, of total: Double, in width: CGFloat, color: Color, height: CGFloat = 6
+    ) -> some View {
         let from = Self.fraction(range.lowerBound, of: total)
         return Capsule()
             .fill(color)
-            .frame(width: width * (Self.fraction(range.upperBound, of: total) - from), height: 6)
+            .frame(width: width * (Self.fraction(range.upperBound, of: total) - from), height: height)
             .offset(x: width * from)
     }
 
@@ -1396,6 +1449,8 @@ struct VideoBar: View {
         }
     }
 
+    static let speakersColor = Color.green.opacity(0.7)
+
     /// Furthest first, so the one furthest behind is drawn over the others.
     static func drawingOrder(_ reached: [(label: String, seconds: Double)]) -> [(label: String, seconds: Double)] {
         reached.enumerated().sorted { a, b in
@@ -1403,11 +1458,25 @@ struct VideoBar: View {
         }.map(\.element)
     }
 
-    /// "k2 12:30 · nemo 8:10 · qwen 4:05, audio fetched to 18:05 of 24:05".
-    static func summary(duration: Double?, fetched: Double?, reached: [(label: String, seconds: Double)]) -> String {
+    /// "k2 12:30 · nemo 8:10 · qwen 4:05, audio fetched to 18:05 of 24:05",
+    /// and under it how far each is translated and the speakers' state.
+    static func summary(
+        duration: Double?, fetched: Double?, reached: [(label: String, seconds: Double)],
+        translated: [(label: String, seconds: Double)] = [], speakers: DevPipeline.SpeakerState? = nil
+    ) -> String {
         let whole = duration.map { " of \(CaptionRow.timestamp($0))" } ?? ""
-        return reached.map { "\($0.label) \(CaptionRow.timestamp($0.seconds))" }.joined(separator: " · ")
-            + ", audio fetched to \(CaptionRow.timestamp(fetched ?? 0))\(whole)"
+        let times = { (reaches: [(label: String, seconds: Double)]) in
+            reaches.map { "\($0.label) \(CaptionRow.timestamp($0.seconds))" }.joined(separator: " · ")
+        }
+        var lines = [times(reached) + ", audio fetched to \(CaptionRow.timestamp(fetched ?? 0))\(whole)"]
+        if !translated.isEmpty { lines.append("Translated: " + times(translated)) }
+        switch speakers {
+        case .waiting: lines.append("Speakers: once the audio is all in")
+        case .running: lines.append("Speakers: being told apart")
+        case .done: lines.append("Speakers: told apart")
+        case nil: break
+        }
+        return lines.joined(separator: "\n")
     }
 
     static func summary(duration: Double?, fetched: Double?, ready: Double?) -> String {
