@@ -25,10 +25,12 @@ final class VideoBarTests: XCTestCase {
 
     private func show(
         duration: Double?, playhead: Double? = 300, captioned: [ClosedRange<Double>] = [240...600, 0...120],
-        fetched: ClosedRange<Double>? = 240...900, reached: [(label: String, seconds: Double)] = []
+        fetched: ClosedRange<Double>? = 240...900, reached: [(label: String, seconds: Double)] = [],
+        translated: [(label: String, seconds: Double)] = [], speakers: DevPipeline.SpeakerState? = nil
     ) {
         let bar = VideoBar(
-            duration: duration, playhead: playhead, captioned: captioned, fetched: fetched, reached: reached
+            duration: duration, playhead: playhead, captioned: captioned, fetched: fetched, reached: reached,
+            translated: translated, speakers: speakers
         ) { [unowned self] in sought.append($0) }
         window.contentView = NSHostingView(
             rootView: bar.padding(.horizontal, 12).padding(.bottom, 8)
@@ -148,6 +150,51 @@ final class VideoBarTests: XCTestCase {
         XCTAssertEqual(
             VideoBar.summary(duration: 1200, fetched: 1050, reached: [("k2", 900), ("nemo", 600), ("qwen", 300)]),
             "k2 15:00 · nemo 10:00 · qwen 5:00, audio fetched to 17:30 of 20:00"
+        )
+    }
+
+    /// Under the bar, a lane of how far each one's text is translated, in
+    /// its color, and one of the speakers: striped while they are told
+    /// apart, whole once they are.
+    func testTranslationsAndSpeakersHaveLanesUnderTheBar() throws {
+        let reached = [("k2", 900.0), ("nemo", 600.0), ("qwen", 300.0)]
+        show(
+            duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached,
+            translated: [("k2", 900), ("nemo", 450), ("qwen", 150)], speakers: .running
+        )
+        let track = try trackEnds()
+        // The bar is 16 high, the lanes 3 each 2 apart under it, all of it
+        // standing on the window's foot, 8 above the bottom.
+        let foot = Self.size.height - 8
+        let bar = foot - 2 * (VideoBar.laneGap + VideoBar.laneHeight) - VideoBar.barHeight / 2
+        let translatedLane = foot - VideoBar.laneHeight - VideoBar.laneGap - VideoBar.laneHeight / 2
+        let speakersLane = foot - VideoBar.laneHeight / 2
+        func at(_ seconds: Double, _ y: CGFloat) throws -> NSColor {
+            let x = track.left + (track.right - track.left) * CGFloat(seconds / 1200)
+            return try XCTUnwrap(pixel(at: CGPoint(x: x, y: y)))
+        }
+        XCTAssertGreaterThan(try at(750, bar).blueComponent, 0.5, "the bar keeps its colors")
+        // k2 translated to 15:00, nemo to 7:30, qwen to 2:30.
+        let qwen = try at(100, translatedLane), nemo = try at(300, translatedLane), k2 = try at(700, translatedLane)
+        XCTAssertGreaterThan(k2.blueComponent, k2.redComponent + 0.1, "k2's translations in its blue")
+        XCTAssertGreaterThan(qwen.redComponent, qwen.blueComponent, "qwen's in its pink")
+        XCTAssertGreaterThan(Self.distance(nemo, k2), 0.1)
+        XCTAssertLessThan(Self.distance(try at(1000, translatedLane), try at(1100, translatedLane)), 0.05, "nothing past them")
+        // Striped while running: some of the lane lit, some not.
+        let lit = stride(from: 0.0, to: 1200, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
+        XCTAssertTrue(lit.contains { $0 > 0.3 } && lit.contains { $0 < 0.2 }, "striped while being told apart")
+        snapshot("video-bar-lanes")
+
+        show(duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached, speakers: .done)
+        let whole = stride(from: 20.0, to: 1180, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
+        XCTAssertTrue(whole.allSatisfy { $0 > 0.3 }, "whole once told apart")
+        XCTAssertEqual(
+            VideoBar.summary(
+                duration: 1200, fetched: 1050, reached: reached, translated: [("k2", 900), ("nemo", 450), ("qwen", 150)],
+                speakers: .running
+            ),
+            "k2 15:00 · nemo 10:00 · qwen 5:00, audio fetched to 17:30 of 20:00\n"
+                + "Translated: k2 15:00 · nemo 7:30 · qwen 2:30\nSpeakers: being told apart"
         )
     }
 

@@ -270,15 +270,45 @@ final class DevPipeline {
     /// it is the job's: k2's, then the others', as `reached(...)` tells it.
     func reached(on playhead: VideoMoment?) -> [(label: String, seconds: Double)] {
         guard let job, isOnJob(playhead) else { return [] }
-        let own = engine.captions.compactMap { caption -> ClosedRange<Double>? in
-            guard let moment = caption.moment, moment.tabID == job.tabID, moment.url == job.page, let end = moment.end
-            else { return nil }
-            return moment.seconds...max(end, moment.seconds)
-        }
         return Self.reached(
-            captions: job.captions, ready: job.ready, total: max(job.duration ?? 0, job.fetched), own: own,
+            captions: job.captions, ready: job.ready, total: Self.total(of: job), own: ownCaptions(of: job).map(\.range),
             others: others
         )
+    }
+
+    /// How far each recognizer's text has been translated in the video at
+    /// `playhead`, when it is the job's, as `translated(...)` tells it.
+    func translated(on playhead: VideoMoment?) -> [(label: String, seconds: Double)] {
+        guard let job, isOnJob(playhead) else { return [] }
+        return Self.translated(captions: job.captions, total: Self.total(of: job), own: ownCaptions(of: job), others: others)
+    }
+
+    /// Where telling the speakers apart is in the video at `playhead`, when
+    /// it is the job's.
+    func speakerState(on playhead: VideoMoment?) -> SpeakerState? {
+        guard let job, isOnJob(playhead) else { return nil }
+        if job.spoken { return .done }
+        return job.running.contains("Speaker detection") ? .running : .waiting
+    }
+
+    /// The host tells the speakers apart once, over all the audio, after
+    /// the fetch: nothing to show of it until then.
+    enum SpeakerState: Equatable {
+        case waiting, running, done
+    }
+
+    private static func total(of job: Job) -> Double {
+        max(job.duration ?? 0, job.fetched)
+    }
+
+    /// The job's captions on the list: where each is, and whether it has
+    /// its translation.
+    private func ownCaptions(of job: Job) -> [(range: ClosedRange<Double>, english: Bool)] {
+        engine.captions.compactMap { caption in
+            guard let moment = caption.moment, moment.tabID == job.tabID, moment.url == job.page, let end = moment.end
+            else { return nil }
+            return (moment.seconds...max(end, moment.seconds), !caption.english.isEmpty)
+        }
     }
 
     /// How far each recognizer has come from the video's start: k2 to
@@ -295,6 +325,25 @@ final class DevPipeline {
             let heard = others.filter { $0[keyPath: shown.text] != nil }
             let all = done && own.allSatisfy { caption in heard.contains { abs($0.start - caption.lowerBound) < 0.01 } }
             return (shown.label, all ? k2 : min(heard.map(\.end).max() ?? 0, k2))
+        }
+    }
+
+    /// How far each recognizer's text has been translated from the video's
+    /// start: to the end of the furthest caption with its translation, the
+    /// whole video once k2 is done and every caption has one. k2's text
+    /// comes translated, but for one the translator gave up on; the others'
+    /// are translated after they are heard.
+    nonisolated static func translated(
+        captions: String, total: Double, own: [(range: ClosedRange<Double>, english: Bool)], others: [OtherHearing]
+    ) -> [(label: String, seconds: Double)] {
+        let done = captions == "done"
+        let k2 = done && own.allSatisfy(\.english) ? total : own.filter(\.english).map(\.range.upperBound).max() ?? 0
+        return [("k2", k2)] + OtherHearing.shown.map { shown in
+            let translated = others.filter { $0[keyPath: shown.english] != nil }
+            let all = done && own.allSatisfy { caption in
+                translated.contains { abs($0.start - caption.range.lowerBound) < 0.01 }
+            }
+            return (shown.label, all ? total : translated.map(\.end).max() ?? 0)
         }
     }
 
