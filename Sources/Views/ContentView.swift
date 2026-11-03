@@ -214,8 +214,8 @@ struct ContentView: View {
                             duration: prefetch.job?.duration ?? dev.job?.duration ?? playhead.duration,
                             playhead: prefetch.position,
                             captioned: prefetch.captioned, fetched: prefetch.fetchedAhead ?? dev.fetched(on: playhead),
-                            reached: isDev ? dev.reached(on: playhead) : [],
-                            isPaused: isDev && dev.isPaused,
+                            reached: isDev ? dev.reached(on: playhead) : prefetch.reached(on: playhead),
+                            isPaused: isDev ? dev.isPaused : prefetch.job?.paused == true,
                             onSeek: { prefetch.scrub(to: $0) }
                         )
                     } else {
@@ -251,7 +251,9 @@ struct ContentView: View {
                 Button {
                     if loading {
                         if isDev { dev.hold() }
-                        engine.stop()
+                        // Incognito keeps the host, its job held in memory
+                        // there, for Start to go on with; quitting ends it.
+                        engine.stop(keepingHost: !isDev && prefetch.job != nil)
                     } else if isDev {
                         if !engine.isRunning { engine.start() }
                         dev.load()

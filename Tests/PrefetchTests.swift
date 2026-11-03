@@ -78,48 +78,6 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(VideoBar.seconds(at: 10, in: 0, of: 1200), 0)
     }
 
-    func testAJobBeginsWhereTheViewerIs() {
-        // A little before them, for the sentence being spoken ...
-        XCTAssertEqual(Prefetcher.startPoint(viewer: 600, covered: []), 597)
-        XCTAssertEqual(Prefetcher.startPoint(viewer: 1, covered: []), 0)
-        // ... but not back into what is captioned, and from inside a
-        // captioned stretch where it runs out, through any that follow on.
-        XCTAssertEqual(Prefetcher.startPoint(viewer: 600, covered: [300...598]), 598)
-        XCTAssertEqual(Prefetcher.startPoint(viewer: 400, covered: [300...598]), 598)
-        XCTAssertEqual(Prefetcher.startPoint(viewer: 400, covered: [598...900, 300...598]), 900)
-        XCTAssertEqual(Prefetcher.frontier(from: 598, covered: [300...598]), 598)
-    }
-
-    func testAJumpToSomewhereUncaptionedMovesTheJob() {
-        // Captioned 600-900 so far; nothing before.
-        func move(_ viewer: Double?, finished: [ClosedRange<Double>] = [], duration: Double? = 3600) -> Double? {
-            Prefetcher.move(viewer: viewer, start: 600, ready: 900, finished: finished, duration: duration)
-        }
-        // No jump, nothing to do, wherever the job is.
-        XCTAssertNil(move(nil))
-        // Within what it has, or just past it, the job is about to get there.
-        XCTAssertNil(move(700))
-        XCTAssertNil(move(900 + Prefetcher.reach))
-        // Further on, or back before it, it starts again at the viewer.
-        XCTAssertEqual(move(1500), 1497)
-        XCTAssertEqual(move(200), 197)
-        // Back into a stretch captioned earlier, it takes up where that ends,
-        XCTAssertEqual(move(100, finished: [0...300]), 300)
-        // which is nowhere new when that is where the job began.
-        XCTAssertNil(move(100, finished: [0...600]))
-        // Nothing is left after a viewer near the end: the job stays put.
-        XCTAssertNil(move(3000, finished: [2000...3600]))
-        XCTAssertEqual(move(3000, finished: [2000...3600], duration: nil), 3600)
-    }
-
-    func testAJobThatRunsIntoCaptionsGoesOnPastThem() {
-        let finished: [ClosedRange<Double>] = [900...1500, 1500...1800]
-        XCTAssertNil(Prefetcher.move(viewer: nil, start: 600, ready: 880, finished: finished))
-        XCTAssertEqual(Prefetcher.move(viewer: nil, start: 600, ready: 905, finished: finished), 1800)
-        // The viewer is in what it has: only the stretch ahead moves it.
-        XCTAssertEqual(Prefetcher.move(viewer: 700, start: 600, ready: 905, finished: finished), 1800)
-    }
-
     func testAStretchHoldsItsStartButNotItsEnd() {
         let stretch = Prefetcher.Stretch(from: 10, to: 20)
         XCTAssertTrue(stretch.holds(10))

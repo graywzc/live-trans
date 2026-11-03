@@ -3,10 +3,9 @@ import Observation
 
 /// Captions a Chrome video ahead of the viewer from its own audio, through
 /// the GPU host: the tab's video is probed for what it is made of, the host
-/// fetches and transcribes it in chunks from where the viewer is, and the
-/// lines land among the captions by where in the video they are, before the
-/// video gets there. When the viewer jumps to somewhere not captioned it
-/// starts again from there, keeping what it has. It runs from Start to Stop.
+/// fetches and transcribes all of it from its start, and the lines land
+/// among the captions by where in the video they are, before the video gets
+/// there. It runs from Start to Stop.
 ///
 /// It also keeps track of where the video is, for the bar that shows it and
 /// moves it.
@@ -26,13 +25,12 @@ final class Prefetcher {
         var state = "running"
         /// Lines taken so far.
         var seen = 0
-        /// Whether the host can begin anywhere but the top. One that can't
-        /// is left to run on when the viewer jumps.
-        var seeks = true
         /// How many texts the other recognizers have given its captions.
         var others = 0
         /// What the host is busy with for it right now.
         var running: [String] = []
+        /// Whether it is held on the host, by a Stop that kept the host.
+        var paused = false
     }
 
     /// A stretch of the video captioned ahead.
@@ -47,15 +45,6 @@ final class Prefetcher {
     static let probeInterval: TimeInterval = 3
     /// How often the job is asked for new lines and the video for its time.
     static let pollInterval: TimeInterval = 1
-    /// How far the video may be from where it was expected before it counts
-    /// as having jumped rather than stalled or caught up.
-    nonisolated static let jumpTolerance = 2.0
-    /// A viewer who lands this far past the captions is waited for: getting
-    /// there takes less than starting again would.
-    nonisolated static let reach = 120.0
-    /// Starting at the viewer, it starts this far before, so the sentence
-    /// being spoken is taken from its beginning.
-    nonisolated static let lead = 3.0
 
     private(set) var job: Job?
     /// Stretches of the job's video captioned by jobs before it.
@@ -118,6 +107,20 @@ final class Prefetcher {
         return stretches.map { $0.from...$0.to }
     }
 
+    /// How far each recognizer has captioned the video at `playhead`, when
+    /// it is the job's, as Default's bar shows it (DevPipeline.reached).
+    func reached(on playhead: VideoMoment?) -> [(label: String, seconds: Double)] {
+        guard let job, let playhead, playhead.tabID == job.tabID, playhead.url == job.page else { return [] }
+        let own = engine.captions.compactMap { caption -> ClosedRange<Double>? in
+            guard let moment = caption.moment, moment.tabID == job.tabID, moment.url == job.page, let end = moment.end
+            else { return nil }
+            return moment.seconds...max(end, moment.seconds)
+        }
+        return DevPipeline.reached(
+            captions: job.state, ready: job.ready, total: max(job.duration ?? 0, job.fetched), own: own, others: others
+        )
+    }
+
     /// The audio the job holds, in the video the playhead is in.
     var fetchedAhead: ClosedRange<Double>? {
         guard isOnFetchedVideo, let job, job.fetched > job.start else { return nil }
@@ -135,14 +138,10 @@ final class Prefetcher {
     private var failedPages: Set<String> = []
     /// The tab and page `finished` is of.
     private var finishedIn: (tabID: Int, page: String)?
-    /// The video has jumped since the job was last looked at.
-    private var jumped = false
     /// When the bar last moved the video: an answer asked for before then
     /// is of where it was.
     private var scrubbedAt = Date.distantPast
     private var missedReadings = 0
-    /// The captions were cleared under the job, which starts over.
-    private var restartForgetting = false
 
     /// Whether the app is in dev mode: see `SidePanel.isDev`.
     var isDev: @MainActor () -> Bool = { false }
@@ -202,16 +201,14 @@ final class Prefetcher {
         )
         playheadAt = Date()
         scrubbedAt = Date()
-        jumped = true
         Task { await tick() }
     }
 
-    /// The captions were cleared, so nothing is covered any more.
+    /// The captions were cleared, and their picks go with them; the job
+    /// goes on, as Default's does, with the captions still to come.
     func forget() {
         finished = []
         picks = [:]
-        if job != nil { restartForgetting = true }
-        Task { await tick() }
     }
 
     /// Whether the video's captions at `moment` were fetched ahead.
@@ -260,11 +257,6 @@ final class Prefetcher {
         }
         missedReadings = 0
         guard asked >= scrubbedAt else { return }
-        if let playhead, playhead.tabID == moment.tabID, playhead.url == moment.url {
-            let expected = playhead.playing
-                ? playhead.advanced(by: asked.timeIntervalSince(playheadAt)).seconds : playhead.seconds
-            if abs(moment.seconds - expected) > Self.jumpTolerance { jumped = true }
-        }
         playhead = moment
         playheadAt = asked
     }
@@ -272,14 +264,23 @@ final class Prefetcher {
     private func manageJob() async {
         // In dev mode the pipeline is run a step at a time, by DevPipeline.
         guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client, !isDev() else {
-            await stopJob()
+            // Stopped with the host kept, as Default's Stop holds its job:
+            // held there in memory, for Start to go on with.
+            if !isDev(), let held = engine.heldClient {
+                await holdJob(client: held)
+            } else {
+                await stopJob()
+            }
             return
         }
         if Date().timeIntervalSince(lastProbe) >= Self.probeInterval {
             lastProbe = Date()
             if let probe = await video.probeMedia() {
                 if let finishedIn, finishedIn.tabID != probe.tabID || finishedIn.page != probe.page {
+                    // Another video: its captions take the place of the
+                    // last one's, as in Default.
                     await stopJob()
+                    engine.clear()
                     finished = []
                     self.finishedIn = nil
                     problem = nil
@@ -291,22 +292,20 @@ final class Prefetcher {
                 }
             }
         }
-        guard let current = job else {
-            jumped = false
-            return
-        }
-        if restartForgetting {
-            restartForgetting = false
-            job = nil
-            await client.stopPrefetch(job: current.id)
-            lastProbe = .distantPast
-            return
+        guard let current = job else { return }
+        if current.paused {
+            do {
+                try await client.setPrefetch(job: current.id, paused: false)
+                if job?.id == current.id { job?.paused = false }
+            } catch {
+                print("prefetch resume: \(error.localizedDescription)")
+                return
+            }
         }
         do {
             let status = try await client.prefetchStatus(job: current.id, since: current.seen)
             guard var updated = job, updated.id == current.id else { return }
             updated.start = status.start ?? 0
-            updated.seeks = status.start != nil
             updated.fetched = status.fetched
             updated.ready = status.ready
             updated.duration = status.duration ?? updated.duration
@@ -337,24 +336,14 @@ final class Prefetcher {
         } catch {
             print("prefetch status: \(error.localizedDescription)")
         }
-        // The job runs from the start to the end of the video, where the
-        // viewer jumps or not.
-        jumped = false
     }
 
-    /// Starts a job for the probed video where the viewer is, or at `target`,
-    /// in place of the one running; nowhere when the rest is captioned.
-    private func startJob(for probe: MediaProbe, client: ASRClient, at target: Double? = nil) async {
-        let old = job
+    /// Starts a job for the probed video, from its start whatever the viewer
+    /// is at: the host then has all of it to tell the speakers apart over.
+    private func startJob(for probe: MediaProbe, client: ASRClient) async {
         retire()
         finishedIn = (probe.tabID, probe.page)
-        // From the start of the video, whatever the viewer is at: the host
-        // then has all of it to tell the speakers apart over.
-        let start = target ?? 0
-        if let duration = old?.duration ?? probe.duration, start >= duration - 1 {
-            if let old { await client.stopPrefetch(job: old.id) }
-            return
-        }
+        let start = 0.0
         var headers = ["User-Agent": probe.userAgent]
         if probe.mediaURL != nil { headers["Referer"] = probe.page }
         do {
@@ -362,7 +351,7 @@ final class Prefetcher {
                 url: probe.mediaURL, page: probe.page, headers: headers, duration: probe.duration, start: start
             )
             job = Job(
-                id: id, tabID: probe.tabID, page: probe.page, duration: old?.duration ?? probe.duration,
+                id: id, tabID: probe.tabID, page: probe.page, duration: probe.duration,
                 start: start, fetched: start, ready: start
             )
             print("prefetch \(id) from \(Int(start))s: \(probe.mediaURL ?? probe.page)")
@@ -383,6 +372,21 @@ final class Prefetcher {
         self.job = nil
     }
 
+    /// Holds the job on the host: the captioning and all after it wait,
+    /// the audio still fetched, until Start lets it go on.
+    private func holdJob(client: ASRClient) async {
+        guard let current = job, !current.paused else { return }
+        do {
+            try await client.setPrefetch(job: current.id, paused: true)
+            if job?.id == current.id {
+                job?.paused = true
+                job?.running = []
+            }
+        } catch {
+            print("prefetch pause: \(error.localizedDescription)")
+        }
+    }
+
     private func stopJob() async {
         guard let job else { return }
         retire()
@@ -391,7 +395,10 @@ final class Prefetcher {
         currentCaptionID = nil
         playingCaptionID = nil
         lull = nil
-        await engine.client?.stopPrefetch(job: job.id)
+        await (engine.client ?? engine.heldClient)?.stopPrefetch(job: job.id)
+        // A host kept only for this job (on to Default while stopped, say)
+        // is let go with it.
+        if !engine.isRunning, engine.isHoldingHost { engine.stop() }
     }
 
     /// Marks the caption being played, which the list follows and
@@ -411,46 +418,6 @@ final class Prefetcher {
         if between != lull { lull = between }
         let near = id ?? between?.captionID
         if near != playingCaptionID { playingCaptionID = near }
-    }
-
-    /// The first moment from `seconds` on that no stretch in `covered`
-    /// holds: where captioning ahead has work to do for a viewer there.
-    nonisolated static func frontier(from seconds: Double, covered: [ClosedRange<Double>]) -> Double {
-        var at = seconds
-        while let range = covered.first(where: { $0.lowerBound <= at && at < $0.upperBound }) {
-            at = range.upperBound
-        }
-        return at
-    }
-
-    /// Where a job should begin for a viewer at `viewer`: a little before
-    /// them where nothing is captioned, so the sentence being spoken is
-    /// whole, else where the captions they are in run out.
-    nonisolated static func startPoint(viewer: Double, covered: [ClosedRange<Double>]) -> Double {
-        let ahead = frontier(from: viewer, covered: covered)
-        guard ahead == viewer else { return ahead }
-        return frontier(from: max(viewer - lead, 0), covered: covered)
-    }
-
-    /// Where the job should start again, if it should: past a stretch
-    /// already captioned once it has run into one, or at a viewer who has
-    /// jumped (`viewer`, nil when they haven't) to somewhere it isn't about
-    /// to reach. The job has captioned `start` to `ready`, and jobs before
-    /// it the stretches in `finished`. A viewer with nothing left to caption
-    /// after them doesn't take the job from the stretch it is on.
-    nonisolated static func move(
-        viewer: Double?, start: Double, ready: Double, finished: [ClosedRange<Double>], duration: Double? = nil
-    ) -> Double? {
-        if let viewer {
-            let covered = finished + (ready > start ? [start...ready] : [])
-            let ahead = frontier(from: viewer, covered: covered)
-            let isLeft = duration.map { ahead < $0 - 1 } ?? true
-            if isLeft, ahead < start || ahead > ready + reach {
-                return startPoint(viewer: viewer, covered: covered)
-            }
-        }
-        let past = frontier(from: ready, covered: finished)
-        return past > ready ? past : nil
     }
 
     /// The caption being spoken at `seconds` of the page's video, as

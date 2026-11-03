@@ -90,6 +90,16 @@ final class CaptionEngine {
     static let rehearingFullCover = 0.9
 
     private var session: ServerSession?
+    private var sessionConfig: ServerConfig?
+    /// The server kept on by a Stop that holds the host (Incognito's, with
+    /// a job to go on with), its heartbeat beating: Start takes it up again
+    /// and the job goes on, and quitting releases it. Nothing is kept
+    /// there but in the server's memory.
+    private var heldSession: ServerSession?
+    private var heldConfig: ServerConfig?
+    /// Its client, for the held job, until Start has the server again.
+    private(set) var heldClient: ASRClient?
+    var isHoldingHost: Bool { heldSession != nil || heldClient != nil }
     private var source: AudioSource?
     private let outputRouter = OutputRouter()
     private var runTask: Task<Void, Never>?
@@ -119,10 +129,11 @@ final class CaptionEngine {
         runTask = Task { await run() }
     }
 
-    /// Stop captioning and release the GPU. Returns the task doing the
-    /// release, for a caller (quitting) that has to wait for it.
+    /// Stop captioning and release the GPU, or, `keepingHost`, keep the
+    /// server running for Start to take up again. Returns the task doing
+    /// the release, for a caller (quitting) that has to wait for it.
     @discardableResult
-    func stop() -> Task<Void, Never> {
+    func stop(keepingHost: Bool = false) -> Task<Void, Never> {
         runTask?.cancel()
         listenTask?.cancel()
         finalWorker?.cancel()
@@ -151,9 +162,23 @@ final class CaptionEngine {
 
         let session = self.session
         self.session = nil
+        let kept = client
         client = nil
         serverCanPrefetch = false
-        return Task { await session?.stop() }
+        if keepingHost, let session, let kept {
+            heldSession = session
+            heldConfig = sessionConfig
+            heldClient = kept
+            return Task {}
+        }
+        let held = heldSession
+        heldSession = nil
+        heldConfig = nil
+        heldClient = nil
+        return Task {
+            await session?.stop()
+            await held?.stop()
+        }
     }
 
     /// Captions fetched ahead, put among the others by where in the video
@@ -191,8 +216,21 @@ final class CaptionEngine {
 
         var config = AppSettings.serverConfig
         config.keepsLog = keepsServerLog()
-        let session = ServerSession(config: config)
+        // The server a Stop kept, when it is the one asked for.
+        let session: ServerSession
+        if let held = heldSession, heldConfig == config {
+            session = held
+        } else {
+            if let held = heldSession {
+                await held.stop()
+                heldClient = nil
+            }
+            session = ServerSession(config: config)
+        }
+        heldSession = nil
+        heldConfig = nil
         self.session = session
+        sessionConfig = config
         status = .connecting("Connecting to \(config.sshHost)…")
 
         let client: ASRClient
@@ -205,6 +243,7 @@ final class CaptionEngine {
             }
             client = startedClient
             self.client = startedClient
+            heldClient = nil
             serverCanPrefetch = health.prefetch ?? false
             serverLabel = ["GPU", health.asr, health.ollamaModel].compactMap { $0 }.joined(separator: " · ")
         } catch {
