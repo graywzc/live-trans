@@ -2868,7 +2868,7 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
 
     pieces = grouped()
     texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
-    with doing("Translating captions"):
+    with doing(f"Translating {recognizer_name()} captions"):
         pairs = None
         if TRANSLATE_BACKEND != "nllb" and _ollama_ok and any(not _is_untranslatable(t) for t in texts):
             pairs = translate_ollama(texts)
@@ -2926,6 +2926,11 @@ RECOGNIZER_NAMES = {"reazon": "k2", "hybrid": "k2 + Whisper", "whisper": "Whispe
 # And each dev step's speech finder.
 STEP_FINDERS = {"speech": "Silero", "speech-firered": "FireRedVAD", "speech-mean": "FireRedVAD + pyannote"}
 _activity = threading.local()
+
+
+def recognizer_name():
+    """The recognizer the captions are heard by, as the status line names it."""
+    return RECOGNIZER_NAMES.get(ASR_BACKEND, ASR_BACKEND)
 
 
 class Activity:
@@ -3163,7 +3168,7 @@ class PrefetchJob:
 
     @property
     def _captioning(self):
-        return f"{RECOGNIZER_NAMES.get(ASR_BACKEND, ASR_BACKEND)} captioning"
+        return f"{recognizer_name()} captioning"
 
     @property
     def fetched(self):
@@ -3661,8 +3666,7 @@ class PrefetchJob:
         translation."""
         try:
             self._hear_other_texts()
-            with self.activity.doing("Translating the other recognizers"):
-                self._translate_others()
+            self._translate_others()
         finally:
             self.others_done = True
 
@@ -3750,7 +3754,8 @@ class PrefetchJob:
                         done[content] = line.get("en") or ""
                     if content not in done:
                         try:
-                            english = translate_text(text)
+                            with self.activity.doing(f"Translating {name} captions"):
+                                english = translate_text(text)
                         except Exception as exc:
                             if not _is_timeout(exc):
                                 raise
