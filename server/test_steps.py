@@ -622,10 +622,11 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
 
 def test_the_others_are_translated_but_for_the_caption_s_own_text_and_what_fails():
     original = srv.translate_text, srv.DEV_OTHER_HEARERS
-    asked = []
+    asked, said = [], []
 
     def translate(text):
         asked.append(text)
+        said.append(job.activity.labels())
         if text == "遅い":
             raise TimeoutError("took too long")
         return {"かな": "かなかな"}.get(text, f"译:{text}")
@@ -635,6 +636,7 @@ def test_the_others_are_translated_but_for_the_caption_s_own_text_and_what_fails
     job = srv.PrefetchJob.__new__(srv.PrefetchJob)
     job.id, job.cache, job.caption_error = "t", None, None
     job.stop_event, job.lines, job.others_kept = threading.Event(), [line], {}
+    job.activity = srv.Activity()
     srv.DEV_OTHER_HEARERS = [("a", ""), ("b", ""), ("c", ""), ("d", ""), ("e", "")]
     srv.translate_text = translate
     try:
@@ -649,6 +651,9 @@ def test_the_others_are_translated_but_for_the_caption_s_own_text_and_what_fails
     assert texts["c_en"] == "", "the Japanese again is no translation"
     assert texts["d_en"] == texts["e_en"] == "译:晴れ", texts
     assert asked == ["遅い", "かな", "晴れ"], asked
+    # The status line names whose text is being translated.
+    assert said == [["Translating b captions"], ["Translating c captions"], ["Translating d captions"]], said
+    assert job.activity.labels() == []
     assert versions["a"] == {"ja": "雨だね", "en": "下雨了"} and versions["b"] == {"ja": "遅い", "en": ""}, versions
 
 
@@ -874,8 +879,8 @@ def test_the_innermost_work_names_a_thread_s_activity_in_the_order_begun():
         thread.start()
         assert inside.wait(5)
         assert activity.labels() == ["k2 captioning", "Audio download"]
-        with srv.doing("Translating captions"):
-            assert activity.labels() == ["Translating captions", "Audio download"]
+        with srv.doing("Translating k2 captions"):
+            assert activity.labels() == ["Translating k2 captions", "Audio download"]
         assert activity.labels() == ["k2 captioning", "Audio download"]
         done.set()
         thread.join()
