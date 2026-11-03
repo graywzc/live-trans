@@ -635,7 +635,7 @@ def test_the_others_are_translated_but_for_the_caption_s_own_text_and_what_fails
     line = {"ja": "雨だね。", "en": "下雨了", "start": 1.0, "end": 2.0}
     job = srv.PrefetchJob.__new__(srv.PrefetchJob)
     job.id, job.cache, job.caption_error = "t", None, None
-    job.stop_event, job.lines, job.others_kept = threading.Event(), [line], {}
+    job.stop_event, job.paused, job.lines, job.others_kept = threading.Event(), threading.Event(), [line], {}
     job.activity = srv.Activity()
     srv.DEV_OTHER_HEARERS = [("a", ""), ("b", ""), ("c", ""), ("d", ""), ("e", "")]
     srv.translate_text = translate
@@ -662,6 +662,9 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
     original = (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.unload_ollama,
                 srv.PRODUCTION_SPEECH_MODEL, srv.translate_text)
     asked = []
+    # The speakers are told beside the captioning, as in a step job: the
+    # captions can't all be made until DiariZen has begun.
+    diarizing, beside = threading.Event(), []
 
     def heard(grid, audio, start, turns=None, within=None, **kwargs):
         pieces = grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)
@@ -670,10 +673,12 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
             a, b = pieces[0]
             return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": 2.0},
                     {"ja": "はい", "en": "yes", "start": 2.0, "end": round(b, 2)}]
+        beside.append(diarizing.wait(10))
         return [{"ja": "ことばはい", "en": "words yes", "start": round(a, 2), "end": round(b, 2)} for a, b in pieces]
 
     def tool(name, header, audio):
         asked.append(name)
+        diarizing.set()
         return {"segments": [[1.0, 1.9, "S1"], [2.1, 2.9, "S2"]]}
 
     def other(name, header, audio, on_line):
@@ -700,7 +705,7 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
     # The line as first made, then the two it was cut into, which take its place.
     assert [l["ja"] for l in status["lines"]] == ["ことばはい", "ことば", "はい"], status["lines"]
     assert [l["ja"] for l in job.lines] == ["ことば", "はい"], job.lines
-    # The speakers once all the captions are made, then nemo and qwen once
+    # The speakers, then nemo and qwen once
     # each over the captions as cut, then their text translated, the same
     # text once; no VibeVoice, and the translator never let go.
     assert asked == ["diarize", "hear_nemo", "hear_qwen", ("translate", "hear_nemoのことば"),
@@ -708,8 +713,51 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
     assert [(o["nemo"], o["nemo_en"], o["qwen_en"]) for o in found["others"]] == [
         ("hear_nemoのことば", "译:hear_nemoのことば", "译:hear_qwenのことば")] * 2, found["others"]
     assert status["captions"] == "done", status
+    assert beside and all(beside), "DiariZen began while the captions were made"
     assert found["speakers"], "the speakers are told, for the timeline"
     assert not os.listdir(cache), "a production job keeps nothing"
+
+
+def test_a_paused_production_job_runs_nothing_until_it_is_resumed_and_then_goes_on():
+    original = (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.translate_text)
+    asked = []
+
+    def heard(grid, audio, start, turns=None, within=None, **kwargs):
+        asked.append("k2")
+        pieces = grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)
+        return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": round(b, 2)} for a, b in pieces]
+
+    def other(name, header, audio, on_line):
+        asked.append(name)
+        for i, _ in enumerate(header["clips"]):
+            on_line({"i": i, "text": f"{name}のことば"})
+
+    srv.speech_stretches, srv.hear_pieces = (lambda audio, model=None: loud_stretches(audio)), heard
+    srv.run_devtool = lambda name, header, audio: asked.append(name) or {"segments": [[1.0, 2.9, "S1"]]}
+    srv.run_devtool_lines, srv.translate_text = other, lambda ja: asked.append("translate") or "译"
+    try:
+        url = wav_file(noise_and_silence([(1, False), (2, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/held", {}, 4.0)
+        # Stop in Incognito: held at once, the audio still fetched.
+        job.paused.set()
+        deadline = time.time() + 15
+        while not job.fetch_done and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(1.5)
+        held = list(asked)
+        assert job.status()["state"] == "paused", job.status()
+        # Start again: it goes on from where it was, to the end.
+        job.paused.clear()
+        wait_for(job, "done")
+        while time.time() < deadline and not job.others_done:
+            time.sleep(0.1)
+    finally:
+        (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines,
+         srv.translate_text) = original
+    assert job.fetch_done, "the audio came in while it was held"
+    assert held == [], held
+    assert asked[0] in ("k2", "diarize") and {"k2", "diarize", "hear_nemo", "hear_qwen", "translate"} <= set(asked), asked
+    assert [l["ja"] for l in job.lines] == ["ことば"], job.lines
 
 
 def test_a_step_job_s_captions_come_at_once_and_are_cut_and_kept_when_the_speakers_are_told():

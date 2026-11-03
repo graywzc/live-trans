@@ -624,10 +624,10 @@ def run_devtool_lines(name, header, audio, on_line):
 # times, so a caption cut the same way next time is not heard again.
 DEV_OTHER_HEARERS = [("nemo", "hear_nemo"), ("qwen", "hear_qwen")]
 DEV_OTHER_HEARING = os.getenv("LIVETRANS_OTHER_HEARERS", "1") != "0"
-# Whether a production job, once its captions are made, tells the speakers
-# apart, cuts its captions where they change, and has the other recognizers
-# hear each and their text translated, as a step job (see
-# PrefetchJob._finish).
+# Whether a production job tells the speakers apart once all the audio is
+# in, then, once its captions are made, cuts them where the speaker changes
+# and has the other recognizers hear each and their text translated, as a
+# step job (see PrefetchJob._finish).
 PRODUCTION_FINISH = os.getenv("LIVETRANS_PRODUCTION_FINISH", "1") != "0"
 # Each caption is heard from a little before its start to a little after
 # its end, as a click on it plays it.
@@ -3164,6 +3164,7 @@ class PrefetchJob:
             if DEV_OTHER_HEARING:
                 threading.Thread(target=self._hear_others, daemon=True).start()
         elif PRODUCTION_FINISH:
+            threading.Thread(target=self._tell_speakers, daemon=True).start()
             threading.Thread(target=self._finish, daemon=True).start()
 
     @property
@@ -3560,6 +3561,8 @@ class PrefetchJob:
             self.speakers = [tuple(s) for s in kept.get("speakers", [])]
             self.turns = [(self._samples(a), self._samples(b), who) for a, b, who in self.speakers]
             return
+        if not self._wait_while_paused():
+            return
         with self.audio_lock:
             audio = self.audio.copy()
         try:
@@ -3579,42 +3582,41 @@ class PrefetchJob:
                 print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
 
     def _finish(self):
-        """A production job's speakers and other recognizers, each given to
-        the client as it is done, once all the captions are made: the
-        speakers told apart over all the audio (DiariZen), each caption a
-        change of speaker falls inside heard again and cut there; then, as
-        a step job's, each caption heard by the other recognizers and what
-        they heard translated (see _hear_others), with nothing beside them
-        on the GPU and each caption heard once. Nothing of it is kept."""
+        """A production job's speaker cuts and other recognizers, as a step
+        job's, each given to the client as it is done, once all the captions
+        are made: each caption a change of speaker falls inside heard again
+        and cut there, by the speakers _tell_speakers told apart (DiariZen,
+        started once all the audio is in, beside the captioning); then each
+        caption heard by the other recognizers and what they heard
+        translated (see _hear_others), each caption heard once. Nothing of
+        it is kept."""
         while not self.stop_event.is_set() and self.state == "running":
             time.sleep(0.5)
         if self.stop_event.is_set() or self.state != "done":
             return
-        with self.audio_lock:
-            audio = self.audio.copy()
-        t0 = time.time()
-        try:
-            with self.activity.doing("Speaker detection"):
-                found = run_devtool("diarize", {}, audio)["segments"]
-        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
-            print(f"prefetch {self.id}: speakers: {exc}", flush=True)
-            found = []
-        if found and not self.stop_event.is_set():
-            self.turns = [(self.offset + a, self.offset + b, who) for a, b, who in found]
-            self.speakers = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3), who)
-                             for a, b, who in found]
+        waited = time.time()
+        while self.turns is None and not self.stop_event.is_set() and time.time() - waited < DEVTOOL_TIMEOUT:
+            time.sleep(0.5)
+        if self.turns and not self.stop_event.is_set():
             with self.activity.doing("Cutting captions at speaker changes"):
                 recut = self._cut_at_speakers()
             if self.stop_event.is_set():
                 return
-            print(f"prefetch {self.id}: {len(self.speakers)} speaker turns in {time.time() - t0:.0f}s, "
-                  f"{recut} captions cut where the speaker changes", flush=True)
+            print(f"prefetch {self.id}: {recut} captions cut at {len(self.turns)} speaker turns", flush=True)
         if self.stop_event.is_set():
             return
         # The captions as they will stay, which the others wait for.
         self.captioned = True
         if DEV_OTHER_HEARING:
             self._hear_others()
+
+    def _wait_while_paused(self):
+        """Holds the thread while the job is paused (Stop, in either mode),
+        the GPU let go and the audio still fetched; whether the job goes on
+        rather than being stopped."""
+        while self.paused.is_set() and not self.stop_event.is_set():
+            time.sleep(0.5)
+        return not self.stop_event.is_set()
 
     def _cut_at_speakers(self):
         """Each caption a change of speaker falls inside heard again and cut
@@ -3623,7 +3625,7 @@ class PrefetchJob:
         changes = [self._video(end) for (_, end, before), (_, _, after) in zip(floor, floor[1:]) if before != after]
         recut = 0
         for line in list(self.lines):
-            if self.stop_event.is_set():
+            if not self._wait_while_paused():
                 break
             if line.get("start") is None or not any(
                     line["start"] + SPEAKER_SNAP < t < line["end"] - SPEAKER_SNAP for t in changes):
@@ -3701,9 +3703,9 @@ class PrefetchJob:
         with self.audio_lock:
             audio = self.audio.copy()
         for name, tool in DEV_OTHER_HEARERS:
-            todo = [span for span in spans if name not in self.others.get(span, {})]
-            if self.stop_event.is_set():
+            if not self._wait_while_paused():
                 return
+            todo = [span for span in spans if name not in self.others.get(span, {})]
             if not todo:
                 continue
             t0 = time.time()
@@ -3747,7 +3749,7 @@ class PrefetchJob:
                     text = texts.get(name)
                     if not text or f"{name}_en" in texts:
                         continue
-                    if self.stop_event.is_set():
+                    if not self._wait_while_paused():
                         return
                     content = _content(text)
                     if content == _content(line["ja"]):

@@ -103,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard engine.isRunning else { return .terminateNow }
+        guard engine.isRunning || engine.isHoldingHost else { return .terminateNow }
         let release = engine.stop()
         Task {
             await release.value

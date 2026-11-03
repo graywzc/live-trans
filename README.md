@@ -205,7 +205,11 @@ after `ssh` to reach that machine. An alias from `~/.ssh/config` is fine.
 `ssh <host> true` must succeed without prompting.
 
 That is all: the app starts the server when you press Start and shuts it down
-when you stop or quit, so the GPU is only held while you are captioning.
+when you stop or quit, so the GPU is only held while you are captioning. The
+one exception is Stop in Incognito with a video being captioned ahead: the
+server stays up, the video's job held in its memory and nothing running on
+the GPU, so Start goes on from where it was, as Default's Load does from
+what the host kept; quitting shuts it down.
 
 - **Clean stop or quit** - the app calls `/shutdown` and the GPU is free in
   about a second. The circular arrow in the header does the same and opens
@@ -327,18 +331,13 @@ sentence again from there; the video pauses when the sentence ends.
 When the video is one whose audio the GPU host can fetch (a plain file, an
 HLS or DASH stream, or a page yt-dlp knows), LiveTrans can caption it **ahead
 of you** from that audio. Press **Start** and the host fetches the audio
-from where you are in the video, not from its start, finds the speech in it,
+from the video's start, wherever you are in it, finds the speech in it,
 and transcribes and translates that about a minute of speech at a time, each
 batch ending in a pause, so the captions are in place before the video gets there, with exact
 times. The whole script is listed as it arrives, the line being spoken is
 lit and kept in view. Between sentences an orange line, with the video's time
 at its right end, sits after the last one spoken. Pause, seek and replay as you like; the fetch never touches the
 player.
-
-When you jump to a part it has not captioned and is not about to
-reach, it starts again from there, keeping the captions it has; a part you
-skipped over is captioned when you go back to it, and a stretch already
-captioned is passed over rather than done twice.
 
 A bar above the level meter shows where you are in the Chrome video, between
 the time and the video's length. Drag the orange dot, or press anywhere on
@@ -347,7 +346,8 @@ the bar and the time under it floats above, so a press lands where you
 meant it to. The bar is there
 whenever LiveTrans knows of a video in Chrome, captioning ahead or not. On
 it are the stretches captioned ahead (green, yellow while paused) and the
-audio fetched for the next (grey). Encrypted streams (most subscription services) cannot be fetched, nor can a page
+audio fetched for the next (grey), and in either mode how far k2, nemo and
+qwen have each captioned, each in its own color. Encrypted streams (most subscription services) cannot be fetched, nor can a page
 the host cannot resolve, and either mode says so under the captions. For YouTube the host needs a JavaScript runtime for
 yt-dlp (`deno`), and without a YouTube token the fetch runs at playback pace,
 so captions catch up rather than run ahead until you pause or go back.
@@ -364,9 +364,10 @@ In Default the menu at the bottom left lists the Chrome tabs with a video and
 the videos the host has processed. The button reads **Load** for one of those,
 which opens a video not in a tab in Chrome and shows its captions from what
 the host kept, and **Start** for any other. Incognito lists the tabs alone.
-Once a video is started or loaded, going over to another one (another page in
-its tab, another tab chosen, or a processed video picked) clears the captions
-and starts the new one at once: loaded, when the host has processed it.
+In either mode, once a video is started, going over to another one (another
+page in its tab, another tab chosen, or in Default a processed video picked)
+clears the captions and starts the new one at once: in Default loaded, when
+the host has processed it.
 
 In either mode, a caption shows what each recognizer heard, one above the other,
 with k2's Chinese under them. A click on a name, on the Mac or the iPhone,
@@ -375,8 +376,13 @@ again brings them back. Default's picks are kept on the GPU host, with the video
 `server/phone_service.py`, and either app can change them. A pick made on the
 iPhone with the host out of reach goes there when the host is next reached.
 
-In either mode the other recognizers hear the captions once all are made and
-cut where the speaker changes, and their text is then translated. Incognito's
+In either mode Stop holds the video's captioning and Start goes on with it:
+Default from what the host kept, Incognito from the job held in the host's
+memory (see above).
+
+In either mode DiariZen tells the speakers apart once all the audio is in,
+beside the captioning, and the other recognizers hear the captions once all
+are made and cut where the speaker changes, and their text is then translated. Incognito's
 picks are in memory only, and go when the captions are cleared or the app
 quits.
 
