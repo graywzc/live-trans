@@ -29,9 +29,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     header
                     captionList
-                    if panel.isDev {
-                        ActivityView()
-                    }
+                    ActivityView()
                     footer
                 }
                 .frame(minWidth: Self.minCaptionsWidth, maxWidth: .infinity)
@@ -84,7 +82,7 @@ struct ContentView: View {
             if !engine.captions.isEmpty {
                 Button(role: .destructive) {
                     engine.clear()
-                    prefetch.forget()
+                    dev.captionsCleared()
                 } label: {
                     Image(systemName: "trash")
                 }
@@ -123,11 +121,11 @@ struct ContentView: View {
                 onSeek: caption.moment.map { moment in { video.send(.seek(moment)) } },
                 isCurrent: prefetch.currentCaptionID == caption.id,
                 official: panel.isDev ? dev.official(for: caption) : nil,
-                others: panel.isDev ? dev.others(for: caption) : prefetch.others(for: caption),
+                others: dev.others(for: caption),
                 isOtherAnalyzed: { panel.isPresented && panel.tab == .analysis && analyzer.hasAnalyzed($0) },
                 onAnalyzeOther: { analyze($0) },
-                picked: panel.isDev ? dev.pickedVersion(for: caption) : prefetch.pickedVersion(for: caption),
-                onPick: panel.isDev ? { dev.pick($0, for: caption) } : { prefetch.pick($0, for: caption) }
+                picked: dev.pickedVersion(for: caption),
+                onPick: { dev.pick($0, for: caption) }
             )
         }
         .selectionActions(onLookUp: lookUp)
@@ -211,13 +209,13 @@ struct ContentView: View {
                     }
                     if let playhead = prefetch.playhead {
                         VideoBar(
-                            duration: prefetch.job?.duration ?? dev.job?.duration ?? playhead.duration,
+                            duration: dev.job?.duration ?? playhead.duration,
                             playhead: prefetch.position,
-                            captioned: prefetch.captioned, fetched: prefetch.fetchedAhead ?? dev.fetched(on: playhead),
-                            reached: isDev ? dev.reached(on: playhead) : prefetch.reached(on: playhead),
-                            translated: isDev ? dev.translated(on: playhead) : [],
-                            speakers: isDev ? dev.speakerState(on: playhead) : nil,
-                            isPaused: isDev ? dev.isPaused : prefetch.job?.paused == true,
+                            fetched: dev.fetched(on: playhead),
+                            reached: dev.reached(on: playhead),
+                            translated: dev.translated(on: playhead),
+                            speakers: dev.speakerState(on: playhead),
+                            isPaused: dev.isPaused,
                             onSeek: { prefetch.scrub(to: $0) }
                         )
                     } else {
@@ -225,7 +223,7 @@ struct ContentView: View {
                     }
                 }
             }
-            if let problem = isDev ? dev.problem : prefetch.problem {
+            if let problem = dev.problem {
                 // With the Mac's audio not heard, a video the host can't fetch
                 // gets no captions: said here, not left to look like silence.
                 Label(problem, systemImage: "exclamationmark.triangle")
@@ -240,9 +238,9 @@ struct ContentView: View {
                     isSpeaking: engine.isSpeaking
                 )
             }
-            // In dev mode the host starts and the step runs over the video,
+            // The host starts and the step runs over the video; in Default,
             // Load for one it has processed, from what it kept of it.
-            let loading = isDev ? engine.isRunning && !dev.isPaused : engine.isRunning
+            let loading = engine.isRunning && !dev.isPaused
             let processed = isDev && dev.isProcessed(dev.picked?.page ?? video.controlled?.url)
             HStack(spacing: 12) {
                 TabPicker()
@@ -252,15 +250,13 @@ struct ContentView: View {
                     }
                 Button {
                     if loading {
-                        if isDev { dev.hold() }
+                        dev.hold()
                         // Incognito keeps the host, its job held in memory
                         // there, for Start to go on with; quitting ends it.
-                        engine.stop(keepingHost: !isDev && prefetch.job != nil)
-                    } else if isDev {
+                        engine.stop(keepingHost: !isDev && dev.job != nil)
+                    } else {
                         if !engine.isRunning { engine.start() }
                         dev.load()
-                    } else {
-                        engine.start()
                     }
                 } label: {
                     Label(
@@ -277,7 +273,7 @@ struct ContentView: View {
                 .keyboardShortcut(.return, modifiers: .command)
                 .help(loading ? "" : processed ? "Show this video's captions from what the host kept of it, making only what is missing" : "Fetch the Chrome video's audio and caption it")
                 // As wide as the picker, which keeps the button in the middle.
-                RunningStatus(items: (isDev ? dev.job?.running : prefetch.job?.running) ?? [])
+                RunningStatus(items: dev.job?.running ?? [])
             }
         }
         .padding()

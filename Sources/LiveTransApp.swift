@@ -58,10 +58,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.videoClock = { [video] in await video.moment(at: $0) }
         prefetcher.start()
         devPipeline.start()
-        prefetcher.isDev = { [panel] in panel.isDev }
-        devPipeline.isDev = { [panel] in panel.isDev }
+        devPipeline.keeps = { [panel] in panel.isDev }
+        // The activity is listed in either mode, in memory only; what was
+        // listed in one goes when the other is chosen.
+        activity.isEnabled = true
         panel.onDevChange = { [activity, video, devPipeline] isDev in
-            activity.isEnabled = isDev
+            activity.clear()
             if !isDev {
                 video.forgetKeptTab()
                 devPipeline.forgetProcessed()

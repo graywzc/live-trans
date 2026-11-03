@@ -78,35 +78,22 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(VideoBar.seconds(at: 10, in: 0, of: 1200), 0)
     }
 
-    func testAStretchHoldsItsStartButNotItsEnd() {
-        let stretch = Prefetcher.Stretch(from: 10, to: 20)
-        XCTAssertTrue(stretch.holds(10))
-        XCTAssertTrue(stretch.holds(19.9))
-        XCTAssertFalse(stretch.holds(20))
-        XCTAssertFalse(stretch.holds(9.9))
-    }
-
-    /// In dev mode the step's captions are followed as production's are,
-    /// with no job of the prefetcher's own; in production, with none, not.
+    /// The caption being played is followed in either mode, over the
+    /// captions DevPipeline makes.
     @MainActor
-    func testThePlayingCaptionIsFollowedInDevMode() {
+    func testThePlayingCaptionIsFollowed() {
         let engine = CaptionEngine()
         let prefetch = Prefetcher(engine: engine, video: ChromeVideo())
         engine.add([
             CaptionPair(ja: "あ", en: "a", start: 4, end: 6),
             CaptionPair(ja: "い", en: "i", start: 7, end: 9),
         ], tabID: 1, url: "https://example.com/v")
-        prefetch.show(playhead: VideoMoment(tabID: 1, url: "https://example.com/v", seconds: 7.5))
         prefetch.followPlayhead()
-        XCTAssertNil(prefetch.currentCaptionID, "production with nothing fetched ahead follows nothing")
-        var isDev = true
-        prefetch.isDev = { isDev }
+        XCTAssertNil(prefetch.currentCaptionID, "no video, nothing followed")
+        prefetch.show(playhead: VideoMoment(tabID: 1, url: "https://example.com/v", seconds: 7.5))
         prefetch.followPlayhead()
         XCTAssertEqual(prefetch.currentCaptionID, engine.captions.last?.id)
         XCTAssertEqual(prefetch.playingCaptionID, engine.captions.last?.id)
-        isDev = false
-        prefetch.followPlayhead()
-        XCTAssertNil(prefetch.playingCaptionID)
     }
 
     /// The other recognizers' texts go under the caption with the same
@@ -131,16 +118,17 @@ final class PrefetchTests: XCTestCase {
     /// Incognito's picks are the captions' own, in memory, and go with them.
     @MainActor
     func testAPickInIncognitoLastsUntilTheCaptionsAreCleared() {
-        let prefetch = Prefetcher(engine: CaptionEngine(), video: ChromeVideo())
+        let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())
+        dev.keeps = { false }
         let first = caption(1, 1, 2), second = caption(2, 3, 4)
-        prefetch.pick("nemo", for: first)
-        XCTAssertEqual(prefetch.pickedVersion(for: first), "nemo")
-        XCTAssertNil(prefetch.pickedVersion(for: second))
-        prefetch.pick(nil, for: first)
-        XCTAssertNil(prefetch.pickedVersion(for: first), "taken back")
-        prefetch.pick("qwen", for: second)
-        prefetch.forget()
-        XCTAssertNil(prefetch.pickedVersion(for: second), "cleared with the captions")
+        dev.pick("nemo", for: first)
+        XCTAssertEqual(dev.pickedVersion(for: first), "nemo")
+        XCTAssertNil(dev.pickedVersion(for: second))
+        dev.pick(nil, for: first)
+        XCTAssertNil(dev.pickedVersion(for: first), "taken back")
+        dev.pick("qwen", for: second)
+        dev.captionsCleared()
+        XCTAssertNil(dev.pickedVersion(for: second), "cleared with the captions")
     }
 
     /// Another tab, or another page in the job's tab, is another video,
@@ -249,13 +237,5 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(engine.captions.map(\.japanese), ["昨日は友達と行きました", "とても美味しかった"])
         XCTAssertEqual(engine.captions.map(\.english), ["Yesterday", "Tasty"])
         XCTAssertEqual(engine.captions[1].moment?.end, 15)
-    }
-
-    @MainActor
-    func testNothingIsCoveredBeforeAFetch() {
-        let engine = CaptionEngine()
-        let prefetcher = Prefetcher(engine: engine, video: ChromeVideo())
-        XCTAssertFalse(prefetcher.covers(VideoMoment(tabID: 1, url: "u", seconds: 5)))
-        XCTAssertEqual(engine.isPrefetched?(VideoMoment(tabID: 1, url: "u", seconds: 5)), false)
     }
 }

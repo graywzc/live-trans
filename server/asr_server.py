@@ -20,7 +20,9 @@ POST /prefetch     body: {"url": media or page URL, "page": page URL,
                           "duration": seconds or null,
                           "start": seconds into the video, 0 if absent,
                           "step": a dev step, "title": the page's, for the
-                          list of processed videos, both optional}
+                          list of processed videos, both optional,
+                          "keep": false for a step job that keeps nothing
+                          of the video (Incognito's), true if absent}
                    -> {"job": id}. Fetches the audio from there on with
                    ffmpeg (a page URL is resolved with yt-dlp first), and
                    finds the speech in it as it arrives, and transcribes
@@ -3069,7 +3071,7 @@ class PacketClock:
 
 
 class PrefetchJob:
-    def __init__(self, url, page, headers, duration, start=0.0, step=None, title=None):
+    def __init__(self, url, page, headers, duration, start=0.0, step=None, title=None, keep=True):
         if step is not None and step not in DEV_STEPS:
             raise ValueError(f"no such step: {step}")
         self.id = uuid.uuid4().hex[:12]
@@ -3140,9 +3142,10 @@ class PrefetchJob:
         # translated, or passed over.
         self.others_kept = {}
         self.others_done = False
-        # Dev mode's keeping of the video, for a step job from the start;
+        # Dev mode's keeping of the video, for a step job from the start
+        # that is to keep it (not Incognito's, which keeps nothing anywhere);
         # `cached`, whether the audio came from it rather than a fetch.
-        self.cache = DevCache(page, url, title) if step and self.offset == 0 else None
+        self.cache = DevCache(page, url, title) if step and keep and self.offset == 0 else None
         self.cached = False
         self.state = "running"
         self.error = None
@@ -3909,7 +3912,7 @@ class PrefetchJob:
         return found
 
 
-def start_prefetch(url, page, headers, duration, start=0.0, step=None, title=None):
+def start_prefetch(url, page, headers, duration, start=0.0, step=None, title=None, keep=True):
     with _jobs_lock:
         for job in _jobs.values():
             if job.page == page and job.state == "running":
@@ -3918,7 +3921,7 @@ def start_prefetch(url, page, headers, duration, start=0.0, step=None, title=Non
             oldest = min(_jobs.values(), key=lambda j: j.started)
             oldest.stop()
             del _jobs[oldest.id]
-        job = PrefetchJob(url, page, headers, duration, start, step=step, title=title)
+        job = PrefetchJob(url, page, headers, duration, start, step=step, title=title, keep=keep)
         _jobs[job.id] = job
         return job
 
@@ -4016,6 +4019,7 @@ class Handler(BaseHTTPRequestHandler):
                     request.get("url") or "", request.get("page") or "",
                     request.get("headers") or {}, request.get("duration"), request.get("start") or 0,
                     step=request.get("step") or None, title=request.get("title") or None,
+                    keep=request.get("keep", True) is not False,
                 )
             except Exception as exc:
                 self._send(400, {"error": f"{type(exc).__name__}: {exc}"})

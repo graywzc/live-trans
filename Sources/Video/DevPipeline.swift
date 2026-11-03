@@ -47,6 +47,9 @@ final class DevPipeline {
         let page: String
         let step: Step
         var duration: Double?
+        /// Whether the host keeps what it makes of the video (Default), or
+        /// nothing anywhere (Incognito).
+        var keeps = true
         /// How far the audio has come, from the video's start.
         var fetched = 0.0
         /// Up to where k2's captions are made.
@@ -116,8 +119,9 @@ final class DevPipeline {
     /// Their texts with readings, by text, made once each.
     @ObservationIgnored private var otherRuby: [String: [RubyToken]] = [:]
     /// The recognizer picked per caption of this video, by where it starts,
-    /// and what keeps them with the host; none in the Mac's memory after
-    /// the video.
+    /// and what keeps them with the host (Default); in Incognito in memory
+    /// only, let go with the captions. None in the Mac's memory after the
+    /// video.
     private(set) var picks: [Int: String] = [:]
     @ObservationIgnored private var pickBook: PickBook?
     /// Off at launch, until Start or Load.
@@ -174,8 +178,10 @@ final class DevPipeline {
 
     private static func failure(_ page: String, _ step: Step) -> String { "\(step.rawValue) \(page)" }
 
-    /// Whether the app is in dev mode: see `SidePanel.isDev`.
-    var isDev: @MainActor () -> Bool = { false }
+    /// Whether what the pipeline makes is kept: Default's, on the host, for
+    /// Load, the phone and the picks; Incognito keeps nothing anywhere and
+    /// is otherwise the same. See `SidePanel.isDev`.
+    var keeps: @MainActor () -> Bool = { true }
 
     init(engine: CaptionEngine, video: ChromeVideo) {
         self.engine = engine
@@ -444,8 +450,15 @@ final class DevPipeline {
         guard !isTicking else { return }
         isTicking = true
         defer { isTicking = false }
-        guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client, isDev() else {
-            await stopJob()
+        guard engine.isRunning, engine.serverCanPrefetch, let client = engine.client else {
+            // Incognito's Stop keeps the host, the job held there in memory
+            // for Start to go on with, as Default's goes on from what the
+            // host kept.
+            if let held = engine.heldClient, job?.keeps == false {
+                await holdJob(client: held)
+            } else {
+                await stopJob()
+            }
             return
         }
         guard let current = job else {
@@ -472,6 +485,13 @@ final class DevPipeline {
             await open(picked, client: client)
             return
         }
+        // The other mode: what it shows goes, and the next tick starts the
+        // video again as this mode makes it.
+        if current.keeps != keeps() {
+            await leaveVideo()
+            lastProbe = .distantPast
+            return
+        }
         if Date().timeIntervalSince(lastProbe) >= Self.probeInterval {
             lastProbe = Date()
             if let probe = await video.probeMedia(), Self.isAnotherVideo(probe, than: current) {
@@ -493,7 +513,8 @@ final class DevPipeline {
             // keeps it only once the fetch has ended unstopped, so while the
             // audio is still coming the job is held (the GPU let go, the
             // fetch going on) and the switch waits for it.
-            if let status = try? await client.prefetchStatus(job: current.id, since: current.seenLines), status.fetching == true {
+            if current.keeps, let status = try? await client.prefetchStatus(job: current.id, since: current.seenLines),
+               status.fetching == true {
                 guard job?.id == current.id else { return }
                 job?.fetched = max(status.fetched, 0)
                 if !current.paused, (try? await client.setPrefetch(job: current.id, paused: true)) != nil {
@@ -540,6 +561,9 @@ final class DevPipeline {
                     await refreshProcessed()
                 } else if captions.hasPrefix("failed") {
                     ActivityLog.tell("Step \(current.step.title): captions \(captions)")
+                    // Said under the captions too: they stop there, which
+                    // would otherwise look like silence.
+                    problem = "Captioning stopped: \(captions.dropFirst("failed: ".count))"
                 }
             }
             updated.fetched = max(status.fetched, 0)
@@ -722,15 +746,21 @@ final class DevPipeline {
         client: ASRClient
     ) async {
         let step = step
+        let keeps = keeps()
         do {
             let id = try await client.startPrefetch(
-                url: url, page: page, headers: headers, duration: duration, start: 0, step: step.rawValue, title: title
+                url: url, page: page, headers: headers, duration: duration, start: 0, step: step.rawValue,
+                title: keeps ? title : nil, keep: keeps
             )
-            job = Job(id: id, tabID: tabID, page: page, step: step, duration: duration)
+            job = Job(id: id, tabID: tabID, page: page, step: step, duration: duration, keeps: keeps)
             problem = nil
             // The list shows this step's captions alone.
             engine.clear()
-            if referencePage != page {
+            if !keeps {
+                // Incognito asks the host for nothing it keeps.
+                reference = []
+                referencePage = nil
+            } else if referencePage != page {
                 referencePage = page
                 reference = await client.reference(page: page)
                 if !reference.isEmpty {
@@ -779,11 +809,29 @@ final class DevPipeline {
         cursorArmed = false
     }
 
+    /// Holds the job on the host, the server kept by Stop: the work waits,
+    /// the audio still fetched, until Start lets it go on.
+    private func holdJob(client: ASRClient) async {
+        guard let current = job, !current.paused else { return }
+        player.stop()
+        do {
+            try await client.setPrefetch(job: current.id, paused: true)
+            if job?.id == current.id {
+                job?.paused = true
+                job?.running = []
+            }
+        } catch {
+            print("step pause: \(error.localizedDescription)")
+        }
+    }
+
     private func stopJob() async {
         guard let job else { return }
         self.job = nil
         player.stop()
-        await engine.client?.stopPrefetch(job: job.id)
+        await (engine.client ?? engine.heldClient)?.stopPrefetch(job: job.id)
+        // A host kept only for this job is let go with it.
+        if !engine.isRunning, engine.isHoldingHost { engine.stop() }
     }
 
     /// The official subtitle lines matched to `caption`, joined, or nil.
@@ -829,7 +877,18 @@ final class DevPipeline {
     /// and all of them show again.
     func pick(_ name: String?, for caption: Caption) {
         guard let moment = caption.moment else { return }
-        pickBook?.pick(name, at: PickClient.place(of: moment.seconds))
+        let place = PickClient.place(of: moment.seconds)
+        if let pickBook {
+            pickBook.pick(name, at: place)
+        } else if !keeps() {
+            picks[place] = name
+        }
+    }
+
+    /// The captions were cleared: Incognito's picks, in memory alone, go
+    /// with them; Default's stay with the video on the host.
+    func captionsCleared() {
+        if !keeps() { picks = [:] }
     }
 
     /// What the host holds now: back at the app, a pick may have been made

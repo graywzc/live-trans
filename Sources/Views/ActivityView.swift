@@ -14,7 +14,6 @@ struct ActivityView: View {
 
     @Environment(ActivityLog.self) private var log
     @Environment(CaptionEngine.self) private var engine
-    @Environment(Prefetcher.self) private var prefetch
     @Environment(DevPipeline.self) private var dev
     @AppStorage(AppSettings.activityTimelineHeight) private var timelineHeight = 180.0
     @AppStorage(AppSettings.activityLogShown) private var logShown = false
@@ -55,7 +54,7 @@ struct ActivityView: View {
                     StatusRow(name: macName, color: Self.macColor(engine.status), text: macStatus)
                     StatusRow(
                         name: hostName, color: Self.hostColor(engine.status),
-                        text: Self.hostStatus(engine.status, job: prefetch.job, step: dev.job)
+                        text: Self.hostStatus(engine.status, step: dev.job)
                     )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -124,13 +123,12 @@ struct ActivityView: View {
         }
     }
 
-    static func hostStatus(_ status: CaptionEngine.Status, job: Prefetcher.Job?, step: DevPipeline.Job? = nil) -> String {
+    static func hostStatus(_ status: CaptionEngine.Status, step: DevPipeline.Job? = nil) -> String {
         switch status {
         case .idle, .failed: return "Not in use"
         case .connecting: return "Starting"
         case .reconnecting: return "Not answering, being restarted"
         case .listening(let models):
-            if let job { return models + "\n" + jobStatus(job) }
             if let step { return models + "\n" + stepStatus(step) }
             return models
         }
@@ -151,18 +149,6 @@ struct ActivityView: View {
         }
         if job.spoken { parts.append("speakers told apart") }
         return parts.joined(separator: " · ")
-    }
-
-    /// "Job 1a2b3c running · fetched to 6:52 · captioned to 6:20 of 24:00"
-    static func jobStatus(_ job: Prefetcher.Job) -> String {
-        var captioned = "captioned to \(CaptionRow.timestamp(job.ready))"
-        if let duration = job.duration, duration > 0 {
-            captioned += " of \(CaptionRow.timestamp(duration))"
-        }
-        return [
-            "Job \(job.id.prefix(6)) \(job.state)",
-            "fetched to \(CaptionRow.timestamp(job.fetched))", captioned,
-        ].joined(separator: " · ")
     }
 
     static func macColor(_ status: CaptionEngine.Status) -> Color {

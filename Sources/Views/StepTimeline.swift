@@ -18,6 +18,7 @@ import SwiftUI
 struct StepTimeline: View {
     @Environment(DevPipeline.self) private var dev
     @Environment(Prefetcher.self) private var prefetch
+    @Environment(SidePanel.self) private var panel
     /// Points per second of the video, kept as its logarithm for the slider.
     @AppStorage("stepTimelineZoom") private var zoom = log(20.0)
     /// How wide the timeline is shown, for fitting the video to it.
@@ -49,7 +50,8 @@ struct StepTimeline: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .fixedSize()
-                .help("The step to run; another one runs over the same video, from the audio the host kept")
+                .help(panel.isDev ? "The step to run; another one runs over the same video, from the audio the host kept"
+                    : "The step to run; another one runs over the same video, fetched again")
                 Button(action: dev.hearSelection) {
                     Image(systemName: dev.player.isPlaying ? "stop.fill" : "play.fill")
                 }
@@ -78,17 +80,20 @@ struct StepTimeline: View {
                     }
                 }
                 .fixedSize()
-                PhoneKeepControl(
-                    bundle: dev.job?.bundle ?? "none", fetched: dev.job?.bundleFetched ?? 0, duration: dev.job?.duration,
-                    canKeep: dev.canKeepForPhone, onKeep: dev.keepForPhone, onForget: dev.forgetPhoneCopy,
-                    address: dev.job?.bundleURL, serveError: dev.job?.bundleServeError,
-                    isMakingVersions: dev.isMakingVersions, refusal: dev.keepRefusal,
-                    onRefusalRead: { dev.keepRefusal = nil }
-                )
-                Button(action: dev.forgetCache) {
-                    Image(systemName: "trash.slash")
+                // What the host keeps, which Incognito has none of.
+                if panel.isDev {
+                    PhoneKeepControl(
+                        bundle: dev.job?.bundle ?? "none", fetched: dev.job?.bundleFetched ?? 0, duration: dev.job?.duration,
+                        canKeep: dev.canKeepForPhone, onKeep: dev.keepForPhone, onForget: dev.forgetPhoneCopy,
+                        address: dev.job?.bundleURL, serveError: dev.job?.bundleServeError,
+                        isMakingVersions: dev.isMakingVersions, refusal: dev.keepRefusal,
+                        onRefusalRead: { dev.keepRefusal = nil }
+                    )
+                    Button(action: dev.forgetCache) {
+                        Image(systemName: "trash.slash")
+                    }
+                    .help("Have the host forget the videos it fetched and the findings it kept for dev mode")
                 }
-                .help("Have the host forget the videos it fetched and the findings it kept for dev mode")
                 Button {
                     let line = Self.pointer(
                         placed: dev.cursorArmed, cursor: dev.cursor, video: onJob ? prefetch.position : nil,
