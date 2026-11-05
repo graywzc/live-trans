@@ -12,6 +12,13 @@ final class RunningStatusTests: XCTestCase {
     private static let many = ["Audio download", "k2 captioning", "Speaker detection", "nemo captioning"]
 
     override func tearDown() async throws {
+        // Shut the way a person shuts it, with a click beside it. Closing
+        // only its window seems to leave the popover open as far as AppKit
+        // knows, so on a slow runner the next test's click went to closing it.
+        if window != nil, !popovers().isEmpty {
+            try click(atX: 4)
+            _ = TestScreen.wait { self.popovers().isEmpty ? true : nil }
+        }
         for popover in popovers() { popover.close() }
         window?.close()
         window = nil
@@ -28,7 +35,7 @@ final class RunningStatusTests: XCTestCase {
         show(Self.many, width: 320)
         snapshot("running-summary")
         try click()
-        XCTAssertNotNil(TestScreen.wait { self.popovers().first }, "the whole list opens")
+        XCTAssertNotNil(TestScreen.wait { self.popovers().first }, "the whole list opens; windows: \(Self.windows())")
         snapshot("running-summary-open")
     }
 
@@ -36,7 +43,7 @@ final class RunningStatusTests: XCTestCase {
         show(Self.many, width: 110)
         snapshot("running-count")
         try click()
-        XCTAssertNotNil(TestScreen.wait { self.popovers().first }, "the whole list opens")
+        XCTAssertNotNil(TestScreen.wait { self.popovers().first }, "the whole list opens; windows: \(Self.windows())")
     }
 
     func testNothingRunningShowsNothing() {
@@ -46,6 +53,7 @@ final class RunningStatusTests: XCTestCase {
     }
 
     private func show(_ items: [String], width: CGFloat) {
+        XCTAssertNotNil(TestScreen.wait { self.popovers().isEmpty ? true : nil }, "a popover left from before: \(Self.windows())")
         window = TestScreen.window(width: width, height: Self.height)
         window.contentView = NSHostingView(
             rootView: RunningStatus(items: items)
@@ -58,10 +66,10 @@ final class RunningStatusTests: XCTestCase {
         pump()
     }
 
-    /// At the row's right end, where the status sits; the pointer moved
-    /// there first, as a real one would be.
-    private func click() throws {
-        let point = NSPoint(x: window.frame.width - 24, y: Self.height / 2)
+    /// At the row's right end, where the status sits, or at `x`; the
+    /// pointer moved there first, as a real one would be.
+    private func click(atX x: CGFloat? = nil) throws {
+        let point = NSPoint(x: x ?? window.frame.width - 24, y: Self.height / 2)
         for type in [NSEvent.EventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
             NSApp.postEvent(try XCTUnwrap(NSEvent.mouseEvent(
                 with: type, location: point, modifierFlags: [],
@@ -70,6 +78,10 @@ final class RunningStatusTests: XCTestCase {
             )), atStart: false)
         }
         pump()
+    }
+
+    private static func windows() -> String {
+        NSApp.windows.map { "\(type(of: $0)) visible=\($0.isVisible)" }.joined(separator: ", ")
     }
 
     private func popovers() -> [NSWindow] {
