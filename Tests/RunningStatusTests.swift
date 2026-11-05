@@ -52,6 +52,34 @@ final class RunningStatusTests: XCTestCase {
         XCTAssertLessThanOrEqual(size.height, 1, "an empty slot, as before")
     }
 
+    /// Each task with a place on the video's bar is marked as it is drawn
+    /// there, so its color can be told; the others keep the room empty.
+    func testEachTaskIsMarkedInItsColorOnTheBar() {
+        XCTAssertEqual(RunningStatus.mark(for: "k2 captioning"), .init(color: VideoBar.color(of: "k2"), thick: true))
+        XCTAssertEqual(
+            RunningStatus.mark(for: "Translating nemo captions"), .init(color: VideoBar.translatedColor(of: "nemo"), thick: false)
+        )
+        XCTAssertEqual(RunningStatus.mark(for: "Audio download"), .init(color: VideoBar.fetchedColor, thick: true))
+        XCTAssertEqual(RunningStatus.mark(for: "Speaker detection")?.dashed, true)
+        XCTAssertNil(RunningStatus.mark(for: "Whisper words"))
+        show(["k2 captioning", "Translating qwen captions"], width: 320)
+        snapshot("running-colored")
+        XCTAssertTrue(hasPixel { $0.blueComponent > $0.redComponent + 0.3 }, "k2's blue")
+        XCTAssertTrue(hasPixel { $0.redComponent > $0.blueComponent + 0.15 && $0.redComponent > 0.3 }, "qwen's pink")
+    }
+
+    private func hasPixel(_ test: (NSColor) -> Bool) -> Bool {
+        let view = window.contentView!
+        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: rep)
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), test(color) { return true }
+            }
+        }
+        return false
+    }
+
     private func show(_ items: [String], width: CGFloat) {
         XCTAssertNotNil(TestScreen.wait { self.popovers().isEmpty ? true : nil }, "a popover left from before: \(Self.windows())")
         window = TestScreen.window(width: width, height: Self.height)
