@@ -347,7 +347,9 @@ meant it to. The bar is there
 whenever LiveTrans knows of a video in Chrome, captioning ahead or not. On
 it are the stretches captioned ahead (green, yellow while paused) and the
 audio fetched for the next (grey), and in either mode how far k2, nemo and
-qwen have each captioned, each in its own color. Encrypted streams (most subscription services) cannot be fetched, nor can a page
+qwen have each captioned, each in its own color. What the host is running
+right now is listed right of Start, each task with a swatch drawn as it is
+on the bar, so the colors can be told apart. Encrypted streams (most subscription services) cannot be fetched, nor can a page
 the host cannot resolve, and either mode says so under the captions. For YouTube the host needs a JavaScript runtime for
 yt-dlp (`deno`), and without a YouTube token the fetch runs at playback pace,
 so captions catch up rather than run ahead until you pause or go back.
