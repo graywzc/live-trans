@@ -396,9 +396,17 @@ In either mode Stop holds the video's captioning and Start goes on with it:
 Default from what the host kept, Incognito from the job held in the host's
 memory (see above).
 
-In either mode DiariZen tells the speakers apart once all the audio is in,
-beside the captioning, and the other recognizers hear the captions once all
-are made and cut where the speaker changes, and their text is then translated. Incognito's
+In either mode the work after k2 goes a section of about ten minutes at a
+time (`LIVETRANS_SECTION_SECONDS` on the host, ending at the first pause k2's
+batches end in past it), so on a long video nemo and qwen start minutes in
+rather than after the whole of it. DiariZen tells the speakers apart over
+the audio as it comes, a section at a time, or all the rest at once when
+the fetch is done; each section's captions are then cut where the speaker
+changes, heard by the other recognizers, and their text translated, while k2
+goes on with the next. The green lane under the bar shows how far the
+speakers are told apart, striped over the stretch being told. DiariZen's
+names (S1, S2) are its own in each run, so on the timeline S1 in one stretch
+is not always S1 in the next; the cuts only look at changes within a run. Incognito's
 picks and typed text are in memory only (the host translates typed text and
 keeps none of it), and go when the captions are cleared or the app quits. Choosing another step in Incognito fetches the video again, where
 Default takes the audio it kept.
