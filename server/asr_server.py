@@ -3556,7 +3556,8 @@ class PrefetchJob:
         """Who speaks when: DiariZen over the audio from where it last told
         them, as soon as the captions' batches have an edge a section on
         (see SECTION_SECONDS), or over all the rest at once when the fetch
-        is done; or all of it found before over this very audio."""
+        is done, a section at a time again if that is more than DiariZen
+        can hold; or all of it found before over this very audio."""
         while not self.stop_event.is_set() and not self.fetch_done and not self.audio.size:
             time.sleep(0.2)
         if self.cache and self.cached and (kept := self.cache.load_findings("speakers")):
@@ -3565,20 +3566,32 @@ class PrefetchJob:
             self.turn_runs = [self.turns]
             self.told = self.offset + self.fetched
             return
+        piecewise = False
         while not self.stop_event.is_set() and self.state in ("running", "done"):
-            if self.fetch_done:
-                end = self.offset + self.fetched
+            # Read once: the fetch may end while a section is being told,
+            # and the rest after it must still be.
+            fetched_all, heard_all = self.fetch_done, self.heard_all
+            whole = self.offset + self.fetched
+            later = [e for e in list(self.edges) if e >= self.told + SECTION_SECONDS]
+            if fetched_all and (not piecewise or (heard_all and not (later and whole - later[0] >= SECTION_TAIL))):
+                end = whole
+            elif later:
+                end = later[0]
             else:
-                end = next((e for e in list(self.edges) if e >= self.told + SECTION_SECONDS), None)
-                if end is None:
-                    time.sleep(0.5)
-                    continue
+                time.sleep(0.5)
+                continue
             if end > self.told + 0.05:
                 if not self._wait_while_paused():
                     return
-                self._speakers_over(self.told, end)
+                if (not self._speakers_over(self.told, end) and fetched_all and not piecewise
+                        and end - self.told > SECTION_SECONDS + SECTION_TAIL):
+                    # More audio than DiariZen holds at once (it runs out of
+                    # memory on a long video beside the other models).
+                    print(f"prefetch {self.id}: speakers told a section at a time instead", flush=True)
+                    piecewise = True
+                    continue
             self.told = max(self.told, end)
-            if self.fetch_done:
+            if fetched_all and end >= whole:
                 break
         else:
             return
@@ -3592,7 +3605,8 @@ class PrefetchJob:
 
     def _speakers_over(self, low, high):
         """DiariZen over `low`..`high` of the audio, on the samples' clock;
-        its turns added to the job's, none when it fails."""
+        its turns added to the job's, none when it fails; whether it told
+        them."""
         with self.audio_lock:
             audio = self.audio[int((low - self.offset) * SAMPLE_RATE):int((high - self.offset) * SAMPLE_RATE)].copy()
         self.telling = (round(self._video(low), 2), round(self._video(high), 2))
@@ -3602,7 +3616,7 @@ class PrefetchJob:
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             print(f"prefetch {self.id}: speakers: {exc}", flush=True)
             self.turns = self.turns or []
-            return
+            return False
         finally:
             self.telling = None
         turns = [(low + a, low + b, who) for a, b, who in found]
@@ -3610,6 +3624,7 @@ class PrefetchJob:
         self.turns = (self.turns or []) + turns
         self.speakers = (self.speakers or []) + [
             (round(self._video(a), 3), round(self._video(b), 3), who) for a, b, who in turns]
+        return True
 
     def _section_after(self, low):
         """Where the section from `low` (the samples' clock) ends, once the

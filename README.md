@@ -401,7 +401,8 @@ time (`LIVETRANS_SECTION_SECONDS` on the host, ending at the first pause k2's
 batches end in past it), so on a long video nemo and qwen start minutes in
 rather than after the whole of it. DiariZen tells the speakers apart over
 the audio as it comes, a section at a time, or all the rest at once when
-the fetch is done; each section's captions are then cut where the speaker
+the fetch is done (a section at a time again when that is more than it has
+memory for beside the other models); each section's captions are then cut where the speaker
 changes, heard by the other recognizers, and their text translated, while k2
 goes on with the next. The green lane under the bar shows how far the
 speakers are told apart, striped over the stretch being told. DiariZen's
