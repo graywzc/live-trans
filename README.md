@@ -186,8 +186,9 @@ by hand does the same. Production keeps nothing, as before.
 
 The iPhone plays with the Mac app and the GPU server off, so what it sends the
 host goes to a small service of its own, `server/phone_service.py`, on port
-8773 of the tailnet address and always running: the picks of the versions (see
-[Default and Incognito](#default-and-incognito)), and the playback timings.
+8773 of the tailnet address and always running: the picks of the versions and
+the captions typed in their place, which it translates with the host's ollama
+(see [Default and Incognito](#default-and-incognito)), and the playback timings.
 Copy it to `~/livetrans/` and run it as a user service:
 
 ```
@@ -381,9 +382,15 @@ the host has processed it.
 In either mode, a caption shows what each recognizer heard, one above the other,
 with k2's Chinese under them. A click on a name, on the Mac or the iPhone,
 keeps that version: the others hide and its Chinese shows. A click on the name
-again brings them back. Default's picks are kept on the GPU host, with the video, by
-`server/phone_service.py`, and either app can change them. A pick made on the
-iPhone with the host out of reach goes there when the host is next reached.
+again brings them back. When none heard it right, the pencil after a line (on
+the Mac with the row hovered) opens an editor with that line's text: what is
+saved there is the caption, under the name `mine`, with the others hidden and
+its Chinese from the host's translator, as a pick is. A click on `mine` drops
+it and brings the versions back; saved blank, it is dropped too. Default's
+picks and typed text are kept on the GPU host, with the video, by
+`server/phone_service.py`, and either app can change them. A pick or text made
+on the iPhone with the host out of reach goes there, and is translated, when
+the host is next reached.
 
 In either mode Stop holds the video's captioning and Start goes on with it:
 Default from what the host kept, Incognito from the job held in the host's
@@ -392,8 +399,8 @@ memory (see above).
 In either mode DiariZen tells the speakers apart once all the audio is in,
 beside the captioning, and the other recognizers hear the captions once all
 are made and cut where the speaker changes, and their text is then translated. Incognito's
-picks are in memory only, and go when the captions are cleared or the app
-quits. Choosing another step in Incognito fetches the video again, where
+picks and typed text are in memory only (the host translates typed text and
+keeps none of it), and go when the captions are cleared or the app quits. Choosing another step in Incognito fetches the video again, where
 Default takes the audio it kept.
 
 At the top of the tab, how the Mac and the GPU host stand: whether the Mac

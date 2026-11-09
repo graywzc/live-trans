@@ -38,9 +38,12 @@ final class PlaybackModel {
     /// The video's state: until it is ready its place shows what it is
     /// doing.
     private(set) var video = VideoState.loading
-    /// The recognizer picked for a caption, by the caption's id: its text
-    /// is shown, the others hidden until the pick is taken back.
-    private(set) var picks: [Int: String] = [:]
+    /// The recognizer picked for a caption, or the text typed in place of
+    /// theirs, by the caption's id: it is shown, the others hidden until
+    /// the pick is taken back.
+    private(set) var picks: [Int: Pick] = [:]
+    /// The typed texts as captions, readings and all, by the caption's id.
+    private(set) var typed: [Int: Caption] = [:]
 
     @ObservationIgnored private var timeObserver: Any?
     private var stopObserver: Any?
@@ -71,9 +74,11 @@ final class PlaybackModel {
         player.actionAtItemEnd = .pause
         pickBook = PickBook(video: bundle.id, client: pickClient, defaults: defaults)
         picks = Self.picks(pickBook.picks, on: self.captions)
+        typed = Self.typed(picks, on: self.captions, was: [:])
         pickBook.onChange = { [weak self] picks in
             guard let self else { return }
             self.picks = Self.picks(picks, on: self.captions)
+            self.typed = Self.typed(self.picks, on: self.captions, was: self.typed)
         }
     }
 
@@ -297,7 +302,16 @@ final class PlaybackModel {
     /// and all of them show again.
     func pick(_ name: String?, for caption: Caption) {
         guard let moment = caption.moment else { return }
-        pickBook.pick(name, at: PickClient.place(of: moment.seconds))
+        pickBook.pick(name.map(Pick.recognizer), at: PickClient.place(of: moment.seconds))
+    }
+
+    /// `text` is the caption's from now on, in place of every recognizer's,
+    /// translated by the host when it can be reached; blank, the pick is
+    /// taken back.
+    func type(_ text: String, for caption: Caption) {
+        guard let moment = caption.moment else { return }
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        pickBook.pick(text.isEmpty ? nil : .typed(text), at: PickClient.place(of: moment.seconds))
     }
 
     /// Sends the picks made away from the host and reads the ones made on
@@ -307,14 +321,26 @@ final class PlaybackModel {
     }
 
     /// The picks by the captions' ids, from their places in the video.
-    private static func picks(_ places: [Int: String], on captions: [Caption]) -> [Int: String] {
-        var picks: [Int: String] = [:]
+    private static func picks(_ places: [Int: Pick], on captions: [Caption]) -> [Int: Pick] {
+        var picks: [Int: Pick] = [:]
         for caption in captions {
-            if let moment = caption.moment, let name = places[PickClient.place(of: moment.seconds)] {
-                picks[caption.id] = name
+            if let moment = caption.moment, let pick = places[PickClient.place(of: moment.seconds)] {
+                picks[caption.id] = pick
             }
         }
         return picks
+    }
+
+    /// The typed picks as captions, each with the caption's id and moment;
+    /// the readings of one already made are kept.
+    private static func typed(_ picks: [Int: Pick], on captions: [Caption], was: [Int: Caption]) -> [Int: Caption] {
+        picks.reduce(into: [:]) { typed, entry in
+            guard case .typed(let text, let english) = entry.value,
+                  let caption = captions.first(where: { $0.id == entry.key })
+            else { return }
+            let ruby = was[entry.key].flatMap { $0.japanese == text ? $0.ruby : nil } ?? Furigana.annotate(text)
+            typed[entry.key] = Caption(id: caption.id, japanese: text, ruby: ruby, english: english, moment: caption.moment)
+        }
     }
 
     static func forgetPicks(for id: String, in defaults: UserDefaults = .standard) {

@@ -226,16 +226,21 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(try versionsModel().picks, [:])
     }
 
-    /// The host's record, as phone_service.py keeps it.
+    /// The host's record, as phone_service.py keeps it: typed text with a
+    /// stand-in translation.
     @MainActor
     private final class FakeHost {
-        var record: [Int: String] = [:]
+        var record: [Int: Pick] = [:]
         var reachable = true
 
         var client: PickClient {
             PickClient { [self] in reachable ? record : nil } send: { [self] place, pick in
                 guard reachable else { return false }
-                record[place] = pick
+                if case .typed(let text, _) = pick {
+                    record[place] = .typed(text, english: "zh:\(text)")
+                } else {
+                    record[place] = pick
+                }
                 return true
             }
         }
@@ -277,6 +282,55 @@ final class PlayerTests: XCTestCase {
         await book.refresh()
         XCTAssertEqual(host.record, [2000: "k2"])
         XCTAssertEqual(book.picks, [2000: "k2"])
+    }
+
+    func testTypedTextIsPickedAtOnceAndItsTranslationComesFromTheHost() async {
+        let host = FakeHost()
+        let book = PickBook(video: "v", client: host.client, defaults: defaults)
+        book.pick(.typed("雨が降ってきた"), at: 1000)
+        XCTAssertEqual(book.picks[1000], .typed("雨が降ってきた"), "shown at once, untranslated")
+        XCTAssertEqual(book.picks[1000]?.name, Pick.typedName)
+        await book.refresh()
+        XCTAssertEqual(book.picks[1000], .typed("雨が降ってきた", english: "zh:雨が降ってきた"))
+        book.pick("nemo", at: 1000)
+        await book.refresh()
+        XCTAssertEqual(host.record, [1000: "nemo"], "a pick takes the typed text's place")
+    }
+
+    func testTypedTextMadeAwayFromTheHostIsKeptOnThePhoneAndSentLater() async {
+        let host = FakeHost()
+        host.reachable = false
+        var book = PickBook(video: "v", client: host.client, defaults: defaults)
+        book.pick(.typed("晴れた"), at: 2000)
+        await book.refresh()
+        book = PickBook(video: "v", client: host.client, defaults: defaults)
+        XCTAssertEqual(book.picks, [2000: .typed("晴れた")], "kept on the phone")
+        host.reachable = true
+        await book.refresh()
+        XCTAssertEqual(book.picks, [2000: .typed("晴れた", english: "zh:晴れた")])
+        book = PickBook(video: "v", client: nil, defaults: defaults)
+        XCTAssertEqual(book.picks, [2000: .typed("晴れた", english: "zh:晴れた")], "and its translation")
+    }
+
+    func testPicksSavedByAnEarlierBuildAreRead() {
+        defaults.set(["1000": "nemo"], forKey: "picks.v")
+        defaults.set(["2000": "qwen", "3000": ""], forKey: "picks.waiting.v")
+        let book = PickBook(video: "v", client: nil, defaults: defaults)
+        XCTAssertEqual(book.picks, [1000: "nemo", 2000: "qwen"])
+    }
+
+    func testAModelsTypedTextIsACaptionWithReadings() throws {
+        let model = try versionsModel()
+        let caption = model.captions[0]
+        model.type("  鳥が鳴いている ", for: caption)
+        XCTAssertEqual(model.picks, [0: .typed("鳥が鳴いている")])
+        let typed = try XCTUnwrap(model.typed[0])
+        XCTAssertEqual(typed.japanese, "鳥が鳴いている")
+        XCTAssertTrue(typed.ruby.contains { $0.reading != nil }, "with readings")
+        XCTAssertEqual(typed.moment, caption.moment)
+        model.type("", for: caption)
+        XCTAssertEqual(model.picks, [:])
+        XCTAssertEqual(model.typed, [:])
     }
 
     func testAModelsPicksFollowTheHostsByWhereTheCaptionsStart() async throws {
@@ -322,18 +376,33 @@ final class PlayerTests: XCTestCase {
     /// A row of three versions, and rows with one picked, for a look.
     func testTheVersionsStackAndAPickHidesTheOthers() throws {
         let captions = try versionsModel().captions
-        func height(picked: String?) throws -> CGFloat {
+        func height(picked: String?, typed: Caption? = nil) throws -> CGFloat {
             let renderer = ImageRenderer(
-                content: PhoneCaptionRow(caption: captions[0], fontSize: 20, showFurigana: true, picked: picked, onTap: {})
-                    .frame(width: 390)
+                content: PhoneCaptionRow(
+                    caption: captions[0], fontSize: 20, showFurigana: true, picked: picked, typed: typed, onTap: {}
+                )
+                .frame(width: 390)
             )
             return try XCTUnwrap(renderer.uiImage).size.height
         }
         XCTAssertGreaterThan(try height(picked: nil), try height(picked: "nemo") * 2, "three texts against one")
+        let typed = Caption(
+            id: 1, japanese: "庭で鳥が鳴いてる", ruby: Furigana.annotate("庭で鳥が鳴いてる"), english: "鸟在院子里叫。",
+            moment: captions[1].moment
+        )
+        XCTAssertLessThan(
+            try height(picked: Pick.typedName, typed: typed), try height(picked: nil) / 2, "typed, it alone shows"
+        )
         let rows = VStack(alignment: .leading, spacing: 18) {
-            PhoneCaptionRow(caption: captions[0], fontSize: 20, showFurigana: true, isCurrent: true, onTap: {})
-            PhoneCaptionRow(caption: captions[1], fontSize: 20, showFurigana: true, picked: "nemo", onTap: {})
-            PhoneCaptionRow(caption: captions[2], fontSize: 20, showFurigana: true, onTap: {})
+            PhoneCaptionRow(
+                caption: captions[0], fontSize: 20, showFurigana: true, isCurrent: true, onTap: {}, onType: { _ in }
+            )
+            PhoneCaptionRow(caption: captions[1], fontSize: 20, showFurigana: true, picked: "nemo", onTap: {}, onType: { _ in })
+            PhoneCaptionRow(
+                caption: captions[1], fontSize: 20, showFurigana: true, picked: Pick.typedName, typed: typed, onTap: {},
+                onType: { _ in }
+            )
+            PhoneCaptionRow(caption: captions[2], fontSize: 20, showFurigana: true, onTap: {}, onType: { _ in })
         }
         .padding(16)
         .frame(width: 390)

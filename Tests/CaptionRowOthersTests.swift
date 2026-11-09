@@ -13,6 +13,9 @@ final class CaptionRowOthersTests: XCTestCase {
         var analyzed: [String] = []
         var picked: String?
         var seeks = 0
+        /// The text typed in place of the lines, and its translation.
+        var typed: String?
+        var typedEnglish = ""
     }
 
     struct Host: View {
@@ -38,7 +41,13 @@ final class CaptionRowOthersTests: XCTestCase {
                 ],
                 onAnalyzeOther: { model.analyzed.append($0.japanese) },
                 picked: model.picked,
-                onPick: { model.picked = $0 }
+                // As DevPipeline's: a pick takes the place of typed text.
+                onPick: { model.picked = $0; model.typed = nil },
+                typed: model.typed.map { line(-4, $0, model.typedEnglish) },
+                onType: { text in
+                    model.typed = text.isEmpty ? nil : text
+                    model.picked = text.isEmpty ? nil : Pick.typedName
+                }
             )
             .padding(16)
             .frame(width: 460, height: 220, alignment: .topLeading)
@@ -125,6 +134,59 @@ final class CaptionRowOthersTests: XCTestCase {
         click(chineseButton("明日、雨が降るらしい。", y: 28))
         XCTAssertEqual(translation(), "Qwen says rain.")
         XCTAssertEqual(model.picked, "qwen")
+    }
+
+    func testAPencilOpensAnEditorWithItsLinesTextAndTheTypedTextIsTheCaption() throws {
+        let tracker = try XCTUnwrap(TestScreen.wait { window.contentView.flatMap(Self.find) })
+        tracker.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: 200, y: 60)))
+        pump()
+        snapshot("row-others-pencils")
+
+        // qwen's, after its 中.
+        click(pencil("明日、雨が降るらしい。", y: 84, afterChinese: true))
+        let field = try XCTUnwrap(TestScreen.wait { self.editorField() }, "the editor opened")
+        XCTAssertEqual(field.stringValue, "明日、雨が降るらしい。", "it starts from the line's text")
+        let editorWindow = try XCTUnwrap(field.window)
+        editorWindow.makeFirstResponder(field)
+        let editor = try XCTUnwrap(field.currentEditor())
+        editor.selectAll(nil)
+        editor.insertText("明日も雨が降るらしい")
+        editor.insertNewline(nil)
+        pump()
+        XCTAssertEqual(model.typed, "明日も雨が降るらしい")
+        XCTAssertEqual(model.picked, Pick.typedName)
+        XCTAssertNotNil(TestScreen.wait { self.editorField() == nil ? true : nil }, "the editor closed")
+
+        model.typedEnglish = "Rain again tomorrow."
+        pump()
+        snapshot("row-typed")
+        XCTAssertEqual(translation(), "Rain again tomorrow.", "the typed text's, alone")
+        // Alone, it takes the top line, and is analysed as itself.
+        click(CGPoint(x: 434, y: 28))
+        XCTAssertEqual(model.analyzed, ["明日も雨が降るらしい"])
+
+        // Its name drops it, and the lines are back.
+        click(CGPoint(x: 24, y: 28))
+        XCTAssertNil(model.picked)
+        XCTAssertNil(model.typed)
+        XCTAssertEqual(translation(), "It may rain tomorrow.")
+    }
+
+    /// The editor's text field, in a popover's window.
+    private func editorField() -> NSTextField? {
+        func find(in view: NSView) -> NSTextField? {
+            if let field = view as? NSTextField, field.isEditable { return field }
+            return view.subviews.lazy.compactMap(find).first
+        }
+        return NSApp.windows.lazy.filter { $0 !== self.window && $0.isVisible }
+            .compactMap { $0.contentView.flatMap(find) }.first
+    }
+
+    /// Where the pencil after a line of `japanese` is: past the 中, when
+    /// the line has one, as `chineseButton` reckons it.
+    private func pencil(_ japanese: String, y: CGFloat, afterChinese: Bool) -> CGPoint {
+        let chinese = chineseButton(japanese, y: y)
+        return CGPoint(x: chinese.x + (afterChinese ? 9 + 6 + 8 : -8 + 8), y: y + 4)
     }
 
     /// The text under the lines: the Chinese, here English stand-ins.

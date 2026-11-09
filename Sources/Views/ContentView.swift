@@ -125,7 +125,9 @@ struct ContentView: View {
                 isOtherAnalyzed: { panel.isPresented && panel.tab == .analysis && analyzer.hasAnalyzed($0) },
                 onAnalyzeOther: { analyze($0) },
                 picked: dev.pickedVersion(for: caption),
-                onPick: { dev.pick($0, for: caption) }
+                onPick: { dev.pick($0, for: caption) },
+                typed: dev.typed(for: caption),
+                onType: caption.moment == nil ? nil : { dev.type($0, for: caption) }
             )
         }
         .selectionActions(onLookUp: lookUp)
@@ -710,9 +712,11 @@ private struct CaptionSelection: Equatable {
 }
 
 /// One other recognizer's text under a caption in dev mode: its name, then
-/// the text with readings, as the caption's own.
+/// the text with readings, as the caption's own. Also the text typed in
+/// place of them all, under `Pick.typedName`.
 private struct OtherHearingLine: View {
     let label: String
+    let japanese: String
     let ruby: [RubyToken]
     let fontSize: Double
     let showFurigana: Bool
@@ -732,8 +736,12 @@ private struct OtherHearingLine: View {
     var isTranslated = false
     /// Shows this line's Chinese under the row; none when it has none.
     var onTranslate: (() -> Void)?
+    /// Takes text typed from this line's as the caption.
+    var onType: ((String) -> Void)?
 
     @State private var selection: Range<Int>?
+
+    private var isTyped: Bool { label == Pick.typedName }
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
@@ -741,10 +749,15 @@ private struct OtherHearingLine: View {
             FuriganaText(
                 tokens: ruby, fontSize: fontSize, showReadings: showFurigana, selection: $selection, onClick: onClick
             )
-            .help("What \(label) heard over the same stretch")
+            .help(isTyped ? "The caption as you typed it" : "What \(label) heard over the same stretch")
             if let onTranslate {
                 Self.translateButton(
                     label, isTranslated: isTranslated, fontSize: fontSize, showFurigana: showFurigana, action: onTranslate
+                )
+            }
+            if let onType {
+                TypeButton(
+                    text: japanese, fontSize: fontSize, showFurigana: showFurigana, isShown: isRowHovered, onSave: onType
                 )
             }
             Spacer(minLength: 8)
@@ -757,7 +770,7 @@ private struct OtherHearingLine: View {
                     .foregroundStyle(isAnalyzed ? Color.orange : Color.gray)
             }
             .buttonStyle(.plain)
-            .help("Explain what \(label) heard")
+            .help(isTyped ? "Explain the caption as you typed it" : "Explain what \(label) heard")
             // Level with its first line, below the row of readings.
             .padding(.top, showFurigana ? fontSize * 0.6 : 0)
             .opacity(isRowHovered || isAnalyzed ? 1 : 0)
@@ -798,11 +811,85 @@ private struct OtherHearingLine: View {
         if let onPick {
             Button { onPick(isPicked ? nil : label) } label: { text.contentShape(Rectangle()) }
                 .buttonStyle(.plain)
-                .help(isPicked ? "Show all three again" : "Keep \(label)'s version and hide the others")
+                .help(
+                    label == Pick.typedName ? "Drop your text and show what was heard again"
+                        : isPicked ? "Show all three again" : "Keep \(label)'s version and hide the others"
+                )
                 .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
         } else {
             text.padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
         }
+    }
+}
+
+/// A pencil after a line, shown with the row hovered, that opens an editor
+/// with the line's text: for typing the caption when no recognizer heard
+/// it right. Saved blank, the typed text is dropped.
+private struct TypeButton: View {
+    let text: String
+    let fontSize: Double
+    let showFurigana: Bool
+    var isShown = true
+    let onSave: (String) -> Void
+
+    @State private var draft: String?
+
+    var body: some View {
+        Button { draft = text } label: {
+            Image(systemName: Self.symbol)
+                .font(.system(size: fontSize * 0.55))
+                .foregroundStyle(Color.gray)
+                // A target a little wider than the glyph.
+                .padding(.horizontal, 3)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Type the caption yourself, starting from this text")
+        .accessibilityLabel("Type the caption")
+        // On the baseline of its line, below the row of readings.
+        .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.35)
+        .opacity(isShown || draft != nil ? 1 : 0)
+        .popover(isPresented: Binding(get: { draft != nil }, set: { if !$0 { draft = nil } }), arrowEdge: .bottom) {
+            TypedCaptionEditor(text: draft ?? "") { typed in
+                draft = nil
+                if let typed { onSave(typed) }
+            }
+        }
+    }
+
+    static let symbol = "pencil"
+}
+
+/// The caption being typed, from the text of the line it was opened on:
+/// Return or Save takes it, Escape or Cancel leaves the caption as it was.
+struct TypedCaptionEditor: View {
+    @State var text: String
+    /// The text saved, or nil on Cancel.
+    let onDone: (String?) -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 10) {
+            TextField("The caption as it was said", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 15))
+                .focused($isFocused)
+                .onSubmit { onDone(text) }
+                .frame(width: 380)
+            HStack {
+                Text("The host translates it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { onDone(nil) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") { onDone(text) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(12)
+        .onAppear { isFocused = true }
     }
 }
 
@@ -834,6 +921,11 @@ struct CaptionRow: View {
     /// A click on a name picks it, or takes the pick back; none, and the
     /// names are only names.
     var onPick: ((String?) -> Void)?
+    /// The text typed in place of every recognizer's, when there is one.
+    var typed: Caption?
+    /// Takes typed text as the caption, picked; none, and there is no
+    /// pencil to type it with.
+    var onType: ((String) -> Void)?
 
     @State private var isHovered = false
     /// The recognizer whose Chinese is under the lines, of `others`; nil,
@@ -862,28 +954,49 @@ struct CaptionRow: View {
         pickedOther.map { [$0] } ?? (isOwnPicked ? [] : others)
     }
 
+    /// The typed text, when it is the caption: it alone shows.
+    private var typedPicked: Caption? {
+        picked == Pick.typedName ? typed : nil
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                if pickedOther == nil {
-                    ownLine
-                }
-                ForEach(othersShown, id: \.label) { other in
+                if let typed = typedPicked {
                     OtherHearingLine(
-                        label: other.label, ruby: other.sentence.ruby, fontSize: fontSize, showFurigana: showFurigana,
-                        onClick: onSeek, isRowHovered: isHovered, isAnalyzed: isOtherAnalyzed(other.sentence),
-                        onAnalyze: { onAnalyzeOther(other.sentence) }, isPicked: other.label == picked, onPick: onPick,
-                        // Standing for the caption, it says where it is.
-                        span: other.label == picked ? momentSpan : nil,
-                        isTranslated: translatingOther?.label == other.label,
-                        onTranslate: isTranslationSwitchable && !other.sentence.english.isEmpty
-                            ? { translatedBy = other.label } : nil
+                        label: Pick.typedName, japanese: typed.japanese, ruby: typed.ruby, fontSize: fontSize,
+                        showFurigana: showFurigana, onClick: onSeek, isRowHovered: isHovered,
+                        isAnalyzed: isOtherAnalyzed(typed), onAnalyze: { onAnalyzeOther(typed) }, isPicked: true,
+                        onPick: onPick, span: momentSpan, onType: onType
                     )
+                } else {
+                    if pickedOther == nil {
+                        ownLine
+                    }
+                    ForEach(othersShown, id: \.label) { other in
+                        OtherHearingLine(
+                            label: other.label, japanese: other.sentence.japanese, ruby: other.sentence.ruby,
+                            fontSize: fontSize, showFurigana: showFurigana, onClick: onSeek, isRowHovered: isHovered,
+                            isAnalyzed: isOtherAnalyzed(other.sentence), onAnalyze: { onAnalyzeOther(other.sentence) },
+                            isPicked: other.label == picked, onPick: onPick,
+                            // Standing for the caption, it says where it is.
+                            span: other.label == picked ? momentSpan : nil,
+                            isTranslated: translatingOther?.label == other.label,
+                            onTranslate: isTranslationSwitchable && !other.sentence.english.isEmpty
+                                ? { translatedBy = other.label } : nil,
+                            onType: onType
+                        )
+                    }
                 }
-                let english = translatingOther?.sentence.english ?? caption.english
+                let english = typedPicked?.english ?? translatingOther?.sentence.english ?? caption.english
                 if !english.isEmpty {
                     // Not SwiftUI's selectable text, which keeps its clicks.
                     SelectableText(english, size: fontSize * 0.82, color: .systemGreen, onClick: onSeek)
+                } else if typedPicked != nil {
+                    Text("No translation yet")
+                        .font(.system(size: fontSize * 0.6))
+                        .foregroundStyle(.gray)
+                        .help("The host translates typed text when it has it; type it again if this stays")
                 }
                 if let official {
                     SelectableText(official, size: fontSize * 0.82, color: .systemOrange, onClick: onSeek)
@@ -926,6 +1039,12 @@ struct CaptionRow: View {
                 OtherHearingLine.translateButton(
                     "k2", isTranslated: translatingOther == nil, fontSize: fontSize, showFurigana: showFurigana
                 ) { translatedBy = nil }
+            }
+            if let onType {
+                TypeButton(
+                    text: caption.japanese, fontSize: fontSize, showFurigana: showFurigana, isShown: isHovered,
+                    onSave: onType
+                )
             }
             Spacer(minLength: 8)
             if let momentSpan {

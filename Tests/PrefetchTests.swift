@@ -110,7 +110,8 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(heard.map(\.english), ["丁", ""], "each with its own translation, once in")
         XCTAssertTrue(DevPipeline.heard(Array(others.prefix(1)), over: caption).isEmpty)
         // Analysed as captions of their own: ids no caption has, and none shared.
-        let ids = (1...50).flatMap { id in (0..<OtherHearing.shown.count).map { DevPipeline.otherID(of: id, $0) } }
+        // The last, past the others', is the typed text's.
+        let ids = (1...50).flatMap { id in (0...OtherHearing.shown.count).map { DevPipeline.otherID(of: id, $0) } }
         XCTAssertTrue(ids.allSatisfy { $0 < 0 })
         XCTAssertEqual(Set(ids).count, ids.count)
     }
@@ -129,6 +130,32 @@ final class PrefetchTests: XCTestCase {
         dev.pick("qwen", for: second)
         dev.captionsCleared()
         XCTAssertNil(dev.pickedVersion(for: second), "cleared with the captions")
+    }
+
+    /// Text typed in Incognito is the caption's in memory, as a pick is.
+    @MainActor
+    func testTypedTextInIncognitoIsPickedAndGoesWithTheCaptions() throws {
+        let dev = DevPipeline(engine: CaptionEngine(), video: ChromeVideo())
+        dev.keeps = { false }
+        let first = caption(1, 1, 2)
+        XCTAssertNil(dev.typed(for: first))
+        dev.type("  雨が降ってきた \n", for: first)
+        XCTAssertEqual(dev.pickedVersion(for: first), Pick.typedName)
+        let typed = try XCTUnwrap(dev.typed(for: first))
+        XCTAssertEqual(typed.japanese, "雨が降ってきた")
+        XCTAssertEqual(typed.ruby.map(\.base).joined(), "雨が降ってきた")
+        XCTAssertEqual(typed.english, "", "no host to translate it")
+        XCTAssertEqual(typed.moment, first.moment)
+        XCTAssertLessThan(typed.id, 0, "analysed apart from the caption")
+
+        dev.pick("nemo", for: first)
+        XCTAssertNil(dev.typed(for: first), "a pick takes its place")
+        dev.type("晴れた", for: first)
+        dev.type(" ", for: first)
+        XCTAssertNil(dev.pickedVersion(for: first), "typed blank, it is dropped")
+        dev.type("晴れた", for: first)
+        dev.captionsCleared()
+        XCTAssertNil(dev.typed(for: first))
     }
 
     /// Another tab, or another page in the job's tab, is another video,

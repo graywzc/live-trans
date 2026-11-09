@@ -95,9 +95,64 @@ def test_only_a_picks_change_to_a_kept_video_is_taken():
         server.shutdown()
 
 
+def fake_translator(asked):
+    """Answers "<to>:<text>" and notes what it was asked; None for "fails"."""
+    def translate(ja, to):
+        asked.append((ja, to))
+        return None if ja == "fails" else f"{to}:{ja}"
+    return translate
+
+
+def test_typed_text_is_kept_with_its_translation():
+    with TemporaryDirectory() as folder:
+        (Path(folder) / VIDEO).mkdir()
+        asked = []
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), phone_service.handler(Path(folder) / "t", Path(folder), fake_translator(asked))
+        )
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        assert pick(port, {"at": 1000, "pick": {"ja": " 雨が降ってきた "}}) == 204
+        assert pick(port, {"at": 2000, "pick": {"ja": "晴れた", "to": "en"}}) == 204
+        assert pick(port, {"at": 3000, "pick": {"ja": "fails"}}) == 204
+        assert asked == [("雨が降ってきた", "zh"), ("晴れた", "en"), ("fails", "zh")]
+        assert picks(port) == {
+            "1000": {"ja": "雨が降ってきた", "en": "zh:雨が降ってきた"}, "2000": {"ja": "晴れた", "en": "en:晴れた"},
+            "3000": {"ja": "fails"},
+        }
+        assert pick(port, {"at": 1000, "pick": "nemo"}) == 204
+        assert picks(port)["1000"] == "nemo"
+        for bad in ({"ja": ""}, {"ja": "  "}, {"ja": "x" * 501}, {"ja": "雨", "to": "fr"}, {"ja": 1},
+                    {"ja": "雨", "en": "rain"}, {"text": "雨"}):
+            assert pick(port, {"at": 1, "pick": bad}) == 400, bad
+        assert "1" not in picks(port)
+        server.shutdown()
+
+
+def test_translate_keeps_nothing():
+    with TemporaryDirectory() as folder:
+        asked = []
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), phone_service.handler(Path(folder) / "t", Path(folder), fake_translator(asked))
+        )
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/translate", data=json.dumps({"ja": "雨", "to": "en"}).encode(), method="POST"
+        )
+        with urllib.request.urlopen(request) as answer:
+            assert json.load(answer) == {"en": "en:雨"}
+        assert post(port, json.dumps({"ja": "fails"}).encode(), "/translate") == 502
+        assert post(port, json.dumps({"ja": ""}).encode(), "/translate") == 400
+        assert list(Path(folder).iterdir()) == []
+        server.shutdown()
+
+
 if __name__ == "__main__":
     test_a_report_is_kept_and_anything_else_refused()
     test_the_file_keeps_only_the_last_reports()
     test_picks_are_kept_per_caption_and_can_be_taken_back()
     test_only_a_picks_change_to_a_kept_video_is_taken()
+    test_typed_text_is_kept_with_its_translation()
+    test_translate_keeps_nothing()
     print("ok")

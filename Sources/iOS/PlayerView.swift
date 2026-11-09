@@ -100,8 +100,8 @@ struct PlayerScreen: View {
                 }
             CaptionScroll(
                 captions: model.captions, playingID: model.playingID, lull: model.lull,
-                fontSize: fontSize, showFurigana: showFurigana, picks: model.picks, onTap: model.replay,
-                onPick: model.pick, onAnalyze: onAnalyze, onWord: onWord
+                fontSize: fontSize, showFurigana: showFurigana, picks: model.picks, typed: model.typed,
+                onTap: model.replay, onPick: model.pick, onType: model.type, onAnalyze: onAnalyze, onWord: onWord
             )
         }
         .toolbar {
