@@ -814,6 +814,110 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
     assert status["others_ready"] and status["others"] == 2 * 2 * len(job.lines), status
 
 
+def slow_wav_file(samples, rate):
+    """`samples` as a WAV file served over HTTP at `rate` bytes a second,
+    like a video fetched at playback pace."""
+    import io
+    import wave
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(srv.SAMPLE_RATE)
+        w.writeframes((np.clip(samples, -1, 1) * 32767).astype(np.int16).tobytes())
+    data = out.getvalue()
+
+    class Slow(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            for i in range(0, len(data), 4096):
+                self.wfile.write(data[i:i + 4096])
+                time.sleep(4096 / rate)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}/slow.wav"
+
+
+def speakers_of_a_long_video(url, diarize):
+    """Runs a 7 s step job in sections of 2 s with `diarize` for DiariZen;
+    the lengths of audio it was given, and the job's status at the end."""
+    original = (srv.speech_stretches, srv.hear_pieces, srv.choose_batch, srv.run_devtool, srv.run_devtool_lines,
+                srv.translate_text, srv.sound_events, srv.DEV_CAPTIONS, srv.SECTION_SECONDS, srv.SECTION_TAIL)
+    told = []
+
+    def heard(grid, audio, start, turns=None, within=None, **kwargs):
+        return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": round(b, 2)}
+                for a, b in grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)]
+
+    def tool(name, header, audio):
+        if name != "diarize":
+            return _not_set_up(name, header, audio)
+        told.append(round(audio.size / srv.SAMPLE_RATE))
+        return diarize(job, audio)
+
+    srv.speech_stretches, srv.hear_pieces = (lambda audio, model=None: loud_stretches(audio)), heard
+    srv.choose_batch = lambda speech, length, more, capped=False: (2.0, "test") if length >= 2.0 else (
+        None if more else (length, "end of the audio"))
+    srv.run_devtool = tool
+    srv.run_devtool_lines = lambda name, header, audio, on_line: None
+    srv.translate_text = lambda ja: f"译:{ja}"
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    srv.DEV_CAPTIONS, srv.SECTION_SECONDS, srv.SECTION_TAIL = True, 2.0, 0.5
+    job = None
+    try:
+        job = srv.start_prefetch(url, "https://example.com/long-speakers", {}, 7.0, step="speech", keep=False)
+        deadline = time.time() + 40
+        while time.time() < deadline and not job.status()["speakers"]:
+            time.sleep(0.1)
+        status = job.status()
+        job.stop()
+    finally:
+        (srv.speech_stretches, srv.hear_pieces, srv.choose_batch, srv.run_devtool, srv.run_devtool_lines,
+         srv.translate_text, srv.sound_events, srv.DEV_CAPTIONS, srv.SECTION_SECONDS, srv.SECTION_TAIL) = original
+    return told, status
+
+
+def test_the_speakers_past_the_first_section_are_told_when_the_fetch_ends_while_it_is_being_told():
+    samples = noise_and_silence([(1, False), (0.9, True), (0.1, False)] * 3 + [(1, False)])
+    # 2 s of audio take a second to come; DiariZen on the first section
+    # holds on until all of it is in.
+    url = slow_wav_file(samples, 2 * srv.SAMPLE_RATE * 2)
+
+    def diarize(job, audio):
+        deadline = time.time() + 10
+        while not job.fetch_done and time.time() < deadline:
+            time.sleep(0.05)
+        return {"segments": [[0.0, 0.5, "S1"]]}
+
+    told, status = speakers_of_a_long_video(url, diarize)
+    assert told[0] == 2 and sum(told) == 7, told
+    assert status["speakers"] and status["spoken"] >= 6.9, status
+
+
+def test_a_video_too_long_for_diarizen_at_once_has_its_speakers_told_a_section_at_a_time():
+    url = wav_file(noise_and_silence([(1, False), (0.9, True), (0.1, False)] * 3 + [(1, False)]))
+
+    def diarize(job, audio):
+        if audio.size > 3 * srv.SAMPLE_RATE:
+            raise RuntimeError("diarize failed: MemoryError: batch_size ( 8) is probably too large")
+        return {"segments": [[0.0, 0.5, "S1"]]}
+
+    told, status = speakers_of_a_long_video(url, diarize)
+    # All of it at once, then sections ending at the captions' batches,
+    # the last running to the end.
+    assert told == [7, 2, 2, 2, 1], told
+    assert status["speakers"] and status["spoken"] >= 6.9, status
+
+
 def test_a_paused_production_job_runs_nothing_until_it_is_resumed_and_then_goes_on():
     original = (srv.speech_stretches, srv.hear_pieces, srv.run_devtool, srv.run_devtool_lines, srv.translate_text)
     asked = []
