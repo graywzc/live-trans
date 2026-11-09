@@ -1235,7 +1235,7 @@ struct VideoBar: View {
                         Capsule().fill(Color.white.opacity(0.12))
                             .frame(height: 6)
                         if let fetched {
-                            stretch(fetched, of: total, in: width, color: Color.white.opacity(0.3))
+                            stretch(fetched, of: total, in: width, color: Self.fetchedColor)
                         }
                         ForEach(Array(captioned.enumerated()), id: \.offset) { _, range in
                             stretch(range, of: total, in: width, color: (isPaused ? Color.yellow : Color.green).opacity(0.7))
@@ -1261,7 +1261,7 @@ struct VideoBar: View {
                             ForEach(Self.drawingOrder(translated), id: \.label) { reach in
                                 if reach.seconds > 0 {
                                     stretch(
-                                        0...reach.seconds, of: total, in: width, color: Self.color(of: reach.label).opacity(0.5),
+                                        0...reach.seconds, of: total, in: width, color: Self.translatedColor(of: reach.label),
                                         height: Self.laneHeight
                                     )
                                 }
@@ -1447,6 +1447,12 @@ struct VideoBar: View {
         }
     }
 
+    /// A recognizer's translations, in the lane under the bar.
+    static func translatedColor(of recognizer: String) -> Color {
+        color(of: recognizer).opacity(0.5)
+    }
+
+    static let fetchedColor = Color.white.opacity(0.3)
     static let speakersColor = Color.green.opacity(0.7)
 
     /// Furthest first, so the one furthest behind is drawn over the others.
