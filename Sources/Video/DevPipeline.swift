@@ -59,8 +59,11 @@ final class DevPipeline {
         /// Up to where the words have been heard; whether re-timed.
         var worded = 0.0
         var aligned = false
-        /// Whether the speakers have been told apart.
+        /// Whether the speakers have been told apart over the whole video;
+        /// up to where they are so far, and the stretch being told now.
         var spoken = false
+        var spokenTo = 0.0
+        var telling: ClosedRange<Double>?
         /// How many texts the other recognizers have given.
         var others = 0
         var state = "running"
@@ -295,14 +298,18 @@ final class DevPipeline {
     /// it is the job's.
     func speakerState(on playhead: VideoMoment?) -> SpeakerState? {
         guard let job, isOnJob(playhead) else { return nil }
-        if job.spoken { return .done }
-        return job.running.contains("Speaker detection") ? .running : .waiting
+        return SpeakerState(told: job.spokenTo, telling: job.telling, done: job.spoken)
     }
 
-    /// The host tells the speakers apart once, over all the audio, after
-    /// the fetch: nothing to show of it until then.
-    enum SpeakerState: Equatable {
-        case waiting, running, done
+    /// The host tells the speakers apart over the audio as it comes, a
+    /// section at a time, or all the rest at once once it is all in.
+    struct SpeakerState: Equatable {
+        /// Up to where in the video they are told apart, from its start.
+        var told = 0.0
+        /// The stretch being told now.
+        var telling: ClosedRange<Double>?
+        /// Told over the whole video.
+        var done = false
     }
 
     private static func total(of job: Job) -> Double {
@@ -580,7 +587,8 @@ final class DevPipeline {
             let worded = status.worded ?? 0
             if analysed > updated.analysed || status.state == "done" && analysed != updated.analysed
                 || worded > updated.worded || (status.aligned ?? false) != updated.aligned
-                || (status.speakers ?? false) != updated.spoken || (status.others ?? 0) != updated.others {
+                || (status.speakers ?? false) != updated.spoken || (status.spoken ?? 0) != updated.spokenTo
+                || (status.others ?? 0) != updated.others {
                 let findings = try await client.stepFindings(job: current.id)
                 guard job?.id == current.id else { return }
                 speech = findings.stretches
@@ -592,9 +600,11 @@ final class DevPipeline {
                 updated.analysed = findings.analysed
                 updated.worded = findings.worded ?? 0
                 updated.aligned = findings.aligned ?? false
-                updated.spoken = findings.speakers != nil
+                updated.spoken = status.speakers ?? false
+                updated.spokenTo = status.spoken ?? 0
             }
             updated.othersReady = status.othersReady ?? true
+            updated.telling = status.telling.flatMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
             if let bundle = status.bundle, bundle != updated.bundle {
                 if let news = Self.phoneCopyNews(from: updated.bundle, to: bundle) { ActivityLog.tell(news) }
                 updated.bundle = bundle

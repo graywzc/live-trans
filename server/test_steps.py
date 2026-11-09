@@ -612,7 +612,7 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
         job = srv.PrefetchJob(url, page_url, {}, 3.0, step="speech")
         # (Jobs of tests before may still be about, asking too.)
         deadline = time.time() + 15
-        while time.time() < deadline and not (job.captioned and job.status()["others"] >= job.status()["count"] > 0):
+        while time.time() < deadline and not (job.others_done and job.status()["others"] >= job.status()["count"] > 0):
             time.sleep(0.1)
         time.sleep(0.3)
         return job.status(), job.findings()
@@ -636,8 +636,9 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     # nemo and qwen, with the translator kept; no VibeVoice.
     assert names[:2] == ["hear_nemo", "hear_qwen"], names
     line = status["lines"][0]
-    # From half a second before the caption (or the audio's start) to 0.3 s after.
-    assert abs(clip[0] - max(line["start"] - 0.5, 0)) < 0.01 and abs(clip[1] - (line["end"] + 0.3)) < 0.01, (clip, line)
+    # From half a second before the caption (or the audio's start) to 0.3 s
+    # after, in the stretch of audio given, which begins at the first clip.
+    assert clip[0] == 0 and abs(clip[1] - (line["end"] + 0.3 - max(line["start"] - 0.5, 0))) < 0.01, (clip, line)
     assert found["others"][0] == {"start": line["start"], "end": line["end"],
                                   "nemo": "hear_nemoのことば", "nemo_en": "译:hear_nemoのことば"}, found["others"]
     assert status["others"] == 2 * len(status["lines"]), status["others"]
@@ -744,6 +745,73 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
     assert beside and all(beside), "DiariZen began while the captions were made"
     assert found["speakers"], "the speakers are told, for the timeline"
     assert not os.listdir(cache), "a production job keeps nothing"
+
+
+def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_time_behind_the_captions():
+    original = (srv.speech_stretches, srv.hear_pieces, srv.choose_batch, srv.run_devtool, srv.run_devtool_lines,
+                srv.translate_text, srv.sound_events, srv.DEV_CAPTIONS, srv.SECTION_SECONDS, srv.SECTION_TAIL)
+    asked = []
+    # The captions past the third section wait for the others to begin on
+    # the first: they must not need all the captions made.
+    others_began, waited = threading.Event(), []
+
+    def heard(grid, audio, start, turns=None, within=None, **kwargs):
+        if start >= 3.9 and not within:
+            waited.append(others_began.wait(10))
+        pieces = grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)
+        if within:
+            a, b = pieces[0]
+            return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": round((a + b) / 2, 2)},
+                    {"ja": "はい", "en": "yes", "start": round((a + b) / 2, 2), "end": round(b, 2)}]
+        return [{"ja": "ことばはい", "en": "words yes", "start": round(a, 2), "end": round(b, 2)} for a, b in pieces]
+
+    def tool(name, header, audio):
+        if name != "diarize":
+            return _not_set_up(name, header, audio)
+        asked.append((name, round(audio.size / srv.SAMPLE_RATE)))
+        # Two voices in the speech of the second section only.
+        return {"segments": [[3.0, 3.45, "S1"], [3.45, 3.9, "S2"]]}
+
+    def other(name, header, audio, on_line):
+        asked.append((name, len(header["clips"])))
+        others_began.set()
+        for i, _ in enumerate(header["clips"]):
+            on_line({"i": i, "text": f"{name}のことば"})
+
+    srv.speech_stretches, srv.hear_pieces = (lambda audio, model=None: loud_stretches(audio)), heard
+    # Batches of two seconds, each ending in a silence.
+    srv.choose_batch = lambda speech, length, more, capped=False: (2.0, "test") if length >= 2.0 else (
+        None if more else (length, "end of the audio"))
+    srv.run_devtool, srv.run_devtool_lines = tool, other
+    srv.translate_text = lambda ja: f"译:{ja}"
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    srv.DEV_CAPTIONS, srv.DEV_SPEAKER_CUTS, srv.SECTION_SECONDS, srv.SECTION_TAIL = True, True, 2.0, 0.5
+    try:
+        url = wav_file(noise_and_silence([(1, False), (0.9, True), (0.1, False)] * 3 + [(1, False)]))
+        job = srv.start_prefetch(url, "https://example.com/long", {}, 7.0, step="speech", keep=False)
+        deadline = time.time() + 30
+        while time.time() < deadline and not job.others_done:
+            time.sleep(0.1)
+        status = job.status()
+        job.stop()
+    finally:
+        (srv.speech_stretches, srv.hear_pieces, srv.choose_batch, srv.run_devtool, srv.run_devtool_lines,
+         srv.translate_text, srv.sound_events, srv.DEV_CAPTIONS, srv.SECTION_SECONDS, srv.SECTION_TAIL) = original
+        srv.DEV_SPEAKER_CUTS = False
+    assert waited and all(waited), "the others began before the captions were all made"
+    # Sections end at the batches' edges, the last running to the end.
+    assert [(round(a), b if b == float("inf") else round(b)) for a, b in job.sections] == [
+        (0, 2), (2, 4), (4, 6), (6, float("inf"))], job.sections
+    # The whole audio was in at once, so the speakers were told over all of
+    # it in one run; the others heard each section's captions by themselves.
+    assert asked[0] == ("diarize", 7), asked
+    nemo = [a[1] for a in asked if a[0] == "hear_nemo"]
+    assert len(nemo) == 4 and nemo[1] == 2, asked
+    # The caption of the second section was cut where the voice changed,
+    # before the others heard it.
+    assert [l["ja"] for l in job.lines][:4] == ["ことばはい", "ことば", "はい", "ことばはい"], job.lines
+    assert status["captions"] == "done" and status["speakers"] and status["spoken"] >= 6.9, status
+    assert status["others_ready"] and status["others"] == 2 * 2 * len(job.lines), status
 
 
 def test_a_paused_production_job_runs_nothing_until_it_is_resumed_and_then_goes_on():

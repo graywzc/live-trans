@@ -154,13 +154,14 @@ final class VideoBarTests: XCTestCase {
     }
 
     /// Under the bar, a lane of how far each one's text is translated, in
-    /// its color, and one of the speakers: striped while they are told
-    /// apart, whole once they are.
+    /// its color, and one of the speakers: lit as far as they are told
+    /// apart, striped over the stretch being told, whole once they all are.
     func testTranslationsAndSpeakersHaveLanesUnderTheBar() throws {
         let reached = [("k2", 900.0), ("nemo", 600.0), ("qwen", 300.0)]
         show(
             duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached,
-            translated: [("k2", 900), ("nemo", 450), ("qwen", 150)], speakers: .running
+            translated: [("k2", 900), ("nemo", 450), ("qwen", 150)],
+            speakers: .init(told: 0, telling: 0...1200)
         )
         let track = try trackEnds()
         // The bar is 16 high, the lanes 3 each 2 apart under it, all of it
@@ -185,16 +186,35 @@ final class VideoBarTests: XCTestCase {
         XCTAssertTrue(lit.contains { $0 > 0.3 } && lit.contains { $0 < 0.2 }, "striped while being told apart")
         snapshot("video-bar-lanes")
 
-        show(duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached, speakers: .done)
+        show(duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached, speakers: .init(done: true))
         let whole = stride(from: 20.0, to: 1180, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
         XCTAssertTrue(whole.allSatisfy { $0 > 0.3 }, "whole once told apart")
         XCTAssertEqual(
             VideoBar.summary(
                 duration: 1200, fetched: 1050, reached: reached, translated: [("k2", 900), ("nemo", 450), ("qwen", 150)],
-                speakers: .running
+                speakers: .init(told: 0, telling: 0...1200)
             ),
             "k2 15:00 · nemo 10:00 · qwen 5:00, audio fetched to 17:30 of 20:00\n"
-                + "Translated: k2 15:00 · nemo 7:30 · qwen 2:30\nSpeakers: being told apart"
+                + "Translated: k2 15:00 · nemo 7:30 · qwen 2:30\nSpeakers: being told apart, 0:00–20:00"
+        )
+
+        // A section at a time while the audio comes: told to 10:00, the
+        // next section being told, nothing past it.
+        show(
+            duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached,
+            speakers: .init(told: 600, telling: 600...900)
+        )
+        let told = stride(from: 20.0, to: 580, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
+        XCTAssertTrue(told.allSatisfy { $0 > 0.3 }, "lit as far as told")
+        let telling = stride(from: 620.0, to: 880, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
+        XCTAssertTrue(telling.contains { $0 > 0.3 } && telling.contains { $0 < 0.2 }, "striped over the section being told")
+        let after = stride(from: 920.0, to: 1180, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
+        XCTAssertTrue(after.allSatisfy { $0 < 0.2 }, "nothing past it")
+        snapshot("video-bar-speaker-sections")
+        XCTAssertEqual(
+            VideoBar.summary(duration: 1200, fetched: 1050, reached: reached, speakers: .init(told: 600, telling: 600...900)),
+            "k2 15:00 · nemo 10:00 · qwen 5:00, audio fetched to 17:30 of 20:00\n"
+                + "Speakers: told apart to 10:00, telling 10:00–15:00"
         )
     }
 

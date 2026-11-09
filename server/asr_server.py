@@ -629,8 +629,17 @@ DEV_OTHER_HEARING = os.getenv("LIVETRANS_OTHER_HEARERS", "1") != "0"
 # Whether a production job tells the speakers apart once all the audio is
 # in, then, once its captions are made, cuts them where the speaker changes
 # and has the other recognizers hear each and their text translated, as a
-# step job (see PrefetchJob._finish).
+# step job (see PrefetchJob._cut_sections).
 PRODUCTION_FINISH = os.getenv("LIVETRANS_PRODUCTION_FINISH", "1") != "0"
+# The speaker cuts and the other recognizers go a section of the video at a
+# time, each as soon as the captions and the speakers are past it, rather
+# than once all the captions are made, so on a long video the others begin
+# minutes in. A section ends at the first edge of a batch (a pause) this far
+# on; one that would leave less than SECTION_TAIL after it runs to the end.
+# The speakers are told over as much as has been fetched: the whole of the
+# rest at once when the fetch is done, else a section at a time.
+SECTION_SECONDS = float(os.getenv("LIVETRANS_SECTION_SECONDS", "600"))
+SECTION_TAIL = 60.0
 # Each caption is heard from a little before its start to a little after
 # its end, as a click on it plays it.
 OTHER_LEAD, OTHER_TAIL = 0.5, 0.3
@@ -3133,6 +3142,26 @@ class PrefetchJob:
         # speaker changes; [] when DiariZen could not run, None until it has.
         self.speakers = None
         self.turns = None
+        # Each run of DiariZen's turns by itself, on the samples' clock: its
+        # names are its own, S1 in one run maybe not S1 in the next. Up to
+        # where on the samples' clock the speakers are told (or passed over
+        # where DiariZen failed), and the stretch being told now, in seconds
+        # of the video.
+        self.turn_runs = []
+        self.told = self.offset
+        self.telling = None
+        # The batches' ends, on the samples' clock, where a section may end;
+        # whether the captions have reached the end of the audio, before
+        # they are cut where the speaker changes; and whether they came
+        # whole from the dev cache (or none are made), cut already.
+        self.edges = []
+        self.heard_all = False
+        self.captions_kept = False
+        # The sections cut where the speaker changes, (start, end) in
+        # seconds of the video, for the other recognizers; and whether the
+        # last is among them.
+        self.sections = []
+        self.sections_done = False
         # Each caption heard again by the other recognizers, once all are
         # made: by the caption's (start, end), {name: text}. Kept in the dev
         # cache (DEV_OTHER_HEARERS).
@@ -3159,16 +3188,15 @@ class PrefetchJob:
         if not step or DEV_CAPTIONS:
             threading.Thread(target=self._transcribe, daemon=True).start()
         else:
-            self.captioned = True
+            self.captioned = self.heard_all = self.captions_kept = True
         if step:
             threading.Thread(target=self._analyse, daemon=True).start()
             threading.Thread(target=self._hear_words, daemon=True).start()
+        if step or PRODUCTION_FINISH:
             threading.Thread(target=self._tell_speakers, daemon=True).start()
+            threading.Thread(target=self._cut_sections, daemon=True).start()
             if DEV_OTHER_HEARING:
                 threading.Thread(target=self._hear_others, daemon=True).start()
-        elif PRODUCTION_FINISH:
-            threading.Thread(target=self._tell_speakers, daemon=True).start()
-            threading.Thread(target=self._finish, daemon=True).start()
 
     @property
     def _captioning(self):
@@ -3216,9 +3244,10 @@ class PrefetchJob:
     def _from_cache(self, kept):
         audio, duration, clock = kept
         self.clock = PacketClock.restored(clock) if clock else None
+        # (Before the audio, which _tell_speakers waits for.)
+        self.cached = True
         with self.audio_lock:
             self.audio = audio
-        self.cached = True
         self.fetch_done = True
         if self.duration is None or self.duration <= 0:
             self.duration = duration or self.fetched
@@ -3313,9 +3342,9 @@ class PrefetchJob:
 
     def _transcribe(self):
         """The captions, a batch at a time as the audio comes. A step job's
-        own state is its step's, which may be done before the captions. A
-        step job's are cut where the speaker changes once all are made
-        (DiariZen needs all the audio); or it takes the captions made before
+        own state is its step's, which may be done before the captions. They
+        are cut where the speaker changes a section at a time behind them
+        (see _cut_sections); or a step job takes the captions made before
         over the same audio, from the dev cache, and keeps those it makes
         there."""
         if self.step and self._captions_from_cache():
@@ -3329,35 +3358,8 @@ class PrefetchJob:
                 done = self.fetch_done
             if done and have <= position + 0.05:
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
-                if self.step and DEV_SPEAKER_CUTS:
-                    waited = time.time()
-                    while self.turns is None and not self.stop_event.is_set() and time.time() - waited < DEVTOOL_TIMEOUT:
-                        time.sleep(0.5)
-                    if self.stop_event.is_set():
-                        return
-                    if self.turns:
-                        with self.activity.doing("Cutting captions at speaker changes"):
-                            recut = self._cut_at_speakers()
-                        print(f"prefetch {self.id}: {recut} captions cut at {len(self.turns)} speaker turns", flush=True)
-                        if self.stop_event.is_set():
-                            return
-                if self.step and self.turns:
-                    # Where the speaker cuts went, in seconds of the video
-                    # (no text), for measuring them.
-                    at = sorted(self._video(cut) for cut, why in list(self.grid.reasons.items())
-                                if why.startswith("a change of speaker"))
-                    print(f"prefetch {self.id}: {len(at)} cuts at speaker changes: "
-                          + " ".join(f"{t:.2f}" for t in at), flush=True)
-                if self.step:
-                    if self.cache and self.cache.audio_seconds():
-                        try:
-                            self.cache.save_findings(f"captions-{self.step}", {"lines": self.lines})
-                            self.cache.note_video()
-                        except OSError as exc:
-                            print(f"prefetch {self.id}: captions not cached: {exc}", flush=True)
-                    self.captioned = True
-                    tell(f"{self.step}: {len(self.lines)} captions, the whole of the audio")
-                else:
+                self.heard_all = True
+                if not self.step:
                     self.state = "done"
                 return
             window_end = min(have, position + PREFETCH_SCAN)
@@ -3395,6 +3397,7 @@ class PrefetchJob:
                 return
             position = boundary
             looked = -1.0
+            self.edges.append(self.offset + boundary)
             self.ready = self.offset + boundary
 
     def _analyse(self):
@@ -3550,68 +3553,127 @@ class PrefetchJob:
         print(f"prefetch {self.id}: words re-timed", flush=True)
 
     def _tell_speakers(self):
-        """Who speaks when, once all the audio is in: DiariZen over the whole
-        of it, or what it found before over this very audio."""
-        while not self.stop_event.is_set() and self.state in ("running", "done"):
-            with self.audio_lock:
-                done = self.fetch_done
-            if done:
-                break
-            time.sleep(0.5)
-        else:
-            return
-        if self.cache and (kept := self.cache.load_findings("speakers")):
+        """Who speaks when: DiariZen over the audio from where it last told
+        them, as soon as the captions' batches have an edge a section on
+        (see SECTION_SECONDS), or over all the rest at once when the fetch
+        is done; or all of it found before over this very audio."""
+        while not self.stop_event.is_set() and not self.fetch_done and not self.audio.size:
+            time.sleep(0.2)
+        if self.cache and self.cached and (kept := self.cache.load_findings("speakers")):
             self.speakers = [tuple(s) for s in kept.get("speakers", [])]
             self.turns = [(self._samples(a), self._samples(b), who) for a, b, who in self.speakers]
+            self.turn_runs = [self.turns]
+            self.told = self.offset + self.fetched
             return
-        if not self._wait_while_paused():
+        while not self.stop_event.is_set() and self.state in ("running", "done"):
+            if self.fetch_done:
+                end = self.offset + self.fetched
+            else:
+                end = next((e for e in list(self.edges) if e >= self.told + SECTION_SECONDS), None)
+                if end is None:
+                    time.sleep(0.5)
+                    continue
+            if end > self.told + 0.05:
+                if not self._wait_while_paused():
+                    return
+                self._speakers_over(self.told, end)
+            self.told = max(self.told, end)
+            if self.fetch_done:
+                break
+        else:
             return
-        with self.audio_lock:
-            audio = self.audio.copy()
-        try:
-            with self.activity.doing("Speaker detection"):
-                found = run_devtool("diarize", {}, audio)["segments"]
-        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
-            print(f"prefetch {self.id}: speakers: {exc}", flush=True)
-            self.turns = []
-            return
-        self.turns = [(self.offset + a, self.offset + b, who) for a, b, who in found]
-        self.speakers = [(round(self._video(self.offset + a), 3), round(self._video(self.offset + b), 3), who) for a, b, who in found]
-        print(f"prefetch {self.id}: {len({s[2] for s in self.speakers})} speakers told apart", flush=True)
-        if self.cache:
+        print(f"prefetch {self.id}: {len({s[2] for s in self.speakers or []})} speakers told apart in "
+              f"{len(self.turn_runs)} runs", flush=True)
+        if self.cache and self.speakers is not None:
             try:
                 self.cache.save_findings("speakers", {"speakers": [list(s) for s in self.speakers]})
             except OSError as exc:
                 print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
 
-    def _finish(self):
-        """A production job's speaker cuts and other recognizers, as a step
-        job's, each given to the client as it is done, once all the captions
-        are made: each caption a change of speaker falls inside heard again
-        and cut there, by the speakers _tell_speakers told apart (DiariZen,
-        started once all the audio is in, beside the captioning); then each
-        caption heard by the other recognizers and what they heard
-        translated (see _hear_others), each caption heard once. Nothing of
-        it is kept."""
-        while not self.stop_event.is_set() and self.state == "running":
-            time.sleep(0.5)
-        if self.stop_event.is_set() or self.state != "done":
+    def _speakers_over(self, low, high):
+        """DiariZen over `low`..`high` of the audio, on the samples' clock;
+        its turns added to the job's, none when it fails."""
+        with self.audio_lock:
+            audio = self.audio[int((low - self.offset) * SAMPLE_RATE):int((high - self.offset) * SAMPLE_RATE)].copy()
+        self.telling = (round(self._video(low), 2), round(self._video(high), 2))
+        try:
+            with self.activity.doing("Speaker detection"):
+                found = run_devtool("diarize", {}, audio)["segments"]
+        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            print(f"prefetch {self.id}: speakers: {exc}", flush=True)
+            self.turns = self.turns or []
             return
-        waited = time.time()
-        while self.turns is None and not self.stop_event.is_set() and time.time() - waited < DEVTOOL_TIMEOUT:
+        finally:
+            self.telling = None
+        turns = [(low + a, low + b, who) for a, b, who in found]
+        self.turn_runs.append(turns)
+        self.turns = (self.turns or []) + turns
+        self.speakers = (self.speakers or []) + [
+            (round(self._video(a), 3), round(self._video(b), 3), who) for a, b, who in turns]
+
+    def _section_after(self, low):
+        """Where the section from `low` (the samples' clock) ends, once the
+        captions are past it, and whether it is the last; None when the job
+        is stopped, has failed, or its captions have."""
+        while not self.stop_event.is_set() and self.state != "failed" and not self.caption_error:
+            heard_all = self.heard_all
+            later = [e for e in list(self.edges) if e >= low + SECTION_SECONDS]
+            if heard_all:
+                end = max(self.offset + self.fetched, low)
+                if later and end - later[0] >= SECTION_TAIL:
+                    return later[0], False
+                return end, True
+            if later and not (self.duration and self.duration - self._video(later[0]) < SECTION_TAIL):
+                return later[0], False
             time.sleep(0.5)
-        if self.turns and not self.stop_event.is_set():
-            with self.activity.doing("Cutting captions at speaker changes"):
-                recut = self._cut_at_speakers()
-            if self.stop_event.is_set():
+        return None
+
+    def _cut_sections(self):
+        """The captions a section at a time, once they and the speakers are
+        past it: each caption a change of speaker falls inside heard again
+        and cut there, then given to the other recognizers (see
+        _hear_others). Once the last is cut, the captions are done, and a
+        step job keeps them."""
+        low = self.offset
+        while True:
+            section = self._section_after(low)
+            if section is None:
                 return
-            print(f"prefetch {self.id}: {recut} captions cut at {len(self.turns)} speaker turns", flush=True)
-        if self.stop_event.is_set():
-            return
-        # The captions as they will stay, which the others wait for.
+            high, last = section
+            while self.told < high - 0.05 and not self.stop_event.is_set() and self.state != "failed":
+                time.sleep(0.5)
+            if self.stop_event.is_set() or self.state == "failed":
+                return
+            a, b = self._video(low), self._video(high)
+            if DEV_SPEAKER_CUTS and not self.captions_kept and self.turns:
+                with self.activity.doing("Cutting captions at speaker changes"):
+                    recut = self._cut_at_speakers(a, b if not last else float("inf"))
+                if self.stop_event.is_set():
+                    return
+                print(f"prefetch {self.id}: {recut} captions cut in {a:.0f}-{b:.0f}s", flush=True)
+            self.sections.append((a, b if not last else float("inf")))
+            if last:
+                break
+            low = high
+        if self.step and self.turns:
+            # Where the speaker cuts went, in seconds of the video (no
+            # text), for measuring them.
+            at = sorted(self._video(cut) for cut, why in list(self.grid.reasons.items())
+                        if why.startswith("a change of speaker"))
+            print(f"prefetch {self.id}: {len(at)} cuts at speaker changes: "
+                  + " ".join(f"{t:.2f}" for t in at), flush=True)
+        if self.step and not self.captions_kept:
+            if self.cache and self.cache.audio_seconds():
+                try:
+                    self.cache.save_findings(f"captions-{self.step}", {"lines": self.lines})
+                    self.cache.note_video()
+                except OSError as exc:
+                    print(f"prefetch {self.id}: captions not cached: {exc}", flush=True)
+            tell(f"{self.step}: {len(self.lines)} captions, the whole of the audio")
+        # The captions as they will stay, which the others' last section
+        # waits for.
         self.captioned = True
-        if DEV_OTHER_HEARING:
-            self._hear_others()
+        self.sections_done = True
 
     def _wait_while_paused(self):
         """Holds the thread while the job is paused (Stop, in either mode),
@@ -3621,17 +3683,22 @@ class PrefetchJob:
             time.sleep(0.5)
         return not self.stop_event.is_set()
 
-    def _cut_at_speakers(self):
-        """Each caption a change of speaker falls inside heard again and cut
-        there, the new pieces given to the client. How many were cut."""
-        floor = steady_floor(self.turns)
-        changes = [self._video(end) for (_, end, before), (_, _, after) in zip(floor, floor[1:]) if before != after]
+    def _cut_at_speakers(self, low, high):
+        """Each caption starting in `low`..`high` of the video that a change
+        of speaker falls inside heard again and cut there, the new pieces
+        given to the client. How many were cut."""
+        # Each run of DiariZen by itself: its names are not the next one's.
+        changes = []
+        for turns in list(self.turn_runs):
+            floor = steady_floor(turns)
+            changes += [self._video(end) for (_, end, before), (_, _, after) in zip(floor, floor[1:]) if before != after]
         recut = 0
         for line in list(self.lines):
+            if line.get("start") is None or not low <= line["start"] < high:
+                continue
             if not self._wait_while_paused():
                 break
-            if line.get("start") is None or not any(
-                    line["start"] + SPEAKER_SNAP < t < line["end"] - SPEAKER_SNAP for t in changes):
+            if not any(line["start"] + SPEAKER_SNAP < t < line["end"] - SPEAKER_SNAP for t in changes):
                 continue
             try:
                 new = self.rehear(line["start"], line["end"])
@@ -3661,50 +3728,56 @@ class PrefetchJob:
         self.cache.note_video()
         self.feed = list(self.lines)
         self.text = "".join(line["ja"] for line in self.lines)
-        self.captioned = True
+        self.captions_kept = self.heard_all = True
         print(f"prefetch {self.id}: {len(self.lines)} captions from the cache", flush=True)
         tell(f"{self.step}: {len(self.lines)} captions kept from before")
         return True
 
     def _hear_others(self):
         """The other recognizers' text for each caption, then its
-        translation."""
+        translation, a section at a time as each is cut (see
+        _cut_sections). What they heard before over a caption cut the same
+        way is given it from the cache as it comes."""
+        kept = self.others_kept
         try:
-            self._hear_other_texts()
-            self._translate_others()
+            if self.cache:
+                # Whether the audio came from the cache is known with its
+                # first samples; a fetch at playback pace is not waited for.
+                while not self.stop_event.is_set() and not self.fetch_done and not self.audio.size:
+                    time.sleep(0.2)
+                if self.cached and (found := self.cache.load_findings("others")):
+                    # (Less what VibeVoice heard, when it was one of them.)
+                    names = {key for name, _ in DEV_OTHER_HEARERS for key in (name, f"{name}_en")}
+                    kept.update({(a, b): {n: t for n, t in texts.items() if n in names}
+                                 for a, b, texts in found.get("others", [])})
+            done = 0
+            while not self.stop_event.is_set() and not self.caption_error:
+                finished = self.sections_done
+                for span in self._spans():
+                    if span in kept and span not in self.others:
+                        self.others[span] = dict(kept[span])
+                if done < len(self.sections):
+                    low, high = self.sections[done]
+                    done += 1
+                    spans = self._spans(low, high)
+                    self._hear_other_texts(spans)
+                    self._translate_others(spans)
+                elif finished:
+                    break
+                else:
+                    time.sleep(1)
         finally:
             self.others_done = True
 
-    def _hear_other_texts(self):
-        """Each caption heard again by DEV_OTHER_HEARERS, one after another,
-        once the captions have reached the end; a recognizer that is not
-        set up or fails is passed over. What they heard before over a
-        caption cut the same way is given it from the cache as it comes."""
-        kept = self.others_kept
-        if self.cache:
-            while not self.stop_event.is_set() and not self.captioned and not self.cache.audio_seconds():
-                time.sleep(1)
-            if (found := self.cache.load_findings("others")):
-                # (Less what VibeVoice heard, when it was one of them.)
-                names = {key for name, _ in DEV_OTHER_HEARERS for key in (name, f"{name}_en")}
-                kept.update({(a, b): {n: t for n, t in texts.items() if n in names} for a, b, texts in found.get("others", [])})
+    def _spans(self, low=float("-inf"), high=float("inf")):
+        """The captions' (start, end) that start in `low`..`high` of the video."""
+        return [(line["start"], line["end"]) for line in list(self.lines)
+                if line.get("start") is not None and line.get("end") is not None and low <= line["start"] < high]
 
-        def spans():
-            return [(line["start"], line["end"]) for line in list(self.lines) if line.get("start") is not None and line.get("end") is not None]
-
-        while True:
-            finished = self.captioned
-            for span in spans():
-                if span in kept and span not in self.others:
-                    self.others[span] = dict(kept[span])
-            if finished or self.stop_event.is_set() or self.caption_error:
-                break
-            time.sleep(1)
-        if self.stop_event.is_set() or self.caption_error:
-            return
-        spans = spans()
-        with self.audio_lock:
-            audio = self.audio.copy()
+    def _hear_other_texts(self, spans):
+        """The captions at `spans` heard again by DEV_OTHER_HEARERS, one
+        after another; a recognizer that is not set up or fails is passed
+        over."""
         for name, tool in DEV_OTHER_HEARERS:
             if not self._wait_while_paused():
                 return
@@ -3713,6 +3786,11 @@ class PrefetchJob:
                 continue
             t0 = time.time()
             clips = [[max(self._samples(a - OTHER_LEAD) - self.offset, 0), max(self._samples(b + OTHER_TAIL) - self.offset, 0)] for a, b in todo]
+            # Only the stretch they lie in, not all the audio.
+            base = min(c[0] for c in clips)
+            with self.audio_lock:
+                audio = self.audio[int(base * SAMPLE_RATE):int(max(c[1] for c in clips) * SAMPLE_RATE)].copy()
+            clips = [[a - base, b - base] for a, b in clips]
 
             def heard(answer, name=name, todo=todo):
                 self.others.setdefault(todo[answer["i"]], {})[name] = answer["text"]
@@ -3734,20 +3812,25 @@ class PrefetchJob:
         except OSError as exc:
             print(f"prefetch {self.id}: others not cached: {exc}", flush=True)
 
-    def _translate_others(self):
+    def _translate_others(self, spans=None):
         """What the other recognizers heard translated, into "nemo_en" and
         the like beside the text, so the phone can show a caption's
-        translation with whichever text is picked. Each by itself, without
-        the sentences around it; a text that is the caption's own but for
-        its punctuation takes the caption's translation. One that takes
-        too long is left for the next time the job is run."""
+        translation with whichever text is picked: over the captions at
+        `spans`, or all of them. Each by itself, without the sentences
+        around it; a text that is the caption's own but for its
+        punctuation takes the caption's translation. One that takes too
+        long is left for the next time the job is run."""
         if self.stop_event.is_set() or self.caption_error:
             return
         t0 = time.time()
         done, asked, added = {}, 0, 0
+        spans = None if spans is None else set(spans)
         try:
             for line in list(self.lines):
-                texts = self.others.get((line.get("start"), line.get("end")), {})
+                span = (line.get("start"), line.get("end"))
+                if spans is not None and span not in spans:
+                    continue
+                texts = self.others.get(span, {})
                 for name, _ in DEV_OTHER_HEARERS:
                     text = texts.get(name)
                     if not text or f"{name}_en" in texts:
@@ -3865,7 +3948,12 @@ class PrefetchJob:
             "analysed": round(self.analysed, 2),
             "worded": round(self.worded, 2),
             "aligned": self.aligned,
-            "speakers": self.speakers is not None,
+            # Whether the speakers are told apart over all the audio; up
+            # to where in the video they are so far, and the stretch being
+            # told now, [start, end] or None.
+            "speakers": self.fetch_done and self.told >= self.offset + self.fetched - 0.05 and self.telling is None,
+            "spoken": round(self._video(self.told), 2),
+            "telling": list(self.telling) if self.telling else None,
             # How many texts the other recognizers have given so far.
             "others": sum(len(texts) for texts in list(self.others.values())),
             # Whether they are all heard and translated, which keeping the

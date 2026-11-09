@@ -1389,19 +1389,28 @@ struct VideoBar: View {
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.white.opacity(0.08))
                                 .frame(height: Self.laneHeight)
-                            switch speakers {
-                            case .done:
-                                Capsule().fill(Self.speakersColor).frame(width: width, height: Self.laneHeight)
-                            case .running:
-                                // Striped: under way, over all of it at once.
-                                Path { path in
-                                    path.move(to: CGPoint(x: 0, y: Self.laneHeight / 2))
-                                    path.addLine(to: CGPoint(x: width, y: Self.laneHeight / 2))
+                            if let speakers {
+                                if speakers.done {
+                                    Capsule().fill(Self.speakersColor).frame(width: width, height: Self.laneHeight)
+                                } else {
+                                    if speakers.told > 0 {
+                                        stretch(
+                                            0...speakers.told, of: total, in: width, color: Self.speakersColor,
+                                            height: Self.laneHeight
+                                        )
+                                    }
+                                    if let telling = speakers.telling {
+                                        // Striped: under way over that stretch.
+                                        let from = width * Self.fraction(telling.lowerBound, of: total)
+                                        let to = width * Self.fraction(telling.upperBound, of: total)
+                                        Path { path in
+                                            path.move(to: CGPoint(x: from, y: Self.laneHeight / 2))
+                                            path.addLine(to: CGPoint(x: to, y: Self.laneHeight / 2))
+                                        }
+                                        .stroke(Self.speakersColor, style: StrokeStyle(lineWidth: Self.laneHeight, dash: [4, 3]))
+                                        .frame(width: width, height: Self.laneHeight)
+                                    }
                                 }
-                                .stroke(Self.speakersColor, style: StrokeStyle(lineWidth: Self.laneHeight, dash: [4, 3]))
-                                .frame(width: width, height: Self.laneHeight)
-                            case .waiting, nil:
-                                EmptyView()
                             }
                         }
                     }
@@ -1593,11 +1602,17 @@ struct VideoBar: View {
         }
         var lines = [times(reached) + ", audio fetched to \(CaptionRow.timestamp(fetched ?? 0))\(whole)"]
         if !translated.isEmpty { lines.append("Translated: " + times(translated)) }
-        switch speakers {
-        case .waiting: lines.append("Speakers: once the audio is all in")
-        case .running: lines.append("Speakers: being told apart")
-        case .done: lines.append("Speakers: told apart")
-        case nil: break
+        if let speakers {
+            let told = CaptionRow.timestamp(speakers.told)
+            if speakers.done {
+                lines.append("Speakers: told apart")
+            } else if let telling = speakers.telling {
+                let stretch = "\(CaptionRow.timestamp(telling.lowerBound))–\(CaptionRow.timestamp(telling.upperBound))"
+                lines.append(speakers.told > 0 ? "Speakers: told apart to \(told), telling \(stretch)"
+                    : "Speakers: being told apart, \(stretch)")
+            } else {
+                lines.append(speakers.told > 0 ? "Speakers: told apart to \(told)" : "Speakers: once a section's audio is in")
+            }
         }
         return lines.joined(separator: "\n")
     }

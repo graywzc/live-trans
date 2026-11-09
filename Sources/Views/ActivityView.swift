@@ -147,7 +147,11 @@ struct ActivityView: View {
         if job.worded > 0 {
             parts.append("words to \(CaptionRow.timestamp(job.worded))\(job.aligned ? ", re-timed" : "")")
         }
-        if job.spoken { parts.append("speakers told apart") }
+        if job.spoken {
+            parts.append("speakers told apart")
+        } else if job.spokenTo > 0 {
+            parts.append("speakers to \(CaptionRow.timestamp(job.spokenTo))")
+        }
         return parts.joined(separator: " · ")
     }
 
