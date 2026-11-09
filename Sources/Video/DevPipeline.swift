@@ -183,6 +183,9 @@ final class DevPipeline {
 
     private static func failure(_ page: String, _ step: Step) -> String { "\(step.rawValue) \(page)" }
 
+    /// The page whose pre-roll ad was last skipped, so it is told once.
+    private var skippedAdPage: String?
+
     /// Whether what the pipeline makes is kept: Default's, on the host, for
     /// Load, the phone and the picks; Incognito keeps nothing anywhere and
     /// is otherwise the same. See `SidePanel.isDev`.
@@ -743,6 +746,17 @@ final class DevPipeline {
     }
 
     private func startJob(for probe: MediaProbe, client: ASRClient) async {
+        // The site's pre-roll ad, playing before the episode (as the next
+        // episode starts by itself): skipped to its end, so the player goes
+        // on to the episode, and the job waits for a probe that finds it.
+        if probe.isAd {
+            video.send(.end)
+            if skippedAdPage != probe.page {
+                skippedAdPage = probe.page
+                ActivityLog.tell("Skipping the site's ad before the video")
+            }
+            return
+        }
         var headers = ["User-Agent": probe.userAgent]
         if probe.mediaURL != nil { headers["Referer"] = probe.page }
         let title = video.tabs.first { $0.id == probe.tabID }?.title
