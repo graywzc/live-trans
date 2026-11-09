@@ -118,12 +118,14 @@ final class DevPipeline {
     private(set) var others: [OtherHearing] = []
     /// Their texts with readings, by text, made once each.
     @ObservationIgnored private var otherRuby: [String: [RubyToken]] = [:]
-    /// The recognizer picked per caption of this video, by where it starts,
-    /// and what keeps them with the host (Default); in Incognito in memory
-    /// only, let go with the captions. None in the Mac's memory after the
-    /// video.
-    private(set) var picks: [Int: String] = [:]
+    /// The recognizer picked per caption of this video, or the text typed
+    /// in place of theirs, by where it starts, and what keeps them with the
+    /// host (Default); in Incognito in memory only, let go with the
+    /// captions. None in the Mac's memory after the video.
+    private(set) var picks: [Int: Pick] = [:]
     @ObservationIgnored private var pickBook: PickBook?
+    /// Typed texts with readings, by text, made once each.
+    @ObservationIgnored private var typedRuby: [String: [RubyToken]] = [:]
     /// Off at launch, until Start or Load.
     private(set) var isPaused = true
     /// Why the host could not fetch or run over the video, as
@@ -868,20 +870,63 @@ final class DevPipeline {
 
     // MARK: Picks
 
-    /// The recognizer picked for `caption`.
+    /// The recognizer picked for `caption`, or `Pick.typedName` for text
+    /// typed in place of theirs.
     func pickedVersion(for caption: Caption) -> String? {
+        pick(of: caption)?.name
+    }
+
+    /// The text typed for `caption`, as a caption of its own for analysing:
+    /// its moment, an id after its others', and the translation once there
+    /// is one.
+    func typed(for caption: Caption) -> Caption? {
+        guard case .typed(let text, let english) = pick(of: caption) else { return nil }
+        let ruby = typedRuby[text] ?? Furigana.annotate(text)
+        typedRuby[text] = ruby
+        return Caption(
+            id: Self.otherID(of: caption.id, OtherHearing.shown.count), japanese: text, ruby: ruby, english: english,
+            moment: caption.moment
+        )
+    }
+
+    private func pick(of caption: Caption) -> Pick? {
         caption.moment.flatMap { picks[PickClient.place(of: $0.seconds)] }
     }
 
     /// `name`'s text is the caption's from now on; nil takes the pick back,
     /// and all of them show again.
     func pick(_ name: String?, for caption: Caption) {
+        pick(name.map(Pick.recognizer), for: caption)
+    }
+
+    /// `text` is the caption's from now on, in place of every recognizer's,
+    /// translated by the host; blank, the pick is taken back.
+    func type(_ text: String, for caption: Caption) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        pick(text.isEmpty ? nil : .typed(text), for: caption)
+    }
+
+    private func pick(_ pick: Pick?, for caption: Caption) {
         guard let moment = caption.moment else { return }
         let place = PickClient.place(of: moment.seconds)
         if let pickBook {
-            pickBook.pick(name, at: place)
+            pickBook.pick(pick, at: place)
         } else if !keeps() {
-            picks[place] = name
+            picks[place] = pick
+            if let text = pick?.typedText { translate(text, at: place) }
+        }
+    }
+
+    /// Incognito's typed text, translated by the host and kept nowhere but
+    /// in memory, as long as it is still the caption's.
+    private func translate(_ text: String, at place: Int) {
+        let translator = TypedTranslator.over(
+            host: engine.client?.baseURL ?? engine.heldClient?.baseURL, language: AppSettings.serverConfig.target.rawValue
+        )
+        guard let translator else { return }
+        Task {
+            guard let english = await translator.translate(text), picks[place] == .typed(text) else { return }
+            picks[place] = .typed(text, english: english)
         }
     }
 
@@ -899,7 +944,10 @@ final class DevPipeline {
     }
 
     private func openPicks(of video: String) {
-        let book = PickBook(video: video, client: PickClient.over(host: engine.client?.baseURL, video: video))
+        let client = PickClient.over(
+            host: engine.client?.baseURL, video: video, language: AppSettings.serverConfig.target.rawValue
+        )
+        let book = PickBook(video: video, client: client)
         book.onChange = { [weak self] in self?.picks = $0 }
         pickBook = book
         picks = [:]

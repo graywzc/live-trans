@@ -31,13 +31,19 @@ struct CaptionScroll: View {
     let lull: Lull?
     let fontSize: Double
     let showFurigana: Bool
-    /// The recognizer picked for each caption that has one.
-    var picks: [Int: String] = [:]
+    /// The recognizer picked for each caption that has one, or the text
+    /// typed in place of theirs.
+    var picks: [Int: Pick] = [:]
+    /// The typed texts as captions, by the caption's id.
+    var typed: [Int: Caption] = [:]
     /// A tap on a row: plays the sentence again.
     let onTap: (Caption) -> Void
     /// A version's name tapped in a row: picks it, or with nil takes the
     /// pick back.
     var onPick: ((String?, Caption) -> Void)? = nil
+    /// Text typed from a row's pencil: the caption from now on; blank, the
+    /// typed text is dropped. None, and there are no pencils.
+    var onType: ((String, Caption) -> Void)? = nil
     /// The button at a row's end; none, and there is no button.
     var onAnalyze: ((Caption) -> Void)? = nil
     /// The word menu's items, for the word pressed in the caption; none,
@@ -64,9 +70,13 @@ struct CaptionScroll: View {
                         }
                         PhoneCaptionRow(
                             caption: caption, fontSize: fontSize, showFurigana: showFurigana,
-                            isCurrent: caption.id == playingID, picked: picks[caption.id], onTap: { onTap(caption) },
+                            isCurrent: caption.id == playingID, picked: picks[caption.id]?.name,
+                            typed: typed[caption.id], onTap: { onTap(caption) },
                             onPick: onPick.map { pick in { pick($0, caption) } },
-                            onAnalyze: onAnalyze.map { analyze in { analyze(caption.heard(by: picks[caption.id])) } },
+                            onType: onType.map { type in { type($0, caption) } },
+                            onAnalyze: onAnalyze.map { analyze in
+                                { analyze(typed[caption.id] ?? caption.heard(by: picks[caption.id]?.name)) }
+                            },
                             onWord: onWord
                         )
                         .equatable()

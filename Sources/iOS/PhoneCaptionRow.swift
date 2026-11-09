@@ -55,27 +55,37 @@ struct RubyText: View {
 /// spoken. Heard by several recognizers, each one's text is stacked with
 /// its name, a tap on which picks it: the others hide and the translation
 /// is the picked text's, and a tap on the name again brings them back.
-/// A tap elsewhere plays the sentence again; the button at its end, when
-/// there is one, asks for its analysis; a long press on a word, when
-/// there is `onWord`, offers the word menu.
+/// With `onType`, a pencil after each line opens an editor with its text,
+/// for typing the caption when none heard it right: saved, it is picked
+/// under `Pick.typedName`. A tap elsewhere plays the sentence again; the
+/// button at its end, when there is one, asks for its analysis; a long
+/// press on a word, when there is `onWord`, offers the word menu.
 struct PhoneCaptionRow: View, Equatable {
     let caption: Caption
     let fontSize: Double
     let showFurigana: Bool
     var isCurrent = false
-    /// The recognizer picked, of the caption's versions.
+    /// The recognizer picked, of the caption's versions, or
+    /// `Pick.typedName` for `typed`.
     var picked: String? = nil
+    /// The text typed in place of every recognizer's, when there is one.
+    var typed: Caption? = nil
     let onTap: () -> Void
     var onPick: ((String?) -> Void)? = nil
+    /// Takes typed text as the caption; blank, drops it.
+    var onType: ((String) -> Void)? = nil
     var onAnalyze: (() -> Void)? = nil
     var onWord: ((WordAction, String, Caption) -> Void)? = nil
+
+    /// The text in the editor, while it is open.
+    @State private var draft: String?
 
     /// What can change what the row draws: a caption never changes, nor
     /// does what the closures do with it. With `.equatable()` in the list
     /// the lit caption moving on redraws its two rows, not the screenful.
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.caption.id == b.caption.id && a.fontSize == b.fontSize && a.showFurigana == b.showFurigana
-            && a.isCurrent == b.isCurrent && a.picked == b.picked
+            && a.isCurrent == b.isCurrent && a.picked == b.picked && a.typed == b.typed
     }
 
     /// The highlight reaches a little past the text, without moving it.
@@ -84,9 +94,15 @@ struct PhoneCaptionRow: View, Equatable {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                let shown = caption.heard(by: picked)
-                if caption.versions.isEmpty {
-                    ruby(of: shown)
+                let typedPicked = picked == Pick.typedName ? typed : nil
+                let shown = typedPicked ?? caption.heard(by: picked)
+                if let typedPicked {
+                    labelled(Pick.typedName, typedPicked, isPicked: true)
+                } else if caption.versions.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        ruby(of: shown)
+                        typeButton(from: shown.japanese)
+                    }
                 } else if let version = caption.versions.first(where: { $0.name == picked }) {
                     labelled(version)
                 } else {
@@ -96,6 +112,10 @@ struct PhoneCaptionRow: View, Equatable {
                     Text(shown.english)
                         .font(.system(size: fontSize * 0.78))
                         .foregroundStyle(.green)
+                } else if typedPicked != nil {
+                    Text("No translation yet")
+                        .font(.system(size: fontSize * 0.6))
+                        .foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -129,7 +149,40 @@ struct PhoneCaptionRow: View, Equatable {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Plays this sentence again")
+        .alert("The caption", isPresented: Binding(get: { draft != nil }, set: { if !$0 { draft = nil } })) {
+            TextField("As it was said", text: Binding(get: { draft ?? "" }, set: { draft = $0 }))
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                if let draft { onType?(draft) }
+            }
+        } message: {
+            Text("Typed in place of what was heard; the host translates it.")
+        }
     }
+
+    /// A pencil chip after a line that opens the editor with `text`.
+    @ViewBuilder
+    private func typeButton(from text: String) -> some View {
+        if onType != nil {
+            Button {
+                draft = text
+            } label: {
+                Image(systemName: Self.typeSymbol)
+                    .font(.system(size: fontSize * 0.55, weight: .medium))
+                    .foregroundStyle(Color.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Type the caption")
+            // Level with the Japanese, below the row of readings.
+            .padding(.top, showFurigana ? fontSize * 0.45 : 0)
+        }
+    }
+
+    static let typeSymbol = "pencil"
 
     private func ruby(of caption: Caption) -> some View {
         RubyText(
@@ -140,12 +193,16 @@ struct PhoneCaptionRow: View, Equatable {
 
     /// A version's text after its name.
     private func labelled(_ version: CaptionVersion) -> some View {
-        let isPicked = version.name == picked
-        return HStack(alignment: .top, spacing: 6) {
+        labelled(version.name, caption.heard(by: version.name), isPicked: version.name == picked)
+    }
+
+    /// `shown`'s text after `name`, and the pencil after it.
+    private func labelled(_ name: String, _ shown: Caption, isPicked: Bool) -> some View {
+        HStack(alignment: .top, spacing: 6) {
             Button {
-                onPick?(isPicked ? nil : version.name)
+                onPick?(isPicked ? nil : name)
             } label: {
-                Text(version.name)
+                Text(name)
                     .font(.system(size: fontSize * 0.6, weight: .medium))
                     .foregroundStyle(isPicked ? Color.green : Color.secondary)
                     .padding(.horizontal, 8)
@@ -156,10 +213,14 @@ struct PhoneCaptionRow: View, Equatable {
                     .contentShape(Capsule())
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel(isPicked ? "Show all versions" : "Keep \(version.name)'s version")
+            .accessibilityLabel(
+                name == Pick.typedName ? "Drop your text and show all versions"
+                    : isPicked ? "Show all versions" : "Keep \(name)'s version"
+            )
             // Level with the Japanese, below the row of readings.
             .padding(.top, showFurigana ? fontSize * 0.45 : 0)
-            ruby(of: caption.heard(by: version.name))
+            ruby(of: shown)
+            typeButton(from: shown.japanese)
         }
     }
 
