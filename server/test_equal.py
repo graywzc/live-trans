@@ -160,6 +160,36 @@ def test_a_sentence_k2_dropped_is_a_caption_and_one_only_qwen_heard_is_none():
     assert ("nemo", 3) in first and ("qwen", 3) in first
 
 
+def test_a_change_of_speaker_is_cut_where_the_others_heard_it_when_k2_stretches_a_word():
+    # One says あしたはどうかなあ (0-1.5 s), another うんいいよ (1.9-3 s). k2,
+    # whose version is chosen, stretches な across the quiet and times
+    # the last あ into the second turn; nemo and qwen, timed by the
+    # aligner, end the first turn at 1.45 s.
+    grid = srv.CutGrid()
+    grid.add_speech([(0.0, 1.5), (1.9, 3.0)], 0.0, 3.5)
+    (a, b), = grid.clips(0.0, 3.5)
+
+    def spread(text, first, second):
+        chars = list(text)
+        cut = text.index("うん")
+        times = [first[0] + k * (first[1] - first[0]) / cut for k in range(cut)]
+        times += [second[0] + k * (second[1] - second[0]) / (len(chars) - cut) for k in range(len(chars) - cut)]
+        ends = times[1:] + [second[1]]
+        return [[c, t, min(e, t + 0.15), False] for c, t, e in zip(chars, times, ends)]
+
+    k2 = [[c, k * 0.17, (k + 1) * 0.17, False] for k, c in enumerate("あしたはどうか")]
+    k2 += [["な", 1.2, 1.8, False], ["あ", 1.95, 1.97, False]]
+    k2 += [[c, 1.95 + k * 0.2, 2.15 + k * 0.2, False] for k, c in enumerate("うんいいよ")]
+    versions = {"k2": k2, "nemo": spread("あしたはどうかなあうんいいよね", (0.0, 1.45), (2.0, 2.9)),
+                "qwen": spread("あしたもどうかなあうんいいよ", (0.0, 1.45), (2.0, 2.9))}
+    cache = {(round(a, 2), round(b, 2)): {"versions": versions, "readings": {
+        name: [c for c, *_ in chars] for name, chars in versions.items()}, "alone": False}}
+    turns = [(0.0, 1.5, "A"), (1.9, 3.0, "B")]
+    lines = srv.hear_pieces(grid, silence(3.5), 0.0, beam_size=5, prompt="", turns=turns, heard=cache)
+    assert [line["ja"] for line in lines] == ["あしたはどうかなあ", "うんいいよ"], lines
+    assert [line["heard_by"] for line in lines] == ["k2", "k2"]
+
+
 def test_a_job_keeps_the_other_versions_by_the_caption_and_hears_nothing_again():
     job = srv.PrefetchJob.__new__(srv.PrefetchJob)
     job.others = {}
