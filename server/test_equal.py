@@ -190,6 +190,46 @@ def test_a_change_of_speaker_is_cut_where_the_others_heard_it_when_k2_stretches_
     assert [line["heard_by"] for line in lines] == ["k2", "k2"]
 
 
+def test_k2_is_timed_by_the_aligner_and_by_itself_only_when_the_aligner_fails():
+    said = {1.0: {"k2": "あめだね", "nemo": "あめだね", "qwen": "あめだね"}}
+
+    class Aligner:
+        """Each character a point a tenth of a second on from the last."""
+
+        def available(self):
+            return True
+
+        def ask(self, header, audio, lines=True):
+            return {"pieces": [[[0.1 * k, 0.1 * k + 0.02] for k in range(len(p["words"]))] for p in header["pieces"]],
+                    "readings": [list(text) for text in header["read"]]}
+
+    class Down(Aligner):
+        def ask(self, header, audio, lines=True):
+            raise RuntimeError("align failed: out of memory")
+
+    with FakeRecognizers(said):
+        srv._workers["align"] = Aligner()
+        clip, = srv.hear_equally(silence(4.0), [(1.0, 3.0)], began=10.0)
+        assert [round(a, 2) for c, a, b, _ in clip["versions"]["k2"]] == [11.0, 11.1, 11.2, 11.3], clip["versions"]["k2"]
+        assert clip["readings"]["k2"] == list("あめだね")
+        srv._workers["align"] = Down()
+        clip, = srv.hear_equally(silence(4.0), [(1.0, 3.0)], began=10.0)
+        # k2's own times, half a second a character here, moved by K2_LEAD.
+        assert [round(a, 2) for c, a, b, _ in clip["versions"]["k2"]] == [11.15, 11.65, 12.15, 12.65], clip["versions"]["k2"]
+        assert clip.get("alone"), "nemo and qwen untimed are left out"
+
+
+def test_a_vowel_that_draws_out_the_one_before_is_not_aligned_on_its_own():
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "devtools"))
+    import align
+    # でもなあ, そう, こう, ねえ, ちゃあ, and a long-vowel mark after anything.
+    for before, char in [("な", "あ"), ("そ", "う"), ("こ", "う"), ("ね", "え"), ("ちゃ", "あ"), ("ナ", "ア"), ("な", "ー")]:
+        assert align.draws_out(before, char), (before, char)
+    # A new vowel, ん before it, せい (said with its い), nothing before.
+    for before, char in [("な", "い"), ("ん", "あ"), ("せ", "い"), ("", "ー"), ("な", "か")]:
+        assert not align.draws_out(before, char), (before, char)
+
+
 def test_a_job_keeps_the_other_versions_by_the_caption_and_hears_nothing_again():
     job = srv.PrefetchJob.__new__(srv.PrefetchJob)
     job.others = {}

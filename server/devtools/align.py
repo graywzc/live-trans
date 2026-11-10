@@ -19,7 +19,11 @@ time, 13 s of each 19 s batch.
 The model is ReazonSpeech's Japanese wav2vec2, trained on Japanese TV;
 its CTC blank is config.pad_token_id (0), not the tokenizer's pad. A
 character it does not know is aligned by its kana reading (pykakasi), and
-one with no reading it knows is left out of the word."""
+one with no reading it knows is left out of the word. A vowel that only
+draws out the one before it (でもなあ, そう, ねえ, ー) is not aligned: it has
+no start of its own to find, and the model's faint guess at it wanders to
+the next same vowel, even the next speaker's (でもな｜あ葵 for でもなあ｜葵);
+it is timed just after the character it draws out."""
 import json
 import os
 import sys
@@ -27,6 +31,34 @@ import sys
 import numpy as np
 
 MODEL = "reazon-research/japanese-wav2vec2-large-rs35kh"
+
+
+# Each kana's vowel, for telling a vowel that draws out the one before it.
+_VOWEL_ROWS = {
+    "a": "あかさたなはまやらわがざだばぱぁゃゎ",
+    "i": "いきしちにひみりぎじぢびぴぃ",
+    "u": "うくすつぬふむゆるぐずづぶぷぅゅ",
+    "e": "えけせてねへめれげぜでべぺぇ",
+    "o": "おこそとのほもよろをごぞどぼぽぉょ",
+}
+VOWEL_OF = {kana: vowel for vowel, row in _VOWEL_ROWS.items() for kana in row}
+# The vowels a bare vowel kana draws out: お and う both draw out an o (そう).
+DRAWS_OUT = {"あ": "a", "い": "i", "う": "uo", "え": "e", "お": "o"}
+
+
+def _hiragana(text):
+    return "".join(chr(ord(ch) - 0x60) if "ァ" <= ch <= "ヶ" else ch for ch in text)
+
+
+def draws_out(reading_before, text):
+    """Whether `text`, one character, only draws out the vowel `reading_
+    before` (the kana before it) ends in: a long-vowel mark after any kana,
+    or a bare vowel kana after one with that vowel."""
+    if text == "ー":
+        return bool(reading_before)
+    vowel = DRAWS_OUT.get(_hiragana(text))
+    last = VOWEL_OF.get(_hiragana(reading_before[-1:]))
+    return bool(vowel and last and last in vowel)
 
 
 def viterbi(lp, tokens, blank):
@@ -124,8 +156,11 @@ def main():
                         x = x.half()
                     lp = torch.log_softmax(model(x).logits[0].float(), -1).cpu().numpy()
                 hop = clip.size / 16000 / lp.shape[0]
-                tokens, owner = [], []
+                tokens, owner, drawn = [], [], set()
                 for i, word in enumerate(words):
+                    if i and len(word[2]) == 1 and draws_out("".join(part["hira"] for part in kakasi.convert(words[i - 1][2])), word[2]):
+                        drawn.add(i)
+                        continue
                     word_ids = ids(word[2])
                     tokens += word_ids
                     owner += [i] * len(word_ids)
@@ -135,6 +170,8 @@ def main():
                         held = [spans[k] for k in range(len(tokens)) if owner[k] == i and spans[k] is not None]
                         if held:
                             timed[i] = [round(min(h[0] for h in held) * hop, 3), round((max(h[1] for h in held) + 1) * hop, 3)]
+                        elif i in drawn and timed[i - 1]:
+                            timed[i] = [timed[i - 1][1], round(timed[i - 1][1] + hop, 3)]
             result.append(timed)
         found = {"pieces": result}
         if "read" in header:
