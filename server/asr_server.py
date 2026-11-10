@@ -2050,10 +2050,10 @@ STEP_VERSIONS = {
     "speech-mean": "firered-seg30-mean-1",
     "speakers": "diarizen-large-v2-1",
     "others": "k2-nemo-v2-qwen3-asr-equal-1",
-    "words": "nemo-v2-reazon-aligned-1",
+    "words": "nemo-v2-reazon-aligned-2",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-nemo-qwen-equal-1" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-nemo-qwen-equal-aligned-2" for step in DEV_STEPS},
 }
 
 
