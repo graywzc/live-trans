@@ -69,8 +69,40 @@ struct ProcessedVideo: Decodable, Equatable, Identifiable {
     }
 }
 
+/// Has the host forget what dev mode kept, over ssh, so it needs no server
+/// up: the server's own --forget-cache, which also stops a phone copy being
+/// fetched and lists what is left.
+enum KeptVideos {
+    static func forgetCommand(config: ServerConfig, page: String?) -> String {
+        "cd \(config.remoteDir) && \(config.remotePython) asr_server.py --forget-cache"
+            + (page.map { " --page " + SSH.quoted($0) } ?? "")
+    }
+
+    /// How many videos the host forgot: the one at `page`, or every one;
+    /// nil when it could not be asked.
+    static func forget(config: ServerConfig, page: String?) async -> Int? {
+        guard !config.sshHost.isEmpty,
+              let text = await SSH.output(host: config.sshHost, command: forgetCommand(config: config, page: page)) else {
+            return nil
+        }
+        return cleared(from: text)
+    }
+
+    /// The count in the command's answer, its last line.
+    static func cleared(from text: String) -> Int? {
+        struct Answer: Decodable { var cleared: Int }
+        let last = text.split(separator: "\n").last.map(String.init) ?? ""
+        return (try? JSONDecoder().decode(Answer.self, from: Data(last.utf8)))?.cleared
+    }
+}
+
 enum SSH {
     static let baseArguments = ["-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+
+    /// `text` as one word for the remote shell.
+    static func quoted(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
 
     static func process(host: String, command: String) -> Process {
         let process = Process()

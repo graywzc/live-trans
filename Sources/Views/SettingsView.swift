@@ -16,6 +16,11 @@ struct SettingsView: View {
     @AppStorage(AppSettings.translationTarget) private var translationTarget = ServerConfig.Target.english.rawValue
 
     @State private var devices: [AudioInputDevice] = []
+    @State private var confirmForget = false
+    /// What the last Forget did, said under it.
+    @State private var forgotten: String?
+
+    @Environment(DevPipeline.self) private var dev
 
     var body: some View {
         Form {
@@ -57,6 +62,32 @@ struct SettingsView: View {
             } footer: {
                 Text("The server is started over ssh when captioning starts and shut down when it "
                     + "stops. Changes apply the next time you press Start.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                LabeledContent("Kept videos") {
+                    Button("Forget All…", role: .destructive) { confirmForget = true }
+                        .confirmationDialog("Forget every video the host kept?", isPresented: $confirmForget) {
+                            Button("Forget All", role: .destructive) {
+                                forgotten = "Forgetting…"
+                                Task {
+                                    let count = await dev.forgetCache()
+                                    forgotten = count.map { $0 == 0 ? "The host kept nothing." : "Forgot \($0) video\($0 == 1 ? "" : "s")." }
+                                        ?? "The host did not answer over ssh."
+                                }
+                            }
+                        } message: {
+                            Text("Its audio, findings, captions and phone copies. Each is fetched and made again the next time it is captioned.")
+                        }
+                }
+            } header: {
+                Text("Dev mode")
+            } footer: {
+                Text((forgotten.map { $0 + " " } ?? "")
+                    + "What the host keeps of each video captioned in Default, so it loads again at once. "
+                    + "Re-run, under the captions, forgets one video.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

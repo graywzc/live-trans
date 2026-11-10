@@ -4673,7 +4673,17 @@ def main():
         "--target", choices=sorted(TARGETS), default=TARGET,
         help="the language captions are translated into",
     )
+    parser.add_argument(
+        "--forget-cache", action="store_true",
+        help="forget what dev mode kept (of the video at --page alone, when given), print how many, and exit",
+    )
+    parser.add_argument("--page", help="with --forget-cache, the video to forget")
     args = parser.parse_args()
+    if args.forget_cache:
+        # Run over ssh by the app, with or without a server up: before
+        # anything a starting server does, which this is not.
+        print(json.dumps({"cleared": clear_dev_cache(args.page or None)}), flush=True)
+        return
     TARGET = args.target
     # What a server that is no longer running left behind.
     erase_temp_traces()

@@ -89,10 +89,6 @@ struct StepTimeline: View {
                         isMakingVersions: dev.isMakingVersions, refusal: dev.keepRefusal,
                         onRefusalRead: { dev.keepRefusal = nil }
                     )
-                    Button(action: dev.forgetCache) {
-                        Image(systemName: "trash.slash")
-                    }
-                    .help("Have the host forget the videos it fetched and the findings it kept for dev mode")
                 }
                 Button {
                     let line = Self.pointer(

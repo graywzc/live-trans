@@ -243,9 +243,22 @@ final class DevPipeline {
     }
 
     /// Dev mode's Re-run: has the host forget what it kept of the job's
-    /// video, then makes all of it again from a fresh fetch.
-    func rerun() {
-        guard let client = engine.client, let current = job else { return }
+    /// video, then makes all of it again from a fresh fetch. Before a run,
+    /// only forgets what it kept of the video at `page`, for Start to make
+    /// it all again.
+    func rerun(page: String?) {
+        guard engine.isRunning, let client = engine.client, let current = job else {
+            guard let page else { return }
+            Task {
+                guard let count = await KeptVideos.forget(config: AppSettings.serverConfig, page: page) else {
+                    ActivityLog.tell("Could not forget this video's cache: the host did not answer over ssh")
+                    return
+                }
+                await refreshProcessed()
+                ActivityLog.tell(count == 0 ? "The host kept nothing of this video" : "Forgot this video's cache: Start makes all of it again")
+            }
+            return
+        }
         Task {
             do {
                 _ = try await client.clearDevCache(page: current.page)
@@ -368,18 +381,13 @@ final class DevPipeline {
         return playhead.tabID == job.tabID && playhead.url == job.page
     }
 
-    /// Has the host forget the videos and findings dev mode kept, and says
-    /// how many there were.
-    func forgetCache() {
-        guard let client = engine.client else { return }
-        Task {
-            do {
-                let count = try await client.clearDevCache()
-                ActivityLog.tell(count == 0 ? "The host had nothing cached" : "The host forgot \(count) cached video\(count == 1 ? "" : "s")")
-            } catch {
-                ActivityLog.tell("Could not clear the host's cache: \(error.localizedDescription)")
-            }
-        }
+    /// Has the host forget every video and finding dev mode kept, over ssh
+    /// so that no server need be up; how many there were, nil when the host
+    /// could not be asked.
+    func forgetCache() async -> Int? {
+        let count = await KeptVideos.forget(config: AppSettings.serverConfig, page: nil)
+        if count != nil { await refreshProcessed() }
+        return count
     }
 
     /// Puts the pointer at `seconds` of the video, for Space to play from.

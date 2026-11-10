@@ -9,6 +9,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -470,6 +471,27 @@ def test_forgetting_the_phone_s_copy_keeps_the_audio_and_the_index_follows():
     assert os.path.exists(os.path.join(cache, "index.json"))
     assert srv.clear_dev_cache() == 1
     assert os.listdir(cache) == [], os.listdir(cache)
+
+
+def test_the_app_forgets_one_video_or_all_over_ssh_with_no_server_up():
+    cache = srv.DEV_CACHE_DIR
+    pages = ["https://example.com/one", "https://example.com/it's two"]
+    for page in pages:
+        os.makedirs(srv.DevCache(page, None).dir, exist_ok=True)
+
+    def forget(*page):
+        done = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "asr_server.py"), "--forget-cache", *page],
+            env={**os.environ, "LIVETRANS_DEV_CACHE": cache}, capture_output=True, text=True, timeout=60,
+        )
+        return json.loads(done.stdout.strip().splitlines()[-1])["cleared"]
+
+    assert forget("--page", pages[1]) == 1
+    assert not os.path.exists(srv.DevCache(pages[1], None).dir)
+    assert os.path.exists(srv.DevCache(pages[0], None).dir)
+    assert forget("--page", pages[1]) == 0
+    assert forget() == 1
+    assert not os.path.exists(srv.DevCache(pages[0], None).dir)
 
 
 def test_a_page_with_no_direct_link_is_downloaded_by_yt_dlp():
