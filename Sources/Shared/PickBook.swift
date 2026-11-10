@@ -9,6 +9,9 @@ enum Pick: Hashable, Sendable, ExpressibleByStringLiteral {
 
     /// What typed text is shown under, among the recognizers' names.
     static let typedName = "mine"
+    /// Kept for a caption whose host-chosen version was taken back: every
+    /// version shows, as a recognizer by this name has none.
+    static let allName = "all"
 
     init(stringLiteral name: String) {
         self = .recognizer(name)

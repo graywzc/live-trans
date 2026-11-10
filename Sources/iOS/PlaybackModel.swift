@@ -301,7 +301,7 @@ final class PlaybackModel {
     /// and all of them show again.
     func pick(_ name: String?, for caption: Caption) {
         guard let moment = caption.moment else { return }
-        pickBook.pick(name.map(Pick.recognizer), at: PickClient.place(of: moment.seconds))
+        pickBook.pick(caption.pickToKeep(name.map(Pick.recognizer)), at: PickClient.place(of: moment.seconds))
     }
 
     /// `text` is the caption's from now on, in place of every recognizer's,
@@ -310,7 +310,7 @@ final class PlaybackModel {
     func type(_ text: String, for caption: Caption) {
         guard let moment = caption.moment else { return }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        pickBook.pick(text.isEmpty ? nil : .typed(text), at: PickClient.place(of: moment.seconds))
+        pickBook.pick(caption.pickToKeep(text.isEmpty ? nil : .typed(text)), at: PickClient.place(of: moment.seconds))
     }
 
     /// Sends the picks made away from the host and reads the ones made on

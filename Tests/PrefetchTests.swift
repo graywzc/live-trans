@@ -127,6 +127,27 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(Set(ids).count, ids.count)
     }
 
+    /// The host's choice among the recognizers is a pick made for the person:
+    /// shown alone until they take it back, which shows every version, or
+    /// pick another; picking the host's choice again keeps nothing.
+    func testTheHostsChoiceIsAPickThatCanBeTakenBack() {
+        var caption = Caption(id: 1, japanese: "あ", ruby: [], english: "a")
+        caption.heardBy = "nemo"
+        XCTAssertEqual(caption.shownPick(nil, hasOthers: true), "nemo", "chosen for them")
+        XCTAssertNil(caption.shownPick(nil, hasOthers: false), "nothing to choose from")
+        XCTAssertEqual(caption.pickToKeep(nil), .recognizer(Pick.allName), "taken back: every version")
+        XCTAssertNil(caption.shownPick(.recognizer(Pick.allName), hasOthers: true))
+        XCTAssertEqual(caption.pickToKeep("qwen"), .recognizer("qwen"))
+        XCTAssertEqual(caption.shownPick("qwen", hasOthers: true), "qwen")
+        XCTAssertNil(caption.pickToKeep("nemo"), "the host's choice again keeps nothing")
+        XCTAssertEqual(caption.pickToKeep(.typed("い")), .typed("い"))
+        // From a host that chooses nothing, picks are as they were.
+        let plain = Caption(id: 2, japanese: "あ", ruby: [], english: "a")
+        XCTAssertNil(plain.shownPick(nil, hasOthers: true))
+        XCTAssertNil(plain.pickToKeep(nil))
+        XCTAssertEqual(plain.pickToKeep("k2"), .recognizer("k2"))
+    }
+
     /// Incognito's picks are the captions' own, in memory, and go with them.
     @MainActor
     func testAPickInIncognitoLastsUntilTheCaptionsAreCleared() {

@@ -883,7 +883,7 @@ final class DevPipeline {
     /// The recognizer picked for `caption`, or `Pick.typedName` for text
     /// typed in place of theirs.
     func pickedVersion(for caption: Caption) -> String? {
-        pick(of: caption)?.name
+        caption.shownPick(pick(of: caption), hasOthers: !Self.heard(others, over: caption).isEmpty)
     }
 
     /// The text typed for `caption`, as a caption of its own for analysing:
@@ -918,6 +918,7 @@ final class DevPipeline {
 
     private func pick(_ pick: Pick?, for caption: Caption) {
         guard let moment = caption.moment else { return }
+        let pick = caption.pickToKeep(pick)
         let place = PickClient.place(of: moment.seconds)
         if let pickBook {
             pickBook.pick(pick, at: place)
