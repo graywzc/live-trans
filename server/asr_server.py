@@ -2050,10 +2050,10 @@ STEP_VERSIONS = {
     "speech-mean": "firered-seg30-mean-1",
     "speakers": "diarizen-large-v2-1",
     "others": "k2-nemo-v2-qwen3-asr-equal-1",
-    "words": "nemo-v2-reazon-aligned-1",
+    "words": "nemo-v2-reazon-aligned-2",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-nemo-qwen-equal-1" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-nemo-qwen-equal-aligned-2" for step in DEV_STEPS},
 }
 
 
@@ -4673,7 +4673,17 @@ def main():
         "--target", choices=sorted(TARGETS), default=TARGET,
         help="the language captions are translated into",
     )
+    parser.add_argument(
+        "--forget-cache", action="store_true",
+        help="forget what dev mode kept (of the video at --page alone, when given), print how many, and exit",
+    )
+    parser.add_argument("--page", help="with --forget-cache, the video to forget")
     args = parser.parse_args()
+    if args.forget_cache:
+        # Run over ssh by the app, with or without a server up: before
+        # anything a starting server does, which this is not.
+        print(json.dumps({"cleared": clear_dev_cache(args.page or None)}), flush=True)
+        return
     TARGET = args.target
     # What a server that is no longer running left behind.
     erase_temp_traces()

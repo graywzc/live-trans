@@ -32,6 +32,7 @@ struct LiveTransApp: App {
 
         Settings {
             SettingsView()
+                .environment(delegate.devPipeline)
         }
     }
 }

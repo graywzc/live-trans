@@ -172,6 +172,26 @@ final class ServerConfigTests: XCTestCase {
         let chinese = try? JSONDecoder().decode(ServerHealth.self, from: Data(#"{"status":"ok","target":"zh"}"#.utf8))
         XCTAssertEqual(chinese?.translatesInto, .chinese)
     }
+
+    /// Forgetting kept videos runs the server's own command over ssh, the
+    /// page quoted for the shell whatever it holds.
+    func testForgetCommandQuotesThePage() {
+        let config = ServerConfig(
+            sshHost: "gpubox", port: 8770, remoteDir: "~/livetrans",
+            remotePython: "~/venvs/livetrans/bin/python", idleTimeout: 180
+        )
+        XCTAssertEqual(
+            KeptVideos.forgetCommand(config: config, page: nil),
+            "cd ~/livetrans && ~/venvs/livetrans/bin/python asr_server.py --forget-cache"
+        )
+        XCTAssertEqual(
+            KeptVideos.forgetCommand(config: config, page: "https://example.com/v?a=1&b='x'"),
+            "cd ~/livetrans && ~/venvs/livetrans/bin/python asr_server.py --forget-cache --page "
+                + #"'https://example.com/v?a=1&b='\''x'\'''"#
+        )
+        XCTAssertEqual(KeptVideos.cleared(from: "a warning\n{\"cleared\": 2}\n"), 2)
+        XCTAssertNil(KeptVideos.cleared(from: "Traceback"))
+    }
 }
 
 final class FrameChunkerTests: XCTestCase {

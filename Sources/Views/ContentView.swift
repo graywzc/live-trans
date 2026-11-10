@@ -188,7 +188,12 @@ struct ContentView: View {
     private var footer: some View {
         VStack(spacing: 12) {
             let isDev = panel.isDev
-            let canRerun = isDev && engine.isRunning && engine.serverCanPrefetch
+            let page = dev.picked?.page ?? video.controlled?.url
+            let processed = isDev && dev.isProcessed(page)
+            // While the step runs, Re-run makes it all again; before, it
+            // only has the host forget the video, for Start to make it.
+            let running = engine.isRunning && engine.serverCanPrefetch && dev.job != nil
+            let canRerun = isDev && (running || (!engine.isRunning && processed))
             if canRerun || prefetch.playhead != nil {
                 HStack(spacing: 10) {
                     if canRerun {
@@ -201,12 +206,15 @@ struct ContentView: View {
                                 .frame(minWidth: 104)
                         }
                         .controlSize(.small)
-                        .disabled(dev.job == nil)
-                        .help("Forget what the host kept of this video and make it all again: the audio, step \(dev.step.title), speakers, words, captions and the other recognizers")
+                        .help(running
+                            ? "Forget what the host kept of this video and make it all again: the audio, step \(dev.step.title), speakers, words, captions and the other recognizers"
+                            : "Forget what the host kept of this video, so that Start makes it all again: the audio, step \(dev.step.title), speakers, words, captions and the other recognizers")
                         .confirmationDialog("Make this video's dev results again?", isPresented: $confirmRerun) {
-                            Button("Re-run", role: .destructive) { dev.rerun() }
+                            Button("Re-run", role: .destructive) { dev.rerun(page: page) }
                         } message: {
-                            Text("The host forgets what it kept of this video and fetches and makes it all again, which takes several minutes.")
+                            Text(running
+                                ? "The host forgets what it kept of this video and fetches and makes it all again, which takes several minutes."
+                                : "The host forgets what it kept of this video. Start then fetches and makes it all again.")
                         }
                     }
                     if let playhead = prefetch.playhead {
@@ -243,7 +251,6 @@ struct ContentView: View {
             // The host starts and the step runs over the video; in Default,
             // Load for one it has processed, from what it kept of it.
             let loading = engine.isRunning && !dev.isPaused
-            let processed = isDev && dev.isProcessed(dev.picked?.page ?? video.controlled?.url)
             HStack(spacing: 12) {
                 TabPicker()
                     .frame(maxWidth: .infinity, alignment: .leading)
