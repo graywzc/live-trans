@@ -717,6 +717,14 @@ EQUAL_AGREE = 0.3
 # A sentence end the caption's recognizer heard is a cut only when another
 # that punctuates heard one this near.
 EQUAL_END_REACH = 0.4
+# A version's first or last characters, at most EQUAL_STRAY_CHARS of them,
+# kept from the rest of it by this much speech it has no text for, are
+# timed beside the rest: a recognizer that missed one speaker's words
+# (いらっしゃいませ) and heard the next one's (この前…) has its first
+# character, which the aligner hears nowhere, put on the missed words, a
+# second before the one after it (こ｜…｜の前), and the caption cut there.
+EQUAL_STRAY_SPEECH = 0.5
+EQUAL_STRAY_CHARS = 2
 _SENTENCE_ENDS = set("。.!?！？")
 _UNSAID = set("。、，．,.!?！？…‥「」『』（）()[]{}〜~・♪♬♩* \t\n\u3000")
 
@@ -853,7 +861,30 @@ def _place(times, a, b):
     return placed
 
 
-def hear_equally(audio, clips, began=0.0, cache=None):
+def _speech_within(speech, low, high):
+    """How many seconds of `speech` [(start, end)] lie in `low`..`high`."""
+    return sum(max(min(end, high) - max(start, low), 0.0) for start, end in speech)
+
+
+def _unstray(chars, speech):
+    """`chars` [[char, start, end, ends], ...], a version's, with a stray
+    first or last few (see EQUAL_STRAY_SPEECH) timed at the edge of the
+    character beside them, where they were said."""
+    chars = [list(c) for c in chars]
+    for k in range(min(EQUAL_STRAY_CHARS, len(chars) - 1)):
+        if _speech_within(speech, chars[k][2], chars[k + 1][1]) >= EQUAL_STRAY_SPEECH:
+            for c in chars[:k + 1]:
+                c[1] = c[2] = chars[k + 1][1]
+            break
+    for k in range(len(chars) - 1, max(len(chars) - 1 - EQUAL_STRAY_CHARS, 0), -1):
+        if _speech_within(speech, chars[k - 1][2], chars[k][1]) >= EQUAL_STRAY_SPEECH:
+            for c in chars[k:]:
+                c[1] = c[2] = chars[k - 1][2]
+            break
+    return chars
+
+
+def hear_equally(audio, clips, began=0.0, cache=None, speech=None):
     """Each of `clips` [(start, end), ...] (seconds into `audio`, which
     starts `began` into the video) heard by the three recognizers: per
     clip {"versions": {name: [[char, start, end, ends a sentence], ...]},
@@ -864,7 +895,9 @@ def hear_equally(audio, clips, began=0.0, cache=None):
     also reads every version out in kana. k2 keeps its own times, moved by
     K2_LEAD, where the aligner fails or places none of a clip's. A recognizer that fails is left out of the clip. `cache`, a dict,
     keeps each clip heard by its times, so hearing it again (cutting a
-    caption where the speaker changes) runs no recognizer."""
+    caption where the speaker changes) runs no recognizer. `speech`,
+    [(start, end)] in seconds of the video, is where the speech is, for
+    telling a stray first or last character (_unstray)."""
     cache = {} if cache is None else cache
     found = {}
     key = lambda clip: (round(began + clip[0], 2), round(began + clip[1], 2))
@@ -931,6 +964,8 @@ def hear_equally(audio, clips, began=0.0, cache=None):
                     times = _place(timed[name][k], a, b)
                     versions[name] = [[c, began + t0, began + t1, ends] for (c, ends), (t0, t1) in zip(heard, times)]
                     reads[name] = readings[len(todo) * (n + 1) + k]
+            if speech:
+                versions = {name: _unstray(chars, speech) for name, chars in versions.items()}
             # With neither nemo nor qwen to be had, k2 alone, as before; and
             # not kept, so the clip is heard again when it is next asked for.
             found[key((a, b))] = {"versions": versions, "readings": reads, "alone": not names} if versions else {}
@@ -2053,7 +2088,7 @@ STEP_VERSIONS = {
     "words": "nemo-v2-reazon-aligned-2",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-nemo-qwen-equal-aligned-2" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-nemo-qwen-equal-aligned-3" for step in DEV_STEPS},
 }
 
 
@@ -3115,7 +3150,9 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
     words, breaks = [], []
     equal = None
     if heard is not None:
-        equal = hear_equally(audio, [(max(a - began, 0), b - began) for a, b in clips], began, heard)
+        with grid.lock:
+            speech = list(grid.speech)
+        equal = hear_equally(audio, [(max(a - began, 0), b - began) for a, b in clips], began, heard, speech)
         chosen_by = equal_words(equal, words, breaks, began)
     else:
         run_whisper(

@@ -190,6 +190,51 @@ def test_a_change_of_speaker_is_cut_where_the_others_heard_it_when_k2_stretches_
     assert [line["heard_by"] for line in lines] == ["k2", "k2"]
 
 
+def test_a_first_character_the_aligner_puts_on_words_its_version_missed_goes_with_the_rest():
+    # One says おはよう (0.2-1.0 s), another このまえはどうも (1.4-3.0 s).
+    # qwen heard both, and k2 both with words wrong, so qwen's is chosen;
+    # nemo only the second, and the aligner, which hears its こ nowhere,
+    # puts it on the first speaker's words, a second before its の. The
+    # こ goes with the second caption.
+    grid = srv.CutGrid()
+    grid.add_speech([(0.2, 1.0), (1.4, 3.0)], 0.0, 3.5)
+    (a, b), = grid.clips(0.0, 3.5)
+    second = [1.5 + 0.18 * k for k in range(8)]
+    times = {"おはようこのまえはどうも": [0.25, 0.4, 0.6, 0.8] + second,
+             "おはようただはどうも": [0.25, 0.4, 0.6, 0.8] + second[:2] + second[4:],
+             "このまえはどうも": [0.3] + second[1:]}
+
+    class Aligner:
+        def available(self):
+            return True
+
+        def ask(self, header, audio, lines=True):
+            return {"pieces": [[[t - a, t - a + 0.02] for t in times["".join(w[2] for w in p["words"])]]
+                               for p in header["pieces"]],
+                    "readings": [list(text) for text in header["read"]]}
+
+    said = {a: {"k2": "おはようただはどうも", "nemo": "このまえはどうも", "qwen": "おはようこのまえはどうも"}}
+    with FakeRecognizers(said):
+        srv._workers["align"] = Aligner()
+        clip, = srv.hear_equally(silence(3.5), [(a, b)], speech=grid.speech)
+        assert [round(t, 2) for c, t, _, _ in clip["versions"]["nemo"][:2]] == [1.68, 1.68], clip["versions"]["nemo"]
+        assert [round(t, 2) for c, t, _, _ in clip["versions"]["qwen"][:5]] == [0.25, 0.4, 0.6, 0.8, 1.5]
+        lines = srv.hear_pieces(grid, silence(3.5), 0.0, beam_size=5, prompt="",
+                                turns=[(0.2, 1.0, "A"), (1.4, 3.0, "B")], heard={})
+    assert [line["ja"] for line in lines] == ["おはよう", "このまえはどうも"], lines
+
+
+def test_a_stray_last_character_goes_with_the_rest_and_a_word_said_slowly_stays():
+    speech = [(0.0, 1.0), (1.5, 3.0)]
+    # The last character put on the next speaker's words, which this
+    # version missed: back to just after the one before it.
+    chars = [[c, 0.1 * k, 0.1 * k + 0.02, False] for k, c in enumerate("はれるかな")] + [["あ", 2.5, 2.52, False]]
+    assert [round(c[1], 2) for c in srv._unstray(chars, speech)][-1] == 0.42
+    # Characters a pause apart, with little speech between: left alone.
+    chars = [["あ", 0.8, 0.82, False], ["め", 1.55, 1.57, False], ["だ", 1.7, 1.72, False]]
+    assert srv._unstray(chars, speech) == chars
+
+
 def test_k2_is_timed_by_the_aligner_and_by_itself_only_when_the_aligner_fails():
     said = {1.0: {"k2": "あめだね", "nemo": "あめだね", "qwen": "あめだね"}}
 
