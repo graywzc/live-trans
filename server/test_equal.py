@@ -219,6 +219,17 @@ def test_k2_is_timed_by_the_aligner_and_by_itself_only_when_the_aligner_fails():
         assert clip.get("alone"), "nemo and qwen untimed are left out"
 
 
+def test_a_vowel_that_draws_out_the_one_before_is_not_aligned_on_its_own():
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "devtools"))
+    import align
+    # でもなあ, そう, こう, ねえ, ちゃあ, and a long-vowel mark after anything.
+    for before, char in [("な", "あ"), ("そ", "う"), ("こ", "う"), ("ね", "え"), ("ちゃ", "あ"), ("ナ", "ア"), ("な", "ー")]:
+        assert align.draws_out(before, char), (before, char)
+    # A new vowel, ん before it, せい (said with its い), nothing before.
+    for before, char in [("な", "い"), ("ん", "あ"), ("せ", "い"), ("", "ー"), ("な", "か")]:
+        assert not align.draws_out(before, char), (before, char)
+
+
 def test_a_job_keeps_the_other_versions_by_the_caption_and_hears_nothing_again():
     job = srv.PrefetchJob.__new__(srv.PrefetchJob)
     job.others = {}
