@@ -929,8 +929,25 @@ def hear_equally(audio, clips, began=0.0, cache=None):
 
 
 def _reading(heard, name, low=float("-inf"), high=float("inf")):
-    """`name`'s reading of the characters it heard in `low`..`high`."""
-    return "".join(r for (c, a, b, _), r in zip(heard["versions"][name], heard["readings"][name]) if low <= (a + b) / 2 < high)
+    """`name`'s reading of the characters it heard in `low`..`high`. The
+    aligner puts a word's reading on its first character, "" on the rest,
+    so a word a cut falls inside is read in proportion to its characters
+    either side: else a caption cut off at a change of speaker inside
+    what the aligner took for one word (なんて｜うんどうだろう) reads as
+    nothing, no two agree on it, and it is dropped."""
+    chars, reads = heard["versions"][name], heard["readings"][name]
+    parts = []
+    k = 0
+    while k < len(chars):
+        j = k + 1
+        while j < len(chars) and not reads[j]:
+            j += 1
+        inside = [i - k for i in range(k, j) if low <= (chars[i][1] + chars[i][2]) / 2 < high]
+        if inside:
+            size, reading = j - k, reads[k]
+            parts.append(reading[round(len(reading) * inside[0] / size):round(len(reading) * (inside[-1] + 1) / size)])
+        k = j
+    return "".join(parts)
 
 
 def _agreeing(heard, low=float("-inf"), high=float("inf")):

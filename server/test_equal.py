@@ -55,6 +55,19 @@ def test_the_caption_is_the_version_nearest_the_others_and_two_must_agree():
     assert srv.chosen(alone) == "k2"
 
 
+def test_a_word_a_cut_falls_inside_is_read_on_both_sides():
+    # The aligner reads a word on its first character: cut after いくよ,
+    # the second speaker's ねえ is still read, and two agree on it.
+    clip = heard(nemo="いくよねえ", qwen="いくよねえ")
+    for name in clip["readings"]:
+        clip["readings"][name] = ["いくよねえ", "", "", "", ""]
+    assert srv._reading(clip, "nemo") == "いくよねえ"
+    assert srv._reading(clip, "nemo", 0.0, 0.6) == "いくよ"
+    assert srv._reading(clip, "nemo", 0.6, 1.0) == "ねえ"
+    agree, _ = srv._agreeing(clip, 0.6, 1.0)
+    assert agree == {"nemo", "qwen"}
+
+
 def test_the_words_are_the_chosen_ones_with_a_sentence_end_only_where_another_heard_one():
     clip = heard(k2="あめだねいくよ", nemo="あめだね。いくよ。", qwen="あめだねいくよ。")
     words, breaks = [], []
