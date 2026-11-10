@@ -61,7 +61,7 @@ final class RunningStatusTests: XCTestCase {
         )
         XCTAssertEqual(RunningStatus.mark(for: "Audio download"), .init(color: VideoBar.fetchedColor, thick: true))
         XCTAssertEqual(RunningStatus.mark(for: "Speaker detection")?.dashed, true)
-        XCTAssertNil(RunningStatus.mark(for: "Whisper words"))
+        XCTAssertNil(RunningStatus.mark(for: "nemo words"))
         show(["k2 captioning", "Translating qwen captions"], width: 320)
         snapshot("running-colored")
         XCTAssertTrue(hasPixel { $0.blueComponent > $0.redComponent + 0.3 }, "k2's blue")

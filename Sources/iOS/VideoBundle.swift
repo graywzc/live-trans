@@ -12,6 +12,13 @@ struct VideoBundle: Decodable, Equatable, Identifiable {
         /// The other recognizers' text and its translation, by recognizer,
         /// when they heard the line.
         var versions: [String: Version]? = nil
+        /// The recognizer whose text the line is; k2's when not named.
+        var heardBy: String? = nil
+
+        enum CodingKeys: String, CodingKey {
+            case ja, en, start, end, versions
+            case heardBy = "heard_by"
+        }
     }
 
     struct Version: Decodable, Equatable {

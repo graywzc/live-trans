@@ -31,9 +31,22 @@ def test_a_request_too_slow_once_leaves_the_translator_on():
         assert result is None and ok, (slow, result, ok)
 
 
-def test_a_translator_that_is_not_there_is_turned_off():
-    result, ok = with_generate(urllib.error.URLError(ConnectionRefusedError(111, "refused")))
-    assert result is None and not ok
+def test_a_translator_that_is_not_there_fails_what_asked_for_it():
+    try:
+        with_generate(urllib.error.URLError(ConnectionRefusedError(111, "refused")))
+        raise AssertionError("an unreachable translator is raised")
+    except srv.TranslatorDown as exc:
+        assert "out of reach" in str(exc)
+    # And every translation after it fails too, with nothing standing in.
+    ok = srv._ollama_ok
+    srv._ollama_ok = False
+    try:
+        srv.translate_text("今日は雨が降りそうだ")
+        raise AssertionError("no Whisper translation in its place")
+    except srv.TranslatorDown:
+        pass
+    finally:
+        srv._ollama_ok = ok
 
 
 def test_every_request_caps_the_answer():
@@ -87,7 +100,7 @@ def test_a_chinese_translation_is_not_taken_for_a_piece_of_the_transcript():
         srv._ollama_generate = generate
 
 
-def test_whisper_english_is_not_the_fallback_for_chinese():
+def test_a_batch_too_slow_to_translate_is_left_untranslated_with_no_whisper_in_its_place():
     kept = srv.TARGET, srv.run_whisper, srv.translate_ollama, srv._ollama_ok, srv.TRANSLATE_BACKEND
     asked = []
 
@@ -97,14 +110,14 @@ def test_whisper_english_is_not_the_fallback_for_chinese():
 
     srv.run_whisper, srv.translate_ollama, srv._ollama_ok, srv.TRANSLATE_BACKEND = whisper, lambda segments: None, True, "ollama"
     try:
-        srv.TARGET = "zh"
-        _, pairs, _ = srv.transcribe_and_translate(srv.np.zeros(16000, srv.np.float32), beam_size=1)
-        assert pairs == [("雨だね", "")] and asked == ["transcribe"], (pairs, asked)
-        srv.TARGET = "en"
-        _, pairs, _ = srv.transcribe_and_translate(srv.np.zeros(16000, srv.np.float32), beam_size=1)
-        assert pairs == [("雨だね", "It's raining.")], pairs
+        for target in ("zh", "en"):
+            srv.TARGET = target
+            _, pairs, _ = srv.transcribe_and_translate(srv.np.zeros(16000, srv.np.float32), beam_size=1)
+            assert pairs == [("雨だね", "")], (target, pairs)
+        assert asked == ["transcribe", "transcribe"], asked
     finally:
         srv.TARGET, srv.run_whisper, srv.translate_ollama, srv._ollama_ok, srv.TRANSLATE_BACKEND = kept
+
 
 def test_a_translation_still_in_kana_is_the_japanese_again():
     assert srv._left_in_japanese("今日は雨だね")

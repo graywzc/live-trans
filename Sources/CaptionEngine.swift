@@ -188,7 +188,9 @@ final class CaptionEngine {
             guard !line.ja.isEmpty, let start = line.start, let end = line.end else { return nil }
             var moment = VideoMoment(tabID: tabID, url: url, seconds: start)
             moment.end = end
-            return makeCaption(japanese: line.ja, english: line.en, moment: moment)
+            var caption = makeCaption(japanese: line.ja, english: line.en, moment: moment)
+            caption.heardBy = line.heardBy
+            return caption
         }
         guard !captions.isEmpty else { return }
         self.captions = Self.merge(captions, into: self.captions, prompt: "")

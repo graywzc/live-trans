@@ -109,9 +109,20 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(heard.map(\.text), ["丙", "乙"])
         XCTAssertEqual(heard.map(\.english), ["丁", ""], "each with its own translation, once in")
         XCTAssertTrue(DevPipeline.heard(Array(others.prefix(1)), over: caption).isEmpty)
+        // A caption nemo's text was chosen for has k2's under it, and not nemo's again.
+        var nemos = caption
+        nemos.heardBy = "nemo"
+        let k2 = try XCTUnwrap(JSONDecoder().decode(StepFindings.self, from: Data(
+            #"{"analysed": 3, "speech": [], "others": [{"start": 4.2, "end": 8, "k2": "戊", "k2_en": "己", "qwen": "乙", "nemo": "丙"}]}"#.utf8
+        )).others)
+        let underNemo = DevPipeline.heard(k2, over: nemos)
+        XCTAssertEqual(underNemo.map(\.label), ["k2", "qwen"])
+        XCTAssertEqual(underNemo.map(\.english), ["己", ""])
+        XCTAssertEqual(nemos.ownRecognizer, "nemo")
+        XCTAssertEqual(caption.ownRecognizer, "k2", "a host that names none: k2's")
         // Analysed as captions of their own: ids no caption has, and none shared.
         // The last, past the others', is the typed text's.
-        let ids = (1...50).flatMap { id in (0...OtherHearing.shown.count).map { DevPipeline.otherID(of: id, $0) } }
+        let ids = (1...50).flatMap { id in (0...OtherHearing.versions.count).map { DevPipeline.otherID(of: id, $0) } }
         XCTAssertTrue(ids.allSatisfy { $0 < 0 })
         XCTAssertEqual(Set(ids).count, ids.count)
     }

@@ -1,14 +1,14 @@
 #!/bin/bash
 # Sets up the dev mode's heavier tools on the GPU host, each in its own
 # Python beside the server's (which stays on onnxruntime alone):
-#   align   - re-times Whisper's words by CTC forced alignment with
-#             ReazonSpeech's Japanese wav2vec2 (Apache-2.0), PyTorch.
+#   align   - times nemo-v2's and Qwen3-ASR's words by CTC forced
+#             alignment with ReazonSpeech's Japanese wav2vec2 (Apache-2.0).
 #   diarize - tells the speakers apart with DiariZen (code MIT, weights
 #             CC BY-NC 4.0: personal, non-commercial use), Python 3.10
 #             and torch 2.1.1 as it is pinned to.
-#   hear_nemo, hear_qwen - hear each caption again with ReazonSpeech
-#             nemo-v2 (Apache-2.0) and Qwen3-ASR-1.7B (Apache-2.0), to set
-#             beside the captions' own recognizer.
+#   hear_nemo, hear_qwen - ReazonSpeech nemo-v2 (Apache-2.0) and
+#             Qwen3-ASR-1.7B (Apache-2.0), heard beside k2 as equals.
+# Run it again after updating the server: it copies the worker scripts.
 # Usage: setup.sh [DIR], DIR defaulting to ~/livetrans/devtools. Needs uv
 # and git; the models download from Hugging Face on first use.
 set -euo pipefail

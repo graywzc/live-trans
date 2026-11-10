@@ -126,15 +126,16 @@ def test_the_hybrid_takes_whisper_where_reazon_heard_much_less():
     assert [w[0] for w in words] == ["今", "日", "は", "雨", "だ", "大きな", "声で", "叫んでいる。"], words
     assert breaks == [(0, words[0][1]), (5, 5.0)], breaks
 
-def test_reazon_is_the_recognizer_once_installed():
+def test_reazon_is_the_recognizer_and_whisper_stands_in_for_nothing():
     import os, tempfile
     kept = srv.REAZON_DIR
     try:
         srv.REAZON_DIR = tempfile.mkdtemp()
-        assert srv._installed_recognizer() == "whisper", "no model files: Whisper"
+        assert not srv.reazon_installed(), "no model files"
         for name in ("encoder-epoch-99-avg-1.onnx", "decoder-epoch-99-avg-1.onnx", "joiner-epoch-99-avg-1.onnx", "tokens.txt"):
             open(os.path.join(srv.REAZON_DIR, name), "w").close()
-        assert srv._installed_recognizer() == "reazon"
+        assert srv.reazon_installed()
+        assert srv.ASR_BACKEND == "reazon", "and no Whisper standing in when they are missing"
     finally:
         srv.REAZON_DIR = kept
 

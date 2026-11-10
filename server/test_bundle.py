@@ -20,8 +20,11 @@ import asr_server as srv
 # tests put the captions a job would have made where it keeps them.
 srv.DEV_CAPTIONS = False
 srv.DEV_SPEAKER_CUTS = False
+# The recognizers are heard as equals only by the tests about that
+# (test_equal.py), whatever the host has set up.
+srv.EQUAL_HEARING = False
 srv.DEV_OTHER_HEARING = False
-srv.heard_words = lambda audio, start=0.0: []
+srv.heard_words = lambda audio, pieces: [[] for _ in pieces]
 
 
 def _not_set_up(name, header, audio):

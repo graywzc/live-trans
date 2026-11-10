@@ -112,16 +112,15 @@ final class PlaybackModel {
         let ruby = Furigana.annotate(line.ja)
         var versions: [CaptionVersion] = []
         if let others = line.versions, !others.isEmpty {
-            versions = [CaptionVersion(name: ownRecognizer, japanese: line.ja, ruby: ruby, english: line.en)]
+            versions = [CaptionVersion(name: line.heardBy ?? Caption.defaultRecognizer, japanese: line.ja, ruby: ruby, english: line.en)]
             versions += others.sorted { $0.key < $1.key }.map { name, version in
                 CaptionVersion(name: name, japanese: version.ja, ruby: Furigana.annotate(version.ja), english: version.en)
             }
         }
-        return Caption(id: index, japanese: line.ja, ruby: ruby, english: line.en, moment: moment, versions: versions)
+        return Caption(
+            id: index, japanese: line.ja, ruby: ruby, english: line.en, moment: moment, versions: versions, heardBy: line.heardBy
+        )
     }
-
-    /// Who wrote a bundle line's own text.
-    private nonisolated static let ownRecognizer = "k2"
 
     // MARK: Following the video
 

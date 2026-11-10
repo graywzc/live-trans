@@ -113,7 +113,7 @@ final class DevPipeline {
     private(set) var reference: [ReferenceLine] = []
     private(set) var referencePage: String?
     @ObservationIgnored private var matched: (key: [Int], lines: [Int: [String]]) = ([], [:])
-    /// The words Whisper alone hears over the audio, to judge the step by.
+    /// The words nemo-v2 alone hears over the audio, to judge the step by.
     private(set) var words: [HeardWord] = []
     /// Who speaks when, as DiariZen tells the voices apart.
     private(set) var speakers: [SpeakerTurn] = []
@@ -857,7 +857,7 @@ final class DevPipeline {
     }
 
     /// What the other recognizers heard over `caption`, as each is shown:
-    /// those that have heard it, in OtherHearing.shown's order.
+    /// those that have heard it, in OtherHearing.versions's order.
     /// Each as a caption of its own, for analysing: the caption's moment,
     /// and an id of its own no caption has (below zero).
     func others(for caption: Caption) -> [(label: String, sentence: Caption)] {
@@ -875,7 +875,7 @@ final class DevPipeline {
     /// The id the `index`th other recognizer's line under caption `id` is
     /// analysed by: below zero, apart from every caption's and each other's.
     nonisolated static func otherID(of id: Int, _ index: Int) -> Int {
-        -(id * (OtherHearing.shown.count + 1) + index + 1)
+        -(id * (OtherHearing.versions.count + 1) + index + 1)
     }
 
     // MARK: Picks
@@ -894,7 +894,7 @@ final class DevPipeline {
         let ruby = typedRuby[text] ?? Furigana.annotate(text)
         typedRuby[text] = ruby
         return Caption(
-            id: Self.otherID(of: caption.id, OtherHearing.shown.count), japanese: text, ruby: ruby, english: english,
+            id: Self.otherID(of: caption.id, OtherHearing.versions.count), japanese: text, ruby: ruby, english: english,
             moment: caption.moment
         )
     }
@@ -970,13 +970,15 @@ final class DevPipeline {
     }
 
     /// The one of `others` heard over `caption`'s own stretch (the host
-    /// tells each by the caption's times), as `others(for:)` gives it.
+    /// tells each by the caption's times), as `others(for:)` gives it: each
+    /// recognizer but the one the caption is.
     nonisolated static func heard(_ others: [OtherHearing], over caption: Caption) -> [(label: String, text: String, english: String)] {
         guard let moment = caption.moment, let end = moment.end,
               let heard = others.first(where: { abs($0.start - moment.seconds) < 0.01 && abs($0.end - end) < 0.01 })
         else { return [] }
-        return OtherHearing.shown.compactMap { shown in
-            heard[keyPath: shown.text].map { (shown.label, $0, heard[keyPath: shown.english] ?? "") }
+        return OtherHearing.versions.compactMap { shown in
+            guard shown.label != caption.ownRecognizer else { return nil }
+            return heard[keyPath: shown.text].map { (shown.label, $0, heard[keyPath: shown.english] ?? "") }
         }
     }
 

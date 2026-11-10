@@ -1,18 +1,27 @@
-"""Re-times Whisper's words by CTC forced alignment, for the dev timeline.
+"""Times words by CTC forced alignment: nemo-v2's and Qwen3-ASR's, which
+come with no times of their own, for the captions and the timeline.
 
 Run by the server in the align venv (see setup.sh). Reads on stdin one
 line of JSON, {"samples": N, "pieces": [{"start", "length", "words":
 [[start, end, text, probability], ...]}, ...]} (times in seconds; a word's
 within its piece), then N samples of 16 kHz mono audio as little-endian
 int16. Writes {"pieces": [[[start, end] or null, ...], ...]}: each word's
-time re-measured within its piece, in the same order. Only times leave;
-the text comes in by the pipe and is not kept anywhere.
+time measured within its piece, in the same order. With "read": [text,
+...] in the request, also "readings": [[kana, ...], ...], each text's
+reading a character at a time (a word's reading on its first character,
+"" on the rest), for telling whether two recognizers heard the same.
+Only times and readings leave; the text comes in by the pipe and is not
+kept anywhere. With --serve it stays, the model loaded, and answers one
+request after another, a line each. It runs on the GPU where there is one
+(LIVETRANS_ALIGN_DEVICE): on the CPU it took two thirds of the captioning
+time, 13 s of each 19 s batch.
 
 The model is ReazonSpeech's Japanese wav2vec2, trained on Japanese TV;
 its CTC blank is config.pad_token_id (0), not the tokenizer's pad. A
 character it does not know is aligned by its kana reading (pykakasi), and
 one with no reading it knows is left out of the word."""
 import json
+import os
 import sys
 
 import numpy as np
@@ -55,14 +64,24 @@ def viterbi(lp, tokens, blank):
     return spans
 
 
+def read_request():
+    """The next request on stdin, (header, audio), or None at its end."""
+    line = sys.stdin.buffer.readline()
+    if not line.strip():
+        return None
+    header = json.loads(line)
+    audio = np.frombuffer(sys.stdin.buffer.read(header["samples"] * 2), dtype="<i2").astype(np.float32) / 32768
+    return header, audio
+
+
 def main():
     import pykakasi
     import torch
     from transformers import AutoModelForCTC, AutoProcessor
 
-    header = json.loads(sys.stdin.buffer.readline())
-    audio = np.frombuffer(sys.stdin.buffer.read(header["samples"] * 2), dtype="<i2").astype(np.float32) / 32768
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    serve = "--serve" in sys.argv
+    device = os.getenv("LIVETRANS_ALIGN_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
+    torch.set_num_threads(int(os.getenv("LIVETRANS_ALIGN_THREADS", "4")))
     processor = AutoProcessor.from_pretrained(MODEL)
     model = AutoModelForCTC.from_pretrained(MODEL).to(device).eval()
     if device == "cuda":
@@ -81,31 +100,61 @@ def main():
                 out += [single[k] for k in part["hira"] if k in single]
         return out
 
-    result = []
-    for piece in header["pieces"]:
-        words = piece["words"]
-        clip = audio[int(piece["start"] * 16000):int((piece["start"] + piece["length"]) * 16000)]
-        timed = [None] * len(words)
-        if words and clip.size >= 16000:
-            with torch.no_grad():
-                x = processor(clip, sampling_rate=16000, return_tensors="pt").input_values.to(device)
-                if device == "cuda":
-                    x = x.half()
-                lp = torch.log_softmax(model(x).logits[0].float(), -1).cpu().numpy()
-            hop = clip.size / 16000 / lp.shape[0]
-            tokens, owner = [], []
-            for i, word in enumerate(words):
-                word_ids = ids(word[2])
-                tokens += word_ids
-                owner += [i] * len(word_ids)
-            spans = viterbi(lp, np.array(tokens), blank) if tokens and len(tokens) < lp.shape[0] else None
-            if spans:
-                for i in range(len(words)):
-                    held = [spans[k] for k in range(len(tokens)) if owner[k] == i and spans[k] is not None]
-                    if held:
-                        timed[i] = [round(min(h[0] for h in held) * hop, 3), round((max(h[1] for h in held) + 1) * hop, 3)]
-        result.append(timed)
-    json.dump({"pieces": result}, sys.__stdout__)
+    def reading(text):
+        """`text`'s reading, a character at a time."""
+        chars = []
+        for part in kakasi.convert(text):
+            chars += [part["hira"]] + [""] * (len(part["orig"]) - 1)
+        return chars[:len(text)] + [""] * (len(text) - len(chars))
+
+    def answer(header, audio):
+        result = []
+        for piece in header["pieces"]:
+            words = piece["words"]
+            clip = audio[int(piece["start"] * 16000):int((piece["start"] + piece["length"]) * 16000)]
+            # A clip under a second is heard with silence after it to make
+            # one up, as the model takes no less; the times stay the clip's.
+            if 0 < clip.size < 16000:
+                clip = np.concatenate([clip, np.zeros(16000 - clip.size, np.float32)])
+            timed = [None] * len(words)
+            if words and clip.size >= 16000:
+                with torch.no_grad():
+                    x = processor(clip, sampling_rate=16000, return_tensors="pt").input_values.to(device)
+                    if device == "cuda":
+                        x = x.half()
+                    lp = torch.log_softmax(model(x).logits[0].float(), -1).cpu().numpy()
+                hop = clip.size / 16000 / lp.shape[0]
+                tokens, owner = [], []
+                for i, word in enumerate(words):
+                    word_ids = ids(word[2])
+                    tokens += word_ids
+                    owner += [i] * len(word_ids)
+                spans = viterbi(lp, np.array(tokens), blank) if tokens and len(tokens) < lp.shape[0] else None
+                if spans:
+                    for i in range(len(words)):
+                        held = [spans[k] for k in range(len(tokens)) if owner[k] == i and spans[k] is not None]
+                        if held:
+                            timed[i] = [round(min(h[0] for h in held) * hop, 3), round((max(h[1] for h in held) + 1) * hop, 3)]
+            result.append(timed)
+        found = {"pieces": result}
+        if "read" in header:
+            found["readings"] = [reading(text) for text in header["read"]]
+        return found
+
+    while (request := read_request()) is not None:
+        try:
+            found = answer(*request)
+        except Exception as exc:
+            if not serve:
+                raise
+            found = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        if device == "cuda":
+            # What a request held goes back between them; the weights stay.
+            torch.cuda.empty_cache()
+        sys.__stdout__.write(json.dumps(found, ensure_ascii=False) + "\n")
+        sys.__stdout__.flush()
+        if not serve:
+            return
 
 
 if __name__ == "__main__":

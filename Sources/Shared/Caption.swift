@@ -10,6 +10,14 @@ struct Caption: Identifiable, Equatable {
     /// What each recognizer heard, the caption's own first, when others
     /// heard it too.
     var versions: [CaptionVersion] = []
+    /// The recognizer whose text the caption is: of k2, nemo and qwen, the
+    /// one the other two agreed with most. Nil from a host that names
+    /// none, where it is k2's.
+    var heardBy: String?
+
+    /// The name the caption's own text is shown by.
+    var ownRecognizer: String { heardBy ?? Caption.defaultRecognizer }
+    static let defaultRecognizer = "k2"
 
     /// The caption as the recognizer `name` heard it; as it is for a name
     /// it does not have.

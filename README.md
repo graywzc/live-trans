@@ -6,8 +6,9 @@
 Live Japanese captions for whatever your Mac is playing: each line appears with
 furigana above the kanji and an English translation below it.
 
-The Mac only captures audio and draws captions. Transcription (Whisper
-`large-v3`) and translation (an LLM served by ollama) run on **your own GPU
+The Mac only captures audio and draws captions. Transcription (three
+recognizers heard as equals: ReazonSpeech k2, ReazonSpeech nemo-v2 and
+Qwen3-ASR) and translation (an LLM served by ollama) run on **your own GPU
 machine**, reached over ssh. Nothing is sent to a third-party service, except
 the words you choose to look up on [Jisho](https://jisho.org). A sentence can
 also be [taken apart word by word](#sentence-analysis) by an LLM of your own.
@@ -15,7 +16,7 @@ also be [taken apart word by word](#sentence-analysis) by an LLM of your own.
 ```
  Mac                                         GPU host (Linux + CUDA)
  BlackHole -> voice detection -> utterance ---- HTTP ----> asr_server.py
- captions  <- furigana        <- ja + en   <--------------  Whisper large-v3 + ollama
+ captions  <- furigana        <- ja + en   <--------------  k2 + nemo + qwen, ollama
 ```
 
 ## Requirements
@@ -94,8 +95,8 @@ python3 -m venv ~/venvs/livetrans
 ollama pull qwen3.5:9b
 ```
 
-For ReazonSpeech, the speech recognizer the server uses when it finds it
-(recommended for Japanese; otherwise it uses Whisper):
+ReazonSpeech k2, the recognizer the server needs (without it captioning
+fails; nothing stands in for it):
 
 ```
 ~/venvs/livetrans/bin/pip install sherpa-onnx
@@ -108,10 +109,16 @@ ReazonSpeech k2 v2 (Apache-2.0, a zipformer trained on Japanese TV, run by
 sherpa-onnx on the CPU) heard the words right more often than Whisper on the
 episodes we measured: 9% of subtitle lines wrong against 15-16%, mostly
 where Whisper writes a word that sounds the same with the wrong kanji. It
-writes no punctuation, and now and then hears little in a loud, fast scene.
-`LIVETRANS_ASR` picks the recognizer: `whisper`, `reazon`, or `hybrid`
-(ReazonSpeech, with Whisper's words for a clip where ReazonSpeech heard much
-less); `LIVETRANS_REAZON_DIR` points at another model folder.
+writes no punctuation, and in a fast exchange it often keeps only the last
+sentence, so with the dev tools below set up each clip of speech is heard by
+it, nemo-v2 and Qwen3-ASR alike: the caption is the one the other two agree
+with most, the other two its versions, and a stretch only one of them heard
+is no caption (on one episode, 32 subtitle lines wrong or missing against
+65 with k2 alone). `LIVETRANS_EQUAL_HEARING=0` has k2 make the captions
+alone, the others hearing them afterwards. `LIVETRANS_ASR` can still pick
+`whisper` or `hybrid` (ReazonSpeech, with Whisper's words for a clip where
+ReazonSpeech heard much less), the only cases where Whisper is loaded;
+`LIVETRANS_REAZON_DIR` points at another model folder.
 
 `silero_vad.onnx` is Silero VAD v6.2, the authors' own file (MIT, see
 `server/silero_vad.LICENSE`), which the server runs in place of the model
@@ -135,23 +142,28 @@ sherpa-onnx project converted it to ONNX (MIT, see
 FireRedVAD's; without it that step fails and nothing else changes.
 `LIVETRANS_SEGMENTATION_MODEL` points at another file.
 
-Either mode also shows, under its timeline, who speaks when and the words
-Whisper hears, re-timed. Those need two heavier tools, each in its own
-Python beside the server's, set up once on the GPU host with
-`server/devtools/setup.sh` (uv and git needed; about 11 GB with the models,
-which download on first use):
+The other two recognizers, the timing of their words, and, under either
+mode's timeline, who speaks when and the words nemo-v2 hears over all the
+audio, need heavier tools, each in its own Python beside the server's, set
+up once on the GPU host with `server/devtools/setup.sh` (uv and git needed;
+about 11 GB with the models, which download on first use). The server keeps
+them running with their models loaded (nemo-v2 on the CPU, Qwen3-ASR and the
+aligner on the GPU), and lets one GPU job in at a time beside the
+translator:
 
-- the words are re-timed by CTC forced alignment with ReazonSpeech's
+- nemo-v2 (`reazon-research/reazonspeech-nemo-v2`, Apache-2.0) and
+  Qwen3-ASR (`Qwen/Qwen3-ASR-1.7B`, Apache-2.0);
+- their words are timed by CTC forced alignment with ReazonSpeech's
   Japanese wav2vec2 (`reazon-research/japanese-wav2vec2-large-rs35kh`,
-  Apache-2.0), since Whisper's own word times run early and lie end to end
-  across pauses;
+  Apache-2.0), as they give no times of their own;
 - the speakers are told apart by DiariZen
   (`BUT-FIT/diarizen-wavlm-large-s80-md-v2`; code MIT, weights CC BY-NC
   4.0, so for personal, non-commercial use).
 
-They go in `~/livetrans/devtools` (`LIVETRANS_DEVTOOLS` points elsewhere).
-Without them the timeline shows Whisper's own word times and no speakers;
-nothing else changes. Only times come back from them, and the words are
+They go in `~/livetrans/devtools` (`LIVETRANS_DEVTOOLS` points elsewhere);
+after an update of the server, run `setup.sh` again to copy the new worker
+scripts there. Without them k2 makes the captions alone, and the timeline
+shows no words and no speakers. Only times come back from them, and the words are
 never written to disk.
 
 To caption videos ahead from their own audio, the host also needs `ffmpeg`,
@@ -245,11 +257,12 @@ The port only needs to be reachable from the Mac, not from the internet.
 | `LIVETRANS_ASR_MODEL` | `large-v3` | Whisper model. |
 | `LIVETRANS_DEVICE` | `cuda` | Inference device. |
 | `LIVETRANS_COMPUTE_TYPE` | `float16` | Whisper compute type. |
-| `LIVETRANS_TRANSLATE_BACKEND` | `ollama` | `ollama` (LLM; falls back to `whisper` when ollama is unreachable), `whisper` (a second Whisper pass with `task=translate`) or `nllb`. |
+| `LIVETRANS_TRANSLATE_BACKEND` | `ollama` | `ollama` (LLM; with ollama out of reach the captioning fails, nothing stands in for it), `whisper` (a second Whisper pass with `task=translate`) or `nllb`. |
 | `LIVETRANS_OLLAMA_URL` | `http://localhost:11434` | ollama server. |
 | `LIVETRANS_OLLAMA_MODEL` | `qwen3.5:9b` | Model used to split sentences and translate. |
 | `LIVETRANS_OLLAMA_KEEP_ALIVE` | `30m` | How long ollama keeps the model loaded between requests while the server is running; it is unloaded when the server exits. |
-| `LIVETRANS_OLLAMA_TIMEOUT` | `30` | Seconds before a translation falls back to the Whisper pass. |
+| `LIVETRANS_OLLAMA_TIMEOUT` | `30` | Seconds before a batch is left untranslated (the session goes on). |
+| `LIVETRANS_EQUAL_HEARING` | `1` | Hear each clip with k2, nemo-v2 and Qwen3-ASR as equals; `0`, k2 alone. |
 | `LIVETRANS_NLLB_MODEL` | `models/nllb-200-distilled-600M-ct2` | Converted NLLB directory (`nllb` only; also needs `transformers` and `sentencepiece`). |
 
 An LLM is the default because it is the only backend here that translates
@@ -399,11 +412,11 @@ memory (see above).
 In either mode the work after k2 goes a section of about ten minutes at a
 time (`LIVETRANS_SECTION_SECONDS` on the host, ending at the first pause k2's
 batches end in past it), so on a long video nemo and qwen start minutes in
-rather than after the whole of it. DiariZen tells the speakers apart over
-the audio as it comes, a section at a time, or all the rest at once when
-the fetch is done (a section at a time again when that is more than it has
-memory for beside the other models); each section's captions are then cut where the speaker
-changes, heard by the other recognizers, and their text translated, while k2
+rather than after the whole of it. DiariZen tells the speakers apart a
+section at a time, once the captions are past it, never more at once (its
+memory grows with the audio it is given); each section's captions are then
+cut where the speaker changes, by the times the recognizers heard (nothing
+is heard again), and the other versions translated, while the captioning
 goes on with the next. The green lane under the bar shows how far the
 speakers are told apart, striped over the stretch being told. DiariZen's
 names (S1, S2) are its own in each run, so on the timeline S1 in one stretch
