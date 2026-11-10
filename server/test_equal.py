@@ -190,6 +190,35 @@ def test_a_change_of_speaker_is_cut_where_the_others_heard_it_when_k2_stretches_
     assert [line["heard_by"] for line in lines] == ["k2", "k2"]
 
 
+def test_k2_is_timed_by_the_aligner_and_by_itself_only_when_the_aligner_fails():
+    said = {1.0: {"k2": "あめだね", "nemo": "あめだね", "qwen": "あめだね"}}
+
+    class Aligner:
+        """Each character a point a tenth of a second on from the last."""
+
+        def available(self):
+            return True
+
+        def ask(self, header, audio, lines=True):
+            return {"pieces": [[[0.1 * k, 0.1 * k + 0.02] for k in range(len(p["words"]))] for p in header["pieces"]],
+                    "readings": [list(text) for text in header["read"]]}
+
+    class Down(Aligner):
+        def ask(self, header, audio, lines=True):
+            raise RuntimeError("align failed: out of memory")
+
+    with FakeRecognizers(said):
+        srv._workers["align"] = Aligner()
+        clip, = srv.hear_equally(silence(4.0), [(1.0, 3.0)], began=10.0)
+        assert [round(a, 2) for c, a, b, _ in clip["versions"]["k2"]] == [11.0, 11.1, 11.2, 11.3], clip["versions"]["k2"]
+        assert clip["readings"]["k2"] == list("あめだね")
+        srv._workers["align"] = Down()
+        clip, = srv.hear_equally(silence(4.0), [(1.0, 3.0)], began=10.0)
+        # k2's own times, half a second a character here, moved by K2_LEAD.
+        assert [round(a, 2) for c, a, b, _ in clip["versions"]["k2"]] == [11.15, 11.65, 12.15, 12.65], clip["versions"]["k2"]
+        assert clip.get("alone"), "nemo and qwen untimed are left out"
+
+
 def test_a_job_keeps_the_other_versions_by_the_caption_and_hears_nothing_again():
     job = srv.PrefetchJob.__new__(srv.PrefetchJob)
     job.others = {}

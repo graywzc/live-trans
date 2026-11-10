@@ -704,7 +704,12 @@ EQUAL_TIE_ORDER = ("nemo", "qwen", "k2")
 # 15 s, 5 s and 3 s: 4028, 4258, 4543, against nemo's 4449).
 EQUAL_K2_PIECE = 3.0
 # k2's times run this early against where the speech starts, steadily
-# (median 0.15 s, the middle half within 0.05 s of it).
+# (median 0.15 s, the middle half within 0.05 s of it). Used only when the
+# aligner cannot time k2's text: k2 gives each character the one moment it
+# was emitted, the first of each piece at the start of the silence put
+# before it, and a character made to last until the next one runs across
+# a pause (恋なん｜て, its ん half a second long into the next speaker's turn);
+# the aligner places each in the audio, none in a pause.
 K2_LEAD = 0.15
 # How alike two recognizers' readings must be (1 less the edit distance
 # over the longer) to count as having heard the same.
@@ -853,11 +858,11 @@ def hear_equally(audio, clips, began=0.0, cache=None):
     starts `began` into the video) heard by the three recognizers: per
     clip {"versions": {name: [[char, start, end, ends a sentence], ...]},
     "readings": {name: [kana per char]}} with times in seconds of the
-    video, or {} when no one heard anything. k2 on the CPU with its own
-    times, moved by K2_LEAD; nemo-v2 on the CPU and Qwen3-ASR on the GPU,
-    as kept-running workers, at the same time as k2; their text then timed
-    by the aligner, on the GPU, which also reads every version out in
-    kana. A recognizer that fails is left out of the clip. `cache`, a dict,
+    video, or {} when no one heard anything. k2 on the CPU; nemo-v2 on the
+    CPU and Qwen3-ASR on the GPU, as kept-running workers, at the same time
+    as k2; all three's text then timed by the aligner, on the GPU, which
+    also reads every version out in kana. k2 keeps its own times, moved by
+    K2_LEAD, where the aligner fails or places none of a clip's. A recognizer that fails is left out of the clip. `cache`, a dict,
     keeps each clip heard by its times, so hearing it again (cutting a
     caption where the speaker changes) runs no recognizer."""
     cache = {} if cache is None else cache
@@ -896,23 +901,29 @@ def hear_equally(audio, clips, began=0.0, cache=None):
         timed, readings = {}, None
         names = list(chars)
         try:
-            with (activity.doing("Timing nemo and qwen") if activity else contextlib.nullcontext()), _gpu_gate:
+            with (activity.doing("Timing the three versions") if activity else contextlib.nullcontext()), _gpu_gate:
                 answer = _workers["align"].ask({
                     "pieces": [{"start": a, "length": b - a, "words": [[0.0, 0.0, c, 1.0] for c, _ in chars[name][k]]}
-                               for name in names for k, (a, b) in enumerate(todo)],
+                               for name in names for k, (a, b) in enumerate(todo)]
+                              + [{"start": a, "length": b - a, "words": [[0.0, 0.0, c, 1.0] for c, *_ in k2[k]]}
+                                 for k, (a, b) in enumerate(todo)],
                     "read": ["".join(c for c, *_ in k2[k]) for k in range(len(todo))]
                             + ["".join(c for c, _ in chars[name][k]) for name in names for k in range(len(todo))],
                 }, audio, lines=False)
             pieces, readings = answer["pieces"], answer["readings"]
-            for n, name in enumerate(names):
+            for n, name in enumerate(names + ["k2"]):
                 timed[name] = pieces[n * len(todo):(n + 1) * len(todo)]
         except Exception as exc:
-            print(f"nemo and qwen not timed: {exc}", flush=True)
+            print(f"the versions not timed: {exc}", flush=True)
             names = []
         for k, (a, b) in enumerate(todo):
             versions, reads = {}, {}
             if k2[k]:
-                versions["k2"] = [[c, began + start, began + end, False] for c, start, end, _ in k2[k]]
+                aligned = timed["k2"][k] if "k2" in timed else []
+                if any(t is not None for t in aligned):
+                    versions["k2"] = [[c, began + t0, began + t1, False] for (c, *_), (t0, t1) in zip(k2[k], _place(aligned, a, b))]
+                else:
+                    versions["k2"] = [[c, began + start, began + end, False] for c, start, end, _ in k2[k]]
                 reads["k2"] = readings[k] if readings else [c for c, *_ in k2[k]]
             for n, name in enumerate(names):
                 heard = chars[name][k]
