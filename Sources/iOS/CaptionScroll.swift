@@ -70,12 +70,17 @@ struct CaptionScroll: View {
                         }
                         PhoneCaptionRow(
                             caption: caption, fontSize: fontSize, showFurigana: showFurigana,
-                            isCurrent: caption.id == playingID, picked: picks[caption.id]?.name,
+                            isCurrent: caption.id == playingID,
+                            picked: caption.shownPick(picks[caption.id], hasOthers: !caption.versions.isEmpty),
                             typed: typed[caption.id], onTap: { onTap(caption) },
                             onPick: onPick.map { pick in { pick($0, caption) } },
                             onType: onType.map { type in { type($0, caption) } },
                             onAnalyze: onAnalyze.map { analyze in
-                                { analyze(typed[caption.id] ?? caption.heard(by: picks[caption.id]?.name)) }
+                                {
+                                    analyze(typed[caption.id] ?? caption.heard(
+                                        by: caption.shownPick(picks[caption.id], hasOthers: !caption.versions.isEmpty)
+                                    ))
+                                }
                             },
                             onWord: onWord
                         )

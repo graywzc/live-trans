@@ -915,7 +915,7 @@ struct CaptionRow: View {
     /// asking for it.
     var isOtherAnalyzed: (Caption) -> Bool = { _ in false }
     var onAnalyzeOther: (Caption) -> Void = { _ in }
-    /// The recognizer picked, of "k2" and `others`: its line alone shows,
+    /// The recognizer picked, of the caption's own and `others`: its line alone shows,
     /// with its translation. Nil, all of them with the caption's own.
     var picked: String?
     /// A click on a name picks it, or takes the pick back; none, and the
@@ -929,7 +929,7 @@ struct CaptionRow: View {
 
     @State private var isHovered = false
     /// The recognizer whose Chinese is under the lines, of `others`; nil,
-    /// the caption's own, k2's.
+    /// the caption's own.
     @State private var translatedBy: String?
 
     /// The other recognizer picked, when its text is among `others`.
@@ -937,7 +937,7 @@ struct CaptionRow: View {
         others.first { $0.label == picked }
     }
 
-    private var isOwnPicked: Bool { picked == "k2" && !others.isEmpty }
+    private var isOwnPicked: Bool { picked == caption.ownRecognizer && !others.isEmpty }
 
     /// The other recognizer whose Chinese shows: the one picked, else the
     /// one chosen by its 中, while it is still under the caption.
@@ -1024,12 +1024,13 @@ struct CaptionRow: View {
     private var ownLine: some View {
         HStack(alignment: .top, spacing: 6) {
             // With the other recognizers under it, the caption's own
-            // line is named too: ReazonSpeech k2's.
+            // line is named too: the one the other two agreed with most.
             if !others.isEmpty {
                 OtherHearingLine.name(
-                    "k2", fontSize: fontSize, showFurigana: showFurigana, isPicked: isOwnPicked, onPick: onPick
+                    caption.ownRecognizer, fontSize: fontSize, showFurigana: showFurigana, isPicked: isOwnPicked,
+                    onPick: onPick
                 )
-                .help("What ReazonSpeech k2, the captions' own recognizer, heard")
+                .help("What \(caption.ownRecognizer) heard, the caption's own text")
             }
             FuriganaText(
                 tokens: caption.ruby, fontSize: fontSize, showReadings: showFurigana,
@@ -1037,7 +1038,8 @@ struct CaptionRow: View {
             )
             if isTranslationSwitchable, !caption.english.isEmpty {
                 OtherHearingLine.translateButton(
-                    "k2", isTranslated: translatingOther == nil, fontSize: fontSize, showFurigana: showFurigana
+                    caption.ownRecognizer, isTranslated: translatingOther == nil, fontSize: fontSize,
+                    showFurigana: showFurigana
                 ) { translatedBy = nil }
             }
             if let onType {

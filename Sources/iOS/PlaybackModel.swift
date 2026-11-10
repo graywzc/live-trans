@@ -112,16 +112,15 @@ final class PlaybackModel {
         let ruby = Furigana.annotate(line.ja)
         var versions: [CaptionVersion] = []
         if let others = line.versions, !others.isEmpty {
-            versions = [CaptionVersion(name: ownRecognizer, japanese: line.ja, ruby: ruby, english: line.en)]
+            versions = [CaptionVersion(name: line.heardBy ?? Caption.defaultRecognizer, japanese: line.ja, ruby: ruby, english: line.en)]
             versions += others.sorted { $0.key < $1.key }.map { name, version in
                 CaptionVersion(name: name, japanese: version.ja, ruby: Furigana.annotate(version.ja), english: version.en)
             }
         }
-        return Caption(id: index, japanese: line.ja, ruby: ruby, english: line.en, moment: moment, versions: versions)
+        return Caption(
+            id: index, japanese: line.ja, ruby: ruby, english: line.en, moment: moment, versions: versions, heardBy: line.heardBy
+        )
     }
-
-    /// Who wrote a bundle line's own text.
-    private nonisolated static let ownRecognizer = "k2"
 
     // MARK: Following the video
 
@@ -302,7 +301,7 @@ final class PlaybackModel {
     /// and all of them show again.
     func pick(_ name: String?, for caption: Caption) {
         guard let moment = caption.moment else { return }
-        pickBook.pick(name.map(Pick.recognizer), at: PickClient.place(of: moment.seconds))
+        pickBook.pick(caption.pickToKeep(name.map(Pick.recognizer)), at: PickClient.place(of: moment.seconds))
     }
 
     /// `text` is the caption's from now on, in place of every recognizer's,
@@ -311,7 +310,7 @@ final class PlaybackModel {
     func type(_ text: String, for caption: Caption) {
         guard let moment = caption.moment else { return }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        pickBook.pick(text.isEmpty ? nil : .typed(text), at: PickClient.place(of: moment.seconds))
+        pickBook.pick(caption.pickToKeep(text.isEmpty ? nil : .typed(text)), at: PickClient.place(of: moment.seconds))
     }
 
     /// Sends the picks made away from the host and reads the ones made on

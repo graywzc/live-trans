@@ -12,8 +12,8 @@ import SwiftUI
 /// then plays the video from it. The pointer is the one line on the
 /// timeline: where it was put, until Space, and then where the video is.
 /// Under the band, who speaks when (a colour a speaker, as DiariZen tells
-/// the voices apart), and under that the words Whisper alone hears, each
-/// where it was said (re-timed by the aligner once all are heard); those
+/// the voices apart), and under that the words nemo-v2 alone hears, each
+/// where it was said (timed by the aligner); those
 /// outside every stretch of speech are orange, to be checked by ear.
 struct StepTimeline: View {
     @Environment(DevPipeline.self) private var dev
@@ -388,7 +388,7 @@ struct TimelineCanvas: NSViewRepresentable {
     var events = DevPipeline.SoundEvents()
     /// What found the speech, for the band's labels.
     var finder = "the step"
-    /// The words Whisper alone hears, drawn under the band, and whether
+    /// The words nemo-v2 alone hears, drawn under the band, and whether
     /// their times are the aligner's.
     var words: [HeardWord] = []
     var wordsAligned = false
@@ -598,12 +598,11 @@ struct TimelineCanvas: NSViewRepresentable {
             return laid
         }
 
-        /// What a word's label says: the word, when, how sure Whisper is,
-        /// and whether the step found speech there.
+        /// What a word's label says: the word, when, who heard it, and
+        /// whether the step found speech there.
         static func wordLabel(_ word: HeardWord, outside: Bool, aligned: Bool = false) -> String {
             "「\(word.text)」 \(StepTimeline.readout(word.start))–\(StepTimeline.readout(word.end))"
-                + " · Whisper \(String(format: "%.2f", word.probability))"
-                + (aligned ? " · times by the aligner" : " · Whisper's times")
+                + " · heard by nemo" + (aligned ? " · times by the aligner" : "")
                 + (outside ? " · outside the speech found" : "")
         }
 

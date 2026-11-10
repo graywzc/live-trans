@@ -19,10 +19,14 @@ import asr_server as srv
 # have a test of their own.
 srv.DEV_CAPTIONS = False
 srv.DEV_SPEAKER_CUTS = False
+# The recognizers are heard as equals only by the tests about that
+# (test_equal.py), whatever the host has set up.
+srv.EQUAL_HEARING = False
 
-# Whisper is not loaded here: the words a step job hears are made up by
-# the tests that look at them, and none elsewhere.
-srv.heard_words = lambda audio, start=0.0: []
+# nemo-v2 is not run here: the words a step job hears are made up by the
+# tests that look at them, and none elsewhere.
+_heard_words = srv.heard_words
+srv.heard_words = lambda audio, pieces: [[] for _ in pieces]
 
 
 def _not_set_up(name, header, audio):
@@ -322,16 +326,18 @@ def test_a_video_fetched_once_is_kept_for_the_step_to_run_again():
 
 def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_for_next_time():
     cache = fresh_cache()
-    original = srv.speech_stretches, srv.heard_words, srv.WORDS_PIECE, srv.WORDS_OVERLAP
+    original = srv.speech_stretches, srv.heard_words, srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH
     srv.speech_stretches = loud_stretches
-    srv.WORDS_PIECE, srv.WORDS_OVERLAP = 4.0, 2.0
+    srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH = 4.0, 2.0, 4.0
     pieces = []
+    batches = []
 
-    def heard(audio, start=0.0):
+    def heard(audio, given):
         # A made-up word a second, each piece on its own clock. (Jobs of
         # the tests before may still be listening too: theirs are shorter.)
-        pieces.append(audio.size / srv.SAMPLE_RATE)
-        return [(t + 0.1, t + 0.5, f"w{t}", 0.9) for t in range(int(np.ceil(audio.size / srv.SAMPLE_RATE)))]
+        batches.append(len(given))
+        pieces.extend(length for _, length in given)
+        return [[(t + 0.1, t + 0.5, f"w{t}") for t in range(int(np.ceil(length)))] for _, length in given]
 
     srv.heard_words = heard
     try:
@@ -342,9 +348,11 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_for_next_time(
         while job.worded < 8.5 - 0.01 and time.time() < deadline:
             time.sleep(0.1)
     finally:
-        srv.speech_stretches, srv.heard_words, srv.WORDS_PIECE, srv.WORDS_OVERLAP = original
-    # Pieces of 4 s every 2 s: 0-4, 2-6, 4-8, 6-8.5 (the last to the end).
+        srv.speech_stretches, srv.heard_words, srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH = original
+    # Pieces of 4 s every 2 s: 0-4, 2-6, 4-8, 6-8.5 (the last to the end),
+    # those starting in 4 s of audio heard together.
     assert pieces[-4:] == [4.0, 4.0, 4.0, 2.5], pieces
+    assert batches[-2:] == [2, 2], batches
     starts = [w[0] for w in job.words]
     # Each word once, from the piece it starts in the middle of: the first
     # piece keeps its head, each its middle, the last its tail.
@@ -352,7 +360,7 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_for_next_time(
     assert [w[2] for w in job.words] == ["w0", "w1", "w2", "w1", "w2", "w1", "w2", "w1", "w2"], job.words
     assert abs(job.worded - 8.5) < 0.01 and job.status()["worded"] == round(job.worded, 2), (job.worded, job.status()["worded"])
     found = job.findings()
-    assert found["words"][0] == [0.1, 0.5, "w0", 0.9]
+    assert found["words"][0] == [0.1, 0.5, "w0"]
     with open(os.path.join(cache, os.listdir(cache)[0], "speech.json"), encoding="utf-8") as f:
         assert "words" not in json.load(f), "the words are kept apart from the step's findings"
     # Run again over the same video, the words come from the cache, unheard.
@@ -374,53 +382,67 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_for_next_time(
     srv.clear_dev_cache()
 
 
-def test_the_words_are_re_timed_and_the_speakers_told_apart_by_the_dev_tools():
+def test_the_words_are_heard_by_nemo_timed_by_the_aligner_and_the_speakers_told_apart():
     cache = fresh_cache()
-    original = srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.WORDS_PIECE, srv.WORDS_OVERLAP
+    original = (srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.run_devtool_lines,
+                srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH)
     srv.speech_stretches = loud_stretches
-    srv.WORDS_PIECE, srv.WORDS_OVERLAP = 4.0, 2.0
-    srv.heard_words = lambda audio, start=0.0: [(0.5, 0.9, "w", 0.9), (2.5, 3.5, "v", 0.8)]
+    srv.heard_words = _heard_words
+    srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH = 4.0, 2.0, 60.0
     asked = []
+
+    def lines(name, header, audio, on_line):
+        asked.append((name, header, audio.size))
+        for i, _ in enumerate(header["clips"]):
+            # A loop over music, punctuation, and three characters said.
+            on_line({"i": i, "text": "はいはいはいはい。あ、めっ"})
 
     def tool(name, header, audio):
         asked.append((name, header, audio.size))
         if name == "align":
-            # Each word 0.1 s later and shorter than Whisper had it.
-            return {"pieces": [[[w[0] + 0.1, w[1] - 0.1] for w in p["words"]] for p in header["pieces"]]}
+            # The first character 0.5 s into its piece, the second 2.5 s;
+            # the third one it cannot place.
+            return {"pieces": [[[0.5, 0.9], [2.5, 3.5], None] for _ in header["pieces"]]}
         return {"segments": [[1.0, 2.0, "S1"], [4.0, 5.5, "S2"]]}
 
-    srv.run_devtool = tool
+    srv.run_devtool, srv.run_devtool_lines = tool, lines
     try:
         url = wav_file(noise_and_silence([(1, False), (5, True), (1, False)]))
         job = srv.PrefetchJob(url, "https://example.com/y", {}, 7.0, step="speech")
         deadline = time.time() + 15
-        while not (job.aligned and job.speakers is not None) and time.time() < deadline:
+        while not (job.worded >= 7.0 - 0.01 and job.speakers is not None) and time.time() < deadline:
             time.sleep(0.1)
-        # Taken from the cache again, the speakers and the re-timed words
-        # come with no worker run.
+        # Taken from the cache again, the speakers and the words come with
+        # no worker run.
         def again_tool(name, header, audio):
             asked.append((name, header, audio.size))
             return _not_set_up(name, header, audio)
 
         srv.run_devtool = again_tool
+        srv.run_devtool_lines = lambda name, header, audio, on_line: again_tool(name, header, audio)
         again = srv.PrefetchJob(url + ".gone", "https://example.com/y", {}, 7.0, step="speech")
         deadline = time.time() + 15
         # Both come once the audio is in, in either order.
-        while (again.speakers is None or not again.aligned) and time.time() < deadline:
+        while (again.speakers is None or not again.words) and time.time() < deadline:
             time.sleep(0.1)
     finally:
-        srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.WORDS_PIECE, srv.WORDS_OVERLAP = original
+        (srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.run_devtool_lines,
+         srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH) = original
     assert job.aligned and job.status()["aligned"] and job.status()["speakers"]
-    # Pieces of 4 s every 2 s; the word at 0.5 is the first piece's, the
-    # one at 2.5 into each piece is that piece's.
-    assert [w[:2] for w in job.words][:2] == [(0.6, 0.8), (2.6, 3.4)], job.words
+    # Pieces of 4 s every 2 s, the last to the end: 0-4, 2-6, 4-7. The
+    # character at 0.5 is the first piece's, the one 2.5 s into each piece
+    # that piece's; the one the aligner could not place is left out.
+    assert job.words == [(0.5, 0.9, "あ"), (2.5, 3.5, "め"), (4.5, 5.5, "め"), (6.5, 7.5, "め")], job.words
     assert job.findings()["speakers"] == [[1.0, 2.0, "S1"], [4.0, 5.5, "S2"]]
     assert again.speakers == [(1.0, 2.0, "S1"), (4.0, 5.5, "S2")]
     assert again.words == job.words, (again.words, job.words)
     names = [a[0] for a in asked]
-    assert sorted(set(names)) == ["align", "diarize"], names
+    assert sorted(set(names)) == ["align", "diarize", "hear_nemo"], names
+    nemo = next(h for n, h, _ in asked if n == "hear_nemo")
+    assert nemo["clips"] == [[0.0, 4.0], [2.0, 6.0], [4.0, 7.0]], nemo["clips"]
     align = next(h for n, h, _ in asked if n == "align")
-    assert align["pieces"][0]["words"][0] == [0.5, 0.9, "w", 0.9]
+    # The loop and the punctuation are not given it.
+    assert [w[2] for w in align["pieces"][0]["words"]] == ["あ", "め", "っ"], align["pieces"][0]
     folder = os.path.join(cache, os.listdir(cache)[0])
     assert sorted(os.listdir(folder)) == ["audio.json", "audio.s16", "speakers.json", "speech.json", "words.json"], os.listdir(folder)
     for name in ("speakers.json", "speech.json"):
@@ -702,7 +724,7 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
             a, b = pieces[0]
             return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": 2.0},
                     {"ja": "はい", "en": "yes", "start": 2.0, "end": round(b, 2)}]
-        beside.append(diarizing.wait(10))
+        beside.append(diarizing.is_set())
         return [{"ja": "ことばはい", "en": "words yes", "start": round(a, 2), "end": round(b, 2)} for a, b in pieces]
 
     def tool(name, header, audio):
@@ -742,7 +764,7 @@ def test_a_production_job_cuts_its_captions_where_the_speaker_changes_then_has_t
     assert [(o["nemo"], o["nemo_en"], o["qwen_en"]) for o in found["others"]] == [
         ("hear_nemoのことば", "译:hear_nemoのことば", "译:hear_qwenのことば")] * 2, found["others"]
     assert status["captions"] == "done", status
-    assert beside and all(beside), "DiariZen began while the captions were made"
+    assert beside and not any(beside), "DiariZen waits for the captions over its stretch, which come first"
     assert found["speakers"], "the speakers are told, for the timeline"
     assert not os.listdir(cache), "a production job keeps nothing"
 
@@ -769,8 +791,10 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
         if name != "diarize":
             return _not_set_up(name, header, audio)
         asked.append((name, round(audio.size / srv.SAMPLE_RATE)))
-        # Two voices in the speech of the second section only.
-        return {"segments": [[3.0, 3.45, "S1"], [3.45, 3.9, "S2"]]}
+        # Two voices in the speech of the second section only (3-3.9 s of
+        # the video), told on its own clock.
+        second = sum(1 for a in asked if a[0] == "diarize") == 2
+        return {"segments": [[1.0, 1.45, "S1"], [1.45, 1.9, "S2"]] if second else []}
 
     def other(name, header, audio, on_line):
         asked.append((name, len(header["clips"])))
@@ -802,9 +826,10 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
     # Sections end at the batches' edges, the last running to the end.
     assert [(round(a), b if b == float("inf") else round(b)) for a, b in job.sections] == [
         (0, 2), (2, 4), (4, 6), (6, float("inf"))], job.sections
-    # The whole audio was in at once, so the speakers were told over all of
-    # it in one run; the others heard each section's captions by themselves.
-    assert asked[0] == ("diarize", 7), asked
+    # The whole audio was in at once, yet the speakers were told a section
+    # at a time behind the captions, never more (DiariZen's memory grows
+    # with the audio); the others heard each section's captions by themselves.
+    assert [a for a in asked if a[0] == "diarize"] == [("diarize", 2)] * 3 + [("diarize", 1)], asked
     nemo = [a[1] for a in asked if a[0] == "hear_nemo"]
     assert len(nemo) == 4 and nemo[1] == 2, asked
     # The caption of the second section was cut where the voice changed,
@@ -903,7 +928,7 @@ def test_the_speakers_past_the_first_section_are_told_when_the_fetch_ends_while_
     assert status["speakers"] and status["spoken"] >= 6.9, status
 
 
-def test_a_video_too_long_for_diarizen_at_once_has_its_speakers_told_a_section_at_a_time():
+def test_a_video_all_in_at_once_has_its_speakers_told_a_section_at_a_time():
     url = wav_file(noise_and_silence([(1, False), (0.9, True), (0.1, False)] * 3 + [(1, False)]))
 
     def diarize(job, audio):
@@ -912,10 +937,26 @@ def test_a_video_too_long_for_diarizen_at_once_has_its_speakers_told_a_section_a
         return {"segments": [[0.0, 0.5, "S1"]]}
 
     told, status = speakers_of_a_long_video(url, diarize)
-    # All of it at once, then sections ending at the captions' batches,
-    # the last running to the end.
-    assert told == [7, 2, 2, 2, 1], told
+    # Never all of it at once, which runs DiariZen out of memory: sections
+    # ending at the captions' batches, the last running to the end.
+    assert told == [2, 2, 2, 1], told
     assert status["speakers"] and status["spoken"] >= 6.9, status
+
+
+def test_a_job_fails_when_the_translator_is_out_of_reach():
+    original = srv.speech_stretches, srv.hear_pieces
+
+    def heard(grid, audio, start, **kwargs):
+        raise srv.TranslatorDown("the translator (ollama qwen3.5:9b) is out of reach")
+
+    srv.speech_stretches, srv.hear_pieces = (lambda audio, model=None: loud_stretches(audio)), heard
+    try:
+        url = wav_file(noise_and_silence([(1, False), (2, True), (1, False)]))
+        job = srv.PrefetchJob(url, "https://example.com/untranslated", {}, 4.0)
+        wait_for(job, "failed")
+    finally:
+        srv.speech_stretches, srv.hear_pieces = original
+    assert "out of reach" in job.status()["error"], job.status()
 
 
 def test_a_paused_production_job_runs_nothing_until_it_is_resumed_and_then_goes_on():

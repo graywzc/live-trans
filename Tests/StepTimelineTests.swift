@@ -348,10 +348,10 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertEqual(moved?.contentView.bounds.minX ?? -1, 2000 - 240, accuracy: 1)
     }
 
-    func testAWordComesAsStartEndTextAndHowSure() throws {
-        let data = Data(#"{"analysed": 3, "speech": [[1, 2]], "words": [[1.2, 1.5, "word", 0.93]], "worded": 30}"#.utf8)
+    func testAWordComesAsStartEndText() throws {
+        let data = Data(#"{"analysed": 3, "speech": [[1, 2]], "words": [[1.2, 1.5, "word"]], "worded": 30}"#.utf8)
         let findings = try JSONDecoder().decode(StepFindings.self, from: data)
-        XCTAssertEqual(findings.words, [HeardWord(start: 1.2, end: 1.5, text: "word", probability: 0.93)])
+        XCTAssertEqual(findings.words, [HeardWord(start: 1.2, end: 1.5, text: "word")])
         XCTAssertEqual(findings.worded, 30)
         var job = DevPipeline.Job(id: "a", tabID: 1, page: "p", step: .speech, duration: 60)
         job.fetched = 60
@@ -363,9 +363,9 @@ final class StepTimelineTests: XCTestCase {
 
     func testTheWordsAreUnderTheBandWhereTheyWereSaidAndThoseOutsideTheSpeechStandOut() {
         let words = [
-            HeardWord(start: 1.2, end: 1.6, text: "aa", probability: 0.9),
-            HeardWord(start: 1.3, end: 1.5, text: "bb", probability: 0.8),
-            HeardWord(start: 3.3, end: 3.8, text: "cc", probability: 0.4),
+            HeardWord(start: 1.2, end: 1.6, text: "aa"),
+            HeardWord(start: 1.3, end: 1.5, text: "bb"),
+            HeardWord(start: 3.3, end: 3.8, text: "cc"),
         ]
         show(words: words)
         snapshot("step-timeline-words")
@@ -376,11 +376,11 @@ final class StepTimelineTests: XCTestCase {
         XCTAssertGreaterThan(lane.minY, canvas.band.maxY, "under the band")
         XCTAssertEqual(
             canvas.label(at: NSPoint(x: 25, y: lane.midY)),
-            "「aa」 0:01.20–0:01.60 · Whisper 0.90 · Whisper's times"
+            "「aa」 0:01.20–0:01.60 · heard by nemo"
         )
         XCTAssertEqual(
             canvas.label(at: NSPoint(x: 70, y: lane.midY)),
-            "「cc」 0:03.30–0:03.80 · Whisper 0.40 · Whisper's times · outside the speech found"
+            "「cc」 0:03.30–0:03.80 · heard by nemo · outside the speech found"
         )
         // The word in the pause is drawn orange; the ones in speech are not.
         XCTAssertTrue(isLit(CGRect(x: 66, y: lane.minY, width: 12, height: lane.height), hue: .orange))

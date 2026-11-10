@@ -109,11 +109,43 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(heard.map(\.text), ["丙", "乙"])
         XCTAssertEqual(heard.map(\.english), ["丁", ""], "each with its own translation, once in")
         XCTAssertTrue(DevPipeline.heard(Array(others.prefix(1)), over: caption).isEmpty)
+        // A caption nemo's text was chosen for has k2's under it, and not nemo's again.
+        var nemos = caption
+        nemos.heardBy = "nemo"
+        let k2 = try XCTUnwrap(JSONDecoder().decode(StepFindings.self, from: Data(
+            #"{"analysed": 3, "speech": [], "others": [{"start": 4.2, "end": 8, "k2": "戊", "k2_en": "己", "qwen": "乙", "nemo": "丙"}]}"#.utf8
+        )).others)
+        let underNemo = DevPipeline.heard(k2, over: nemos)
+        XCTAssertEqual(underNemo.map(\.label), ["k2", "qwen"])
+        XCTAssertEqual(underNemo.map(\.english), ["己", ""])
+        XCTAssertEqual(nemos.ownRecognizer, "nemo")
+        XCTAssertEqual(caption.ownRecognizer, "k2", "a host that names none: k2's")
         // Analysed as captions of their own: ids no caption has, and none shared.
         // The last, past the others', is the typed text's.
-        let ids = (1...50).flatMap { id in (0...OtherHearing.shown.count).map { DevPipeline.otherID(of: id, $0) } }
+        let ids = (1...50).flatMap { id in (0...OtherHearing.versions.count).map { DevPipeline.otherID(of: id, $0) } }
         XCTAssertTrue(ids.allSatisfy { $0 < 0 })
         XCTAssertEqual(Set(ids).count, ids.count)
+    }
+
+    /// The host's choice among the recognizers is a pick made for the person:
+    /// shown alone until they take it back, which shows every version, or
+    /// pick another; picking the host's choice again keeps nothing.
+    func testTheHostsChoiceIsAPickThatCanBeTakenBack() {
+        var caption = Caption(id: 1, japanese: "あ", ruby: [], english: "a")
+        caption.heardBy = "nemo"
+        XCTAssertEqual(caption.shownPick(nil, hasOthers: true), "nemo", "chosen for them")
+        XCTAssertNil(caption.shownPick(nil, hasOthers: false), "nothing to choose from")
+        XCTAssertEqual(caption.pickToKeep(nil), .recognizer(Pick.allName), "taken back: every version")
+        XCTAssertNil(caption.shownPick(.recognizer(Pick.allName), hasOthers: true))
+        XCTAssertEqual(caption.pickToKeep("qwen"), .recognizer("qwen"))
+        XCTAssertEqual(caption.shownPick("qwen", hasOthers: true), "qwen")
+        XCTAssertNil(caption.pickToKeep("nemo"), "the host's choice again keeps nothing")
+        XCTAssertEqual(caption.pickToKeep(.typed("い")), .typed("い"))
+        // From a host that chooses nothing, picks are as they were.
+        let plain = Caption(id: 2, japanese: "あ", ruby: [], english: "a")
+        XCTAssertNil(plain.shownPick(nil, hasOthers: true))
+        XCTAssertNil(plain.pickToKeep(nil))
+        XCTAssertEqual(plain.pickToKeep("k2"), .recognizer("k2"))
     }
 
     /// Incognito's picks are the captions' own, in memory, and go with them.

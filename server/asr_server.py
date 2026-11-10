@@ -223,29 +223,49 @@ def events_since(since):
 _asr = None
 _nllb = None
 _nllb_tok = None
-# Flipped false when ollama proves unreachable so each utterance doesn't pay a
-# connection attempt; translation then falls back to the Whisper pass until
-# the server is restarted.
+# Flipped false when ollama proves unreachable. Nothing stands in for it:
+# captions without their translation are no use, so from then on every
+# translation fails (TranslatorDown) and so does the job asking for it.
 _ollama_ok = TRANSLATE_BACKEND == "ollama"
+
+
+class TranslatorDown(RuntimeError):
+    """The translator, ollama, is out of reach: the job wanting it fails."""
 # Whether to send "think": false. qwen-style thinking models need it or they
 # burn latency on reasoning tokens; older models reject the field with a 400.
 _ollama_supports_think = True
 # Whisper and NLLB each hold their own CUDA context; serialize access so
 # concurrent requests can't interleave batches on the same model.
 _asr_lock = threading.Lock()
+# Held while Whisper is loaded, so two first callers load it once.
+_whisper_lock = threading.Lock()
 _nllb_lock = threading.Lock()
 
 _UNTRANSLATABLE = set("。、，．,.!?！？…‥「」『』（）()[]{}〜ー・~-—♪♬♩* \t\n")
 
 
-def load_models():
-    global _asr, _nllb, _nllb_tok
-    from faster_whisper import WhisperModel
+def _whisper():
+    """Whisper, loaded the first time it is wanted: at start when it
+    captions (LIVETRANS_ASR whisper or hybrid), else never; it stands in
+    for nothing, so ReazonSpeech leaves its few GB of the GPU free."""
+    global _asr
+    with _whisper_lock:
+        if _asr is None:
+            from faster_whisper import WhisperModel
 
-    print(f"loading ASR {ASR_MODEL} on {DEVICE}/{COMPUTE_TYPE} ...", flush=True)
-    t0 = time.time()
-    _asr = WhisperModel(ASR_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
-    print(f"  ASR ready in {time.time() - t0:.1f}s", flush=True)
+            print(f"loading ASR {ASR_MODEL} on {DEVICE}/{COMPUTE_TYPE} ...", flush=True)
+            t0 = time.time()
+            _asr = WhisperModel(ASR_MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
+            print(f"  ASR ready in {time.time() - t0:.1f}s", flush=True)
+        return _asr
+
+
+def load_models():
+    global _nllb, _nllb_tok
+    if ASR_BACKEND != "reazon":
+        _whisper()
+    elif not reazon_installed():
+        print(f"ReazonSpeech k2 is not set up in {REAZON_DIR}: captions will fail", flush=True)
 
     if TRANSLATE_BACKEND == "ollama":
         threading.Thread(target=warm_ollama, daemon=True).start()
@@ -282,8 +302,8 @@ def decode_pcm(pcm_bytes):
 
 
 # The speech recognizer that writes the Japanese, LIVETRANS_ASR, else
-# ReazonSpeech when it is installed (see _installed_recognizer): "whisper"
-# (faster-whisper, ASR_MODEL) or "reazon": ReazonSpeech k2 (a zipformer trained on Japanese
+# The captions' recognizer, "reazon" unless LIVETRANS_ASR says "whisper"
+# (faster-whisper, ASR_MODEL) or "hybrid": ReazonSpeech k2 (a zipformer trained on Japanese
 # TV, run by sherpa-onnx on the CPU), which on two episodes heard the words
 # right more often (227 of 287 subtitle lines against 200), mostly where
 # Whisper wrote a word that sounds the same with the wrong kanji. It writes
@@ -292,21 +312,19 @@ def decode_pcm(pcm_bytes):
 REAZON_DIR = os.path.expanduser(os.getenv("LIVETRANS_REAZON_DIR", "~/livetrans/reazonspeech"))
 
 
-def _installed_recognizer():
-    """ReazonSpeech where its model files and sherpa-onnx are on the host,
-    else Whisper. With them, ReazonSpeech alone left the fewest captions
-    wrong on both episodes measured (9% of subtitle lines against Whisper's
-    15-16%), though on one it heard next to nothing in a loud, fast scene
-    ("hybrid" keeps Whisper for those)."""
+def reazon_installed():
+    """Whether ReazonSpeech's model files and sherpa-onnx are on the host.
+    Without them the captions fail rather than fall back to Whisper: k2
+    alone left the fewest captions wrong on both episodes measured (9% of
+    subtitle lines against Whisper's 15-16%), and with nemo and qwen beside
+    it fewer still."""
     import importlib.util
 
     files = ("encoder-epoch-99-avg-1.onnx", "decoder-epoch-99-avg-1.onnx", "joiner-epoch-99-avg-1.onnx", "tokens.txt")
-    if all(os.path.exists(os.path.join(REAZON_DIR, f)) for f in files) and importlib.util.find_spec("sherpa_onnx"):
-        return "reazon"
-    return "whisper"
+    return all(os.path.exists(os.path.join(REAZON_DIR, f)) for f in files) and bool(importlib.util.find_spec("sherpa_onnx"))
 
 
-ASR_BACKEND = (os.getenv("LIVETRANS_ASR") or _installed_recognizer()).lower()
+ASR_BACKEND = (os.getenv("LIVETRANS_ASR") or "reazon").lower()
 # ReazonSpeech is given a clip of speech at a time, none longer than this:
 # a 30 s stretch with a long quiet part in it came out as two characters,
 # where 15 s pieces of it were heard whole. A longer clip is cut at its
@@ -338,13 +356,14 @@ def _reazon_recognizer():
     return _reazon
 
 
-def _reazon_pieces(audio, start, end):
-    """`start`..`end` (seconds into `audio`) in pieces of at most
-    REAZON_PIECE, each long one cut at the quietest tenth of a second in the
-    second half of its first REAZON_PIECE."""
+def _reazon_pieces(audio, start, end, piece=None):
+    """`start`..`end` (seconds into `audio`) in pieces of at most `piece`
+    (REAZON_PIECE), each long one cut at the quietest tenth of a second in
+    the second half of its first `piece`."""
+    piece = piece or REAZON_PIECE
     pieces = []
-    while end - start > REAZON_PIECE:
-        low, high = start + REAZON_PIECE / 2, start + REAZON_PIECE
+    while end - start > piece:
+        low, high = start + piece / 2, start + piece
         steps = np.arange(low, high - 0.1, 0.1)
         energy = [float(np.mean(audio[int(t * SAMPLE_RATE):int((t + 0.1) * SAMPLE_RATE)] ** 2)) for t in steps]
         cut = float(steps[int(np.argmin(energy))]) + 0.05
@@ -354,19 +373,20 @@ def _reazon_pieces(audio, start, end):
     return pieces
 
 
-def run_reazon(audio, words=None, breaks=None, clips=None, vad=False):
+def run_reazon(audio, words=None, breaks=None, clips=None, vad=False, piece=None):
     """run_whisper's transcription with ReazonSpeech in Whisper's place:
     the same segments, `words` (here each character, from its time to the
     next one's) and `breaks`. `clips` are [(start, end), ...] in seconds;
     without them the speech is found first, or with `vad` off the whole of
-    the audio is taken."""
+    the audio is taken. `piece`, the longest stretch heard at once
+    (REAZON_PIECE)."""
     if audio.size == 0:
         return []
     length = audio.size / SAMPLE_RATE
     if clips is None:
         found = speech_clips(audio) if vad else [0.0, length]
         clips = list(zip(found[::2], found[1::2]))
-    pieces = [p for a, b in clips for p in _reazon_pieces(audio, max(a, 0.0), min(b, length)) if p[1] - p[0] > 0.05]
+    pieces = [p for a, b in clips for p in _reazon_pieces(audio, max(a, 0.0), min(b, length), piece) if p[1] - p[0] > 0.05]
     pad = np.zeros(int(REAZON_PAD * SAMPLE_RATE), dtype=np.float32)
     texts = []
     with _reazon_lock:
@@ -507,7 +527,7 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
     else:
         clips = "0"
     with _asr_lock:
-        segments, _ = _asr.transcribe(
+        segments, _ = _whisper().transcribe(
             audio, language="ja", task=task, beam_size=beam_size, clip_timestamps=clips,
             initial_prompt=prompt or None, word_timestamps=words is not None,
         )
@@ -524,38 +544,58 @@ def run_whisper(audio, beam_size=3, task="transcribe", prompt=None, words=None, 
         return texts
 
 
-# Dev mode hears the words over the whole of a step job's audio, with
-# Whisper alone (no speech finder), so the timeline can show where each
-# word was said and a stretch the finder missed or made up can be told by
-# ear: in pieces this long, each overlapping the next by WORDS_OVERLAP, a
-# word owned by the piece it starts nearest the middle of. A piece of 20 s
-# rather than Whisper's own 30: one that opens on a song skipped and
-# smeared the dialogue after it (10 words in 25 s of talk, four of them
-# stretched over seconds, against 60 and none at 20 s).
+# Dev mode hears the words over the whole of a step job's audio with
+# ReazonSpeech nemo-v2 alone (no speech finder), so the timeline can show
+# where each word was said and a stretch the finder missed or made up can
+# be told by ear: in pieces this long, each overlapping the next by
+# WORDS_OVERLAP, a word owned by the piece it starts nearest the middle
+# of. A piece of 20 s: one of 30 that opened on a song skipped and smeared
+# the dialogue after it (with Whisper, which heard the words before).
+# nemo-v2 rather than Whisper: over a whole episode its words lay on more
+# of the subtitled lines (347 of 369 against 335) and flagged more of the
+# speech the finder left out, and Whisper no longer needs to be loaded.
 WORDS_PIECE = 20.0
 WORDS_OVERLAP = 5.0
+# How much audio the pieces are heard in at a time: each batch starts the
+# hear_nemo and align tools afresh, each loading its model, so a piece at
+# a time would spend more time loading than hearing.
+WORDS_BATCH = 120.0
+# The same one to four characters said four times or more in a row, as
+# nemo-v2 hears over music (はいはいはい…): taken out, not words.
+_WORD_LOOP = re.compile(r"(.{1,4}?)\1{3,}")
+# One heavy job on the GPU at a time beside the translator, which stays
+# loaded: Qwen3-ASR, the aligner and DiariZen take turns. DiariZen holds
+# 4.6 GB over a whole episode; let in beside the other two (and an older
+# server still running) it ran the card out of memory, and they with it.
+_gpu_gate = threading.Lock()
+# What nemo-v2 writes that is not said, which the aligner cannot place.
+_UNSPOKEN = set("。、，．,.!?！？…‥「」『』（）()[]{}〜~・♪♬♩* \t\n\u3000")
 
 
-def heard_words(audio, start=0.0):
-    """The words Whisper hears in `audio`, a piece from `start` seconds in,
-    as [(start, end, text, probability), ...], the times in seconds into
-    the piece, with no speech finder and nothing carried from before."""
-    if audio.size == 0:
-        return []
-    with _asr_lock:
-        segments, _ = _asr.transcribe(
-            audio, language="ja", beam_size=3, word_timestamps=True, condition_on_previous_text=False,
-        )
-        return [
-            (round(w.start, 3), round(w.end, 3), w.word.strip(), round(w.probability, 3))
-            for s in segments for w in (s.words or []) if w.word.strip()
-        ]
+def heard_words(audio, pieces):
+    """The words nemo-v2 hears in each of `pieces`, [(start, length), ...]
+    in seconds into `audio`, as a list per piece of (start, end, text),
+    the times in seconds into the piece: each character it heard, timed by
+    the aligner (nemo-v2 gives no times of its own), less any it could not
+    place. Raises RuntimeError when either tool is not set up or fails."""
+    texts = [""] * len(pieces)
+
+    def heard(line):
+        texts[line["i"]] = line["text"]
+
+    run_devtool_lines("hear_nemo", {"clips": [[start, start + length] for start, length in pieces]}, audio, heard)
+    chars = [[ch for ch in _WORD_LOOP.sub("", text) if ch not in _UNSPOKEN] for text in texts]
+    with _gpu_gate:
+        timed = run_devtool("align", {"pieces": [
+            {"start": start, "length": length, "words": [[0.0, 0.0, ch, 1.0] for ch in heard_chars]}
+            for (start, length), heard_chars in zip(pieces, chars)
+        ]}, audio)["pieces"]
+    return [[(t[0], t[1], ch) for ch, t in zip(heard_chars, times) if t] for heard_chars, times in zip(chars, timed)]
 
 
 # Dev mode's heavier tools, each in its own Python beside the server's (see
-# devtools/setup.sh): "align" re-times the words Whisper heard by CTC
-# forced alignment (Whisper's own word times run early and lie end to end
-# across pauses), "diarize" tells the speakers apart. Run as workers that
+# devtools/setup.sh): "align" times the words nemo-v2 heard by CTC
+# forced alignment, "diarize" tells the speakers apart. Run as workers that
 # take the audio on stdin and give back times only.
 DEVTOOLS_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEVTOOLS", "~/livetrans/devtools"))
 # A worker that takes longer than this is given up on.
@@ -643,6 +683,297 @@ SECTION_TAIL = 60.0
 # Each caption is heard from a little before its start to a little after
 # its end, as a click on it plays it.
 OTHER_LEAD, OTHER_TAIL = 0.5, 0.3
+
+
+# The three recognizers as equals: each clip of speech the speech finder
+# found is heard by k2, nemo-v2 and Qwen3-ASR alike, nemo's and qwen's
+# text timed by the aligner (they give no times), and per clip the one
+# the other two agree with most becomes the caption, the others its
+# versions; a stretch only one of them heard is no caption. On a whole
+# episode against its subtitles this left 24 lines wrong or missing where
+# k2 alone left 63: k2 drops most of a fast exchange, keeping its last
+# sentence. Off (LIVETRANS_EQUAL_HEARING=0), or with nemo, qwen or the
+# aligner not set up, k2 makes the captions alone and the others hear
+# them afterwards.
+EQUAL_HEARING = os.getenv("LIVETRANS_EQUAL_HEARING", "1") != "0"
+RECOGNIZERS = ("k2", "nemo", "qwen")
+# Who a tie goes to: nemo-v2 judged best of the three on its own.
+EQUAL_TIE_ORDER = ("nemo", "qwen", "k2")
+# k2 hears a clip in pieces no longer than this: in longer ones it keeps
+# only the last sentence of a fast exchange (an episode's characters, at
+# 15 s, 5 s and 3 s: 4028, 4258, 4543, against nemo's 4449).
+EQUAL_K2_PIECE = 3.0
+# k2's times run this early against where the speech starts, steadily
+# (median 0.15 s, the middle half within 0.05 s of it).
+K2_LEAD = 0.15
+# How alike two recognizers' readings must be (1 less the edit distance
+# over the longer) to count as having heard the same.
+EQUAL_AGREE = 0.3
+# A sentence end the caption's recognizer heard is a cut only when another
+# that punctuates heard one this near.
+EQUAL_END_REACH = 0.4
+_SENTENCE_ENDS = set("。.!?！？")
+_UNSAID = set("。、，．,.!?！？…‥「」『』（）()[]{}〜~・♪♬♩* \t\n\u3000")
+
+
+class Worker:
+    """A dev tool kept running in its --serve mode, its model loaded, so a
+    request pays no loading: started on the first, started again after it
+    dies. One request at a time. It goes with the server: its stdin ends
+    when the server does, however it ends."""
+
+    def __init__(self, name):
+        self.name = name
+        self.process = None
+        self.errors = None
+        self.lock = threading.Lock()
+
+    def available(self):
+        return all(os.path.exists(path) for path in self._command()[::2])
+
+    def _command(self):
+        return [os.path.join(DEVTOOLS_DIR, self.name, "bin", "python"), "-I", os.path.join(DEVTOOLS_DIR, f"{self.name}.py"), "--serve"]
+
+    def _start(self):
+        if not self.available():
+            raise RuntimeError(f"{self.name} is not set up in {DEVTOOLS_DIR} (devtools/setup.sh)")
+        self.errors = tempfile.TemporaryFile()
+        env = {**os.environ, "PYANNOTE_METRICS_ENABLED": "0"}
+        self.process = subprocess.Popen(self._command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errors, env=env)
+
+    def _failed(self):
+        process, self.process = self.process, None
+        if process and process.poll() is None:
+            process.kill()
+        last = ["no message"]
+        if self.errors:
+            self.errors.seek(0)
+            last = self.errors.read().decode("utf-8", "replace").strip().splitlines()[-1:] or last
+        return RuntimeError(f"{self.name} failed: {last[0][:300]}")
+
+    def ask(self, header, audio, lines=True):
+        """`header` and `audio` (16 kHz mono floats) given to the tool: the
+        lines it answers, up to its {"done": true}, or its one answer when
+        not `lines`. Raises RuntimeError when it is not set up or fails."""
+        pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+        request = json.dumps({**header, "samples": audio.size}).encode("utf-8") + b"\n" + pcm
+        with self.lock:
+            if self.process is None or self.process.poll() is not None:
+                self._start()
+            timer = threading.Timer(DEVTOOL_TIMEOUT, lambda process=self.process: process.kill())
+            timer.start()
+            try:
+                self.process.stdin.write(request)
+                self.process.stdin.flush()
+                answers = []
+                while True:
+                    line = self.process.stdout.readline()
+                    if not line:
+                        raise self._failed()
+                    answer = json.loads(line)
+                    if "error" in answer:
+                        error = RuntimeError(f"{self.name}: {answer['error']}")
+                        if lines:
+                            while not json.loads(self.process.stdout.readline() or b'{"done": true}').get("done"):
+                                pass
+                        raise error
+                    if not lines:
+                        return answer
+                    if answer.get("done"):
+                        return answers
+                    answers.append(answer)
+            except (OSError, ValueError) as exc:
+                raise self._failed() from exc
+            finally:
+                timer.cancel()
+
+
+_workers = {name: Worker(name) for name in ("hear_nemo", "hear_qwen", "align")}
+
+
+def version_names():
+    """The recognizers whose text a caption may carry beside its own:
+    the three, and any other heard afterwards (DEV_OTHER_HEARERS)."""
+    return list(dict.fromkeys(list(RECOGNIZERS) + [name for name, _ in DEV_OTHER_HEARERS]))
+
+
+def equal_hearing_ready():
+    """Whether the captions are heard by the three as equals (EQUAL_HEARING)."""
+    return EQUAL_HEARING and ASR_BACKEND == "reazon" and all(worker.available() for worker in _workers.values())
+
+
+def _edit_distance(a, b):
+    previous = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        current = [i]
+        for j, y in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (x != y)))
+        previous = current
+    return previous[-1]
+
+
+def _alike(a, b):
+    """How alike two readings are: 1 less their edit distance over the longer."""
+    return 1 - _edit_distance(a, b) / max(len(a), len(b), 1)
+
+
+def _chars_of(text):
+    """A recognizer's text as its spoken characters, [char, ends a sentence],
+    less a phrase said over and over (_WORD_LOOP) and the punctuation."""
+    chars = []
+    for ch in _WORD_LOOP.sub("", text or ""):
+        if ch in _UNSAID:
+            if ch in _SENTENCE_ENDS and chars:
+                chars[-1][1] = True
+            continue
+        chars.append([ch, False])
+    return chars
+
+
+def _place(times, a, b):
+    """`times` [(start, end) or None] within `a`..`b`: each kept inside it,
+    one the aligner could not place put between its neighbours, all of them
+    spread over the clip when none was placed."""
+    n = len(times)
+    if n and all(t is None for t in times):
+        step = (b - a) / n
+        return [(a + k * step, a + (k + 1) * step) for k in range(n)]
+    placed = []
+    for k, t in enumerate(times):
+        if t is None:
+            before = next((times[j][1] for j in range(k - 1, -1, -1) if times[j] is not None), 0.0)
+            after = next((times[j][0] for j in range(k + 1, n) if times[j] is not None), b - a)
+            t = (before, max(before, after))
+        placed.append((min(max(a + t[0], a), b), min(max(a + t[1], a), b)))
+    return placed
+
+
+def hear_equally(audio, clips, began=0.0, cache=None):
+    """Each of `clips` [(start, end), ...] (seconds into `audio`, which
+    starts `began` into the video) heard by the three recognizers: per
+    clip {"versions": {name: [[char, start, end, ends a sentence], ...]},
+    "readings": {name: [kana per char]}} with times in seconds of the
+    video, or {} when no one heard anything. k2 on the CPU with its own
+    times, moved by K2_LEAD; nemo-v2 on the CPU and Qwen3-ASR on the GPU,
+    as kept-running workers, at the same time as k2; their text then timed
+    by the aligner, on the GPU, which also reads every version out in
+    kana. A recognizer that fails is left out of the clip. `cache`, a dict,
+    keeps each clip heard by its times, so hearing it again (cutting a
+    caption where the speaker changes) runs no recognizer."""
+    cache = {} if cache is None else cache
+    found = {}
+    key = lambda clip: (round(began + clip[0], 2), round(began + clip[1], 2))
+    todo = [clip for clip in clips if key(clip) not in cache]
+    if todo:
+        texts = {}
+        k2 = [[] for _ in todo]
+        activity = getattr(_activity, "current", None)
+
+        def hear_k2():
+            with (activity.doing("k2 captioning") if activity else contextlib.nullcontext()):
+                for k, (a, b) in enumerate(todo):
+                    heard = []
+                    run_reazon(audio, words=heard, clips=[(a, b)], piece=EQUAL_K2_PIECE)
+                    k2[k] = [[text, min(start + K2_LEAD, b), min(end + K2_LEAD, b), False]
+                             for text, start, end in heard if text.strip()]
+
+        def hear(name, worker, gate):
+            with (activity.doing(f"{name} captioning") if activity else contextlib.nullcontext()), gate:
+                try:
+                    answers = _workers[worker].ask({"clips": [list(clip) for clip in todo]}, audio)
+                    texts[name] = {answer["i"]: answer["text"] for answer in answers}
+                except Exception as exc:
+                    print(f"{name} not heard: {exc}", flush=True)
+
+        threads = [threading.Thread(target=hear_k2, daemon=True)]
+        threads += [threading.Thread(target=hear, args=(name, worker, gate), daemon=True)
+                    for name, worker, gate in (("nemo", "hear_nemo", contextlib.nullcontext()), ("qwen", "hear_qwen", _gpu_gate))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        chars = {name: [_chars_of(heard.get(k, "")) for k in range(len(todo))] for name, heard in texts.items()}
+        timed, readings = {}, None
+        names = list(chars)
+        try:
+            with (activity.doing("Timing nemo and qwen") if activity else contextlib.nullcontext()), _gpu_gate:
+                answer = _workers["align"].ask({
+                    "pieces": [{"start": a, "length": b - a, "words": [[0.0, 0.0, c, 1.0] for c, _ in chars[name][k]]}
+                               for name in names for k, (a, b) in enumerate(todo)],
+                    "read": ["".join(c for c, *_ in k2[k]) for k in range(len(todo))]
+                            + ["".join(c for c, _ in chars[name][k]) for name in names for k in range(len(todo))],
+                }, audio, lines=False)
+            pieces, readings = answer["pieces"], answer["readings"]
+            for n, name in enumerate(names):
+                timed[name] = pieces[n * len(todo):(n + 1) * len(todo)]
+        except Exception as exc:
+            print(f"nemo and qwen not timed: {exc}", flush=True)
+            names = []
+        for k, (a, b) in enumerate(todo):
+            versions, reads = {}, {}
+            if k2[k]:
+                versions["k2"] = [[c, began + start, began + end, False] for c, start, end, _ in k2[k]]
+                reads["k2"] = readings[k] if readings else [c for c, *_ in k2[k]]
+            for n, name in enumerate(names):
+                heard = chars[name][k]
+                if heard:
+                    times = _place(timed[name][k], a, b)
+                    versions[name] = [[c, began + t0, began + t1, ends] for (c, ends), (t0, t1) in zip(heard, times)]
+                    reads[name] = readings[len(todo) * (n + 1) + k]
+            # With neither nemo nor qwen to be had, k2 alone, as before; and
+            # not kept, so the clip is heard again when it is next asked for.
+            found[key((a, b))] = {"versions": versions, "readings": reads, "alone": not names} if versions else {}
+            if names or not versions:
+                cache[key((a, b))] = found[key((a, b))]
+    return [found.get(key(clip)) or cache.get(key(clip), {}) for clip in clips]
+
+
+def _reading(heard, name, low=float("-inf"), high=float("inf")):
+    """`name`'s reading of the characters it heard in `low`..`high`."""
+    return "".join(r for (c, a, b, _), r in zip(heard["versions"][name], heard["readings"][name]) if low <= (a + b) / 2 < high)
+
+
+def _agreeing(heard, low=float("-inf"), high=float("inf")):
+    """The recognizers whose readings of `low`..`high` another one's is
+    EQUAL_AGREE alike, and their readings there."""
+    reads = {name: _reading(heard, name, low, high) for name in heard.get("versions", {})}
+    reads = {name: r for name, r in reads.items() if r}
+    agree = {name for name in reads for other in reads if other != name and _alike(reads[name], reads[other]) >= EQUAL_AGREE}
+    return agree, reads
+
+
+def chosen(heard):
+    """The recognizer a clip's caption is heard by, of those who agree:
+    the one nearest all the others, ties to EQUAL_TIE_ORDER; None when no
+    two agree."""
+    agree, reads = _agreeing(heard)
+    if heard.get("alone"):
+        return next(iter(heard["versions"]), None)
+    if not agree:
+        return None
+    pool = [name for name in EQUAL_TIE_ORDER if name in agree]
+    return min(pool, key=lambda name: (sum(_edit_distance(reads[name], reads[other]) for other in pool if other != name),
+                                      EQUAL_TIE_ORDER.index(name)))
+
+
+def equal_words(heard, words, breaks, began=0.0):
+    """The words of each clip's chosen recognizer into `words` and
+    `breaks`, as run_whisper gives them, in seconds from `began`; a
+    sentence end only where another that punctuates heard one within
+    EQUAL_END_REACH. Gives each clip's chosen recognizer, or None."""
+    names = []
+    for clip in heard:
+        name = chosen(clip) if clip else None
+        names.append(name)
+        if name is None:
+            continue
+        ends = [b for other, chars in clip["versions"].items() if other != name
+                for k, (c, a, b, end) in enumerate(chars) if end]
+        breaks.append((len(words), clip["versions"][name][0][1] - began))
+        for c, a, b, end in clip["versions"][name]:
+            agreed = end and any(abs(b - other) <= EQUAL_END_REACH for other in ends)
+            words.append((c + ("。" if agreed else ""), a - began, b - began))
+    return names
 
 
 # Silero VAD, the authors' own v6.2 ONNX file (MIT, silero_vad.LICENSE),
@@ -1148,7 +1479,7 @@ def translate_text(ja):
     if TRANSLATE_BACKEND == "nllb":
         return translate_nllb(ja)
     if not _ollama_ok:
-        raise RuntimeError("no text translator")
+        raise TranslatorDown(f"the translator (ollama {OLLAMA_MODEL}) is out of reach")
     return _ollama_generate(ja, timeout=OLLAMA_TIMEOUT)
 
 
@@ -1213,8 +1544,7 @@ def warm_ollama():
         print(f"  ollama ready in {time.time() - t0:.1f}s", flush=True)
     except Exception as exc:
         _ollama_ok = False
-        print(f"  ollama unreachable ({exc}); "
-              "falling back to whisper task=translate", flush=True)
+        print(f"  ollama unreachable ({exc}); jobs will fail until it is back and the server restarted", flush=True)
 
 
 def unload_ollama():
@@ -1493,9 +1823,7 @@ def translate_ollama(segments):
             print(f"ollama took too long ({exc}); not translated as a whole", flush=True)
             return None
         _ollama_ok = False
-        print(f"ollama translation failed ({exc}); "
-              "falling back to whisper task=translate", flush=True)
-        return None
+        raise TranslatorDown(f"the translator (ollama {OLLAMA_MODEL}) is out of reach: {exc}") from exc
 
 
 def _by_position(response, segments):
@@ -1582,15 +1910,15 @@ def transcribe_and_translate(audio, beam_size, prompt="", want_translation=True,
     if want_translation and ja and not _is_untranslatable(ja):
         if TRANSLATE_BACKEND == "nllb":
             pairs = [(ja, translate_nllb(ja))]
+        elif TRANSLATE_BACKEND == "whisper":
+            # Asked for (LIVETRANS_TRANSLATE_BACKEND): English only.
+            pairs = [(ja, " ".join(run_whisper(audio, beam_size=beam_size, task="translate")) if TARGET == "en" else "")]
         else:
-            pairs = translate_ollama(segments) if _ollama_ok else None
-            if pairs is None:
-                # Whisper translates into English only.
-                pairs = [(ja, " ".join(run_whisper(
-                    audio, beam_size=beam_size, task="translate"
-                )) if TARGET == "en" else "")]
-            else:
-                pairs = _split_long(pairs, words)
+            if not _ollama_ok:
+                raise TranslatorDown(f"the translator (ollama {OLLAMA_MODEL}) is out of reach")
+            pairs = translate_ollama(segments)
+            # Too slow this once: the sentences go untranslated, the session on.
+            pairs = [(ja, "")] if pairs is None else _split_long(pairs, words)
     lines = []
     for (j, e), span in zip(pairs, sentence_times([j for j, _ in pairs], words)):
         line = {"ja": j, "en": e}
@@ -1686,11 +2014,11 @@ STEP_VERSIONS = {
     "speech-firered": "firered-vad-whole-2",
     "speech-mean": "firered-seg30-mean-1",
     "speakers": "diarizen-large-v2-1",
-    "others": "nemo-v2-qwen3-asr-1.7b-vibevoice-hf-1",
-    "words": "whisper-large-v3-reazon-aligned-1",
+    "others": "k2-nemo-v2-qwen3-asr-equal-1",
+    "words": "nemo-v2-reazon-aligned-1",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-steady-floor-speaker-cuts-7" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-nemo-qwen-equal-1" for step in DEV_STEPS},
 }
 
 
@@ -2109,6 +2437,8 @@ def bundle_line(line):
     """A caption as the bundle holds it: "versions" only when other
     recognizers heard it."""
     kept = {key: line.get(key) for key in ("ja", "en", "start", "end")}
+    if line.get("heard_by"):
+        kept["heard_by"] = line["heard_by"]
     if line.get("versions"):
         kept["versions"] = line["versions"]
     return kept
@@ -2122,7 +2452,7 @@ def with_versions(lines, others):
     for line in lines:
         texts = others.get((line.get("start"), line.get("end")), {})
         versions = {name: {"ja": texts[name], "en": texts.get(f"{name}_en", "")}
-                    for name, _ in DEV_OTHER_HEARERS if texts.get(name)}
+                    for name in version_names() if texts.get(name) and name != line.get("heard_by")}
         result.append({**line, "versions": versions})
     return result
 
@@ -2729,7 +3059,7 @@ def steady_floor(turns):
     return steady
 
 
-def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None):
+def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None, heard=None):
     """`audio`, the video from `began` on, heard by its hard pieces, and
     its words put into the pieces of `grid`: the lines [{"ja", "en",
     "start", "end"}] of the pieces with words in them, those partly in
@@ -2737,16 +3067,26 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
     inside a piece in `within`, a cut is made (see CutGrid). A piece's
     times are its speech's. `told`, for a dev step, lists each line with
     what cut it (see `tell`). `turns`, [(start, end, who)] on the samples'
-    clock, cut a piece where two words in a row are different speakers'."""
+    clock, cut a piece where two words in a row are different speakers'.
+    `heard`, a dict, has the three recognizers hear the clips as equals
+    (hear_equally), keeping what they heard in it: each line is then the
+    chosen recognizer's, "heard_by" naming it and "heard" holding the
+    others' text over it, and a stretch fewer than two of them heard alike
+    is no line."""
     import bisect
 
     low, high = within or (began, began + audio.size / SAMPLE_RATE)
     clips = grid.clips(began, began + audio.size / SAMPLE_RATE)
     words, breaks = [], []
-    run_whisper(
-        audio, beam_size=beam_size, prompt=prompt, words=words, breaks=breaks,
-        clips=[(max(a - began, 0), b - began) for a, b in clips],
-    )
+    equal = None
+    if heard is not None:
+        equal = hear_equally(audio, [(max(a - began, 0), b - began) for a, b in clips], began, heard)
+        chosen_by = equal_words(equal, words, breaks, began)
+    else:
+        run_whisper(
+            audio, beam_size=beam_size, prompt=prompt, words=words, breaks=breaks,
+            clips=[(max(a - began, 0), b - began) for a, b in clips],
+        )
     words = [(text, began + start, began + end) for text, start, end in words]
     if not words:
         return []
@@ -2881,6 +3221,8 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
     texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
     with doing(f"Translating {recognizer_name()} captions"):
         pairs = None
+        if TRANSLATE_BACKEND == "ollama" and not _ollama_ok:
+            raise TranslatorDown(f"the translator (ollama {OLLAMA_MODEL}) is out of reach")
         if TRANSLATE_BACKEND != "nllb" and _ollama_ok and any(not _is_untranslatable(t) for t in texts):
             pairs = translate_ollama(texts)
         if pairs:
@@ -2907,6 +3249,8 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             if text and en is None:
                 try:
                     english[k] = translate_text(text)
+                except TranslatorDown:
+                    raise
                 except Exception as exc:
                     print(f"piece not translated: {exc}", flush=True)
                     english[k] = ""
@@ -2917,6 +3261,8 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             # all but repeats.
             try:
                 english = [en for _, en in _translate_what_is_left(list(zip(texts, english)))]
+            except TranslatorDown:
+                raise
             except Exception as exc:
                 print(f"pieces not checked: {exc}", flush=True)
     lines = []
@@ -2924,8 +3270,20 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
         if not text:
             continue
         start, end = grid.bounds(a, b) or (words[members[0]][1], words[members[-1]][2])
+        line = {"ja": text, "en": en, "start": round(start, 2), "end": round(end, 2)}
+        if equal is not None:
+            clip = equal[heard_in[members[0]]]
+            if not clip.get("alone"):
+                agree, _ = _agreeing(clip, a, b)
+                if len(agree) < 2:
+                    continue
+            name = chosen_by[heard_in[members[0]]]
+            line["heard_by"] = name
+            others = {other: "".join(c + ("。" if end else "") for c, x, y, end in chars if a <= (x + y) / 2 < b)
+                      for other, chars in clip["versions"].items() if other != name}
+            line["heard"] = {other: text for other, text in others.items() if text}
         if within is None or (a >= low - 1e-6 and b <= high + 1e-6):
-            lines.append({"ja": text, "en": en, "start": round(start, 2), "end": round(end, 2)})
+            lines.append(line)
             if told:
                 tell(f"{'heard again ' if within else ''}{clock(start)}–{clock(end)}  {text}\n"
                      f"   starts: {grid.reasons.get(a) or '?'} · ends: {grid.reasons.get(b) or '?'}")
@@ -3125,17 +3483,14 @@ class PrefetchJob:
         # The FireRedVAD step's sound events, by kind ("singing", "music"):
         # where they are, in seconds of the video.
         self.events = {}
-        # A step job's words, as Whisper alone hears them, in seconds of
+        # A step job's words, as nemo-v2 alone hears them, in seconds of
         # the video, and up to where it has listened: in memory only, as
         # every text the server hears.
         self.words = []
         self.worded = self.offset
-        # Whether the words have been re-timed by the aligner, and each
-        # word's piece and place in it, for that: the pieces as heard,
-        # (start, length, words), the times within the piece.
+        # Whether the words' times are the aligner's: always, once any
+        # are heard (kept for the client, which also shows other times).
         self.aligned = False
-        self.word_refs = []
-        self.word_pieces = []
         # Who speaks when, as DiariZen tells the voices apart: (start, end,
         # "S1"), in seconds of the video; None until it has run. `turns`,
         # the same on the samples' clock, for cutting the captions where the
@@ -3171,6 +3526,12 @@ class PrefetchJob:
         # translated, or passed over.
         self.others_kept = {}
         self.others_done = False
+        # Whether the captions are heard by the three recognizers as equals
+        # (equal_hearing_ready), and what they heard, by clip: in memory
+        # only, so a caption cut where the speaker changes is split by the
+        # times they heard, not heard again.
+        self.equal = equal_hearing_ready()
+        self.heard = {}
         # Dev mode's keeping of the video, for a step job from the start
         # that is to keep it (not Incognito's, which keeps nothing anywhere);
         # `cached`, whether the audio came from it rather than a fetch.
@@ -3385,6 +3746,9 @@ class PrefetchJob:
                         [(self.offset + position + a, self.offset + position + min(b, length)) for a, b in speech if a < length],
                         reason,
                     )
+            except TranslatorDown as exc:
+                self.fail(str(exc))
+                return
             except Exception as exc:
                 if self.step:
                     self.caption_error = f"{type(exc).__name__}: {exc}"
@@ -3468,52 +3832,61 @@ class PrefetchJob:
             time.sleep(min(3 * (time.time() - t0), 10))
 
     def _hear_words(self):
-        """Whisper over all the audio, a piece at a time as it arrives, for
-        the words on the timeline; the GPU is let go between pieces. Or the
-        words heard before over the same audio, from the dev cache."""
+        """nemo-v2 over all the audio, WORDS_BATCH of it at a time as it
+        arrives, for the words on the timeline; the GPU is let go between
+        batches. Or the words heard before over the same audio, from the
+        dev cache."""
         if self._words_from_cache():
             return
+        step = WORDS_PIECE - WORDS_OVERLAP
         start = 0.0
         while not self.stop_event.is_set() and self.state in ("running", "done"):
             with self.audio_lock:
                 have = self.fetched
                 done = self.fetch_done
-            if self.paused.is_set() or (not done and have < start + WORDS_PIECE):
+            if self.paused.is_set() or (not done and have < start + max(WORDS_BATCH, WORDS_PIECE)):
                 time.sleep(0.5)
                 continue
             if start >= have:
                 return
+            # The whole pieces from `start` on, those starting in the batch;
+            # the last one to the end of the audio.
+            pieces = []
+            at = start
+            while at < min(start + WORDS_BATCH, have) and (done or at + WORDS_PIECE <= have):
+                pieces.append((at, min(WORDS_PIECE, have - at)))
+                if at + WORDS_PIECE >= have:
+                    break
+                at += step
+            low, high = pieces[0][0], pieces[-1][0] + pieces[-1][1]
             with self.audio_lock:
-                piece = self.audio[int(start * SAMPLE_RATE):int((start + WORDS_PIECE) * SAMPLE_RATE)].copy()
+                audio = self.audio[int(low * SAMPLE_RATE):int(high * SAMPLE_RATE)].copy()
             try:
-                with self.activity.doing("Whisper words"):
-                    heard = heard_words(piece)
+                with self.activity.doing("nemo words"):
+                    heard = heard_words(audio, [(at - low, length) for at, length in pieces])
             except Exception as exc:
                 print(f"prefetch {self.id}: words: {type(exc).__name__}: {exc}", flush=True)
                 return
-            end = start + piece.size / SAMPLE_RATE
-            last = end >= have and done
-            # A word is the piece's when it starts in its middle; the first
-            # piece keeps its head and the last its tail.
-            low = 0.0 if start == 0 else WORDS_OVERLAP / 2
-            high = piece.size / SAMPLE_RATE if last else WORDS_PIECE - WORDS_OVERLAP / 2
-            self.word_pieces.append((start, piece.size / SAMPLE_RATE, heard))
-            for k, (a, b, text, p) in enumerate(heard):
-                if low <= a < high:
-                    self.words.append((round(self._video(self.offset + start + a), 3), round(self._video(self.offset + start + b), 3), text, p))
-                    self.word_refs.append((len(self.word_pieces) - 1, k))
-            self.worded = self._video(self.offset + (end if last else start + high))
-            if last:
-                with self.activity.doing("Word alignment"):
-                    self._align_words()
-                if self.cache and self.cache.audio_seconds():
-                    try:
-                        self.cache.save_findings("words", {
-                            "words": [list(w) for w in self.words], "worded": self.worded, "aligned": self.aligned})
-                    except OSError as exc:
-                        print(f"prefetch {self.id}: words not cached: {exc}", flush=True)
-                return
-            start += WORDS_PIECE - WORDS_OVERLAP
+            self.aligned = True
+            for (at, length), words in zip(pieces, heard):
+                last = done and at + length >= have - 1e-6
+                # A word is the piece's when it starts in its middle; the
+                # first piece keeps its head and the last its tail.
+                head = 0.0 if at == 0 else WORDS_OVERLAP / 2
+                tail = length if last else WORDS_PIECE - WORDS_OVERLAP / 2
+                for a, b, text in words:
+                    if head <= a < tail:
+                        self.words.append((round(self._video(self.offset + at + a), 3), round(self._video(self.offset + at + b), 3), text))
+                self.worded = self._video(self.offset + at + tail)
+                if last:
+                    if self.cache and self.cache.audio_seconds():
+                        try:
+                            self.cache.save_findings("words", {
+                                "words": [list(w) for w in self.words], "worded": self.worded, "aligned": self.aligned})
+                        except OSError as exc:
+                            print(f"prefetch {self.id}: words not cached: {exc}", flush=True)
+                    return
+            start = pieces[-1][0] + step
 
     def _words_from_cache(self):
         """Whether the words came from the dev cache: heard before over the
@@ -3531,33 +3904,14 @@ class PrefetchJob:
         print(f"prefetch {self.id}: {len(self.words)} words from the cache", flush=True)
         return True
 
-    def _align_words(self):
-        """The words re-timed by the aligner, once all are heard; Whisper's
-        own times stay when it is not set up or fails."""
-        with self.audio_lock:
-            audio = self.audio.copy()
-        pieces = [{"start": s, "length": n, "words": [list(w) for w in heard]} for s, n, heard in self.word_pieces]
-        try:
-            timed = run_devtool("align", {"pieces": pieces}, audio)["pieces"]
-        except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
-            print(f"prefetch {self.id}: words not re-timed: {exc}", flush=True)
-            return
-        words = list(self.words)
-        for i, (piece, k) in enumerate(self.word_refs):
-            new = timed[piece][k] if piece < len(timed) and k < len(timed[piece]) else None
-            if new:
-                start = self.word_pieces[piece][0]
-                words[i] = (round(self._video(self.offset + start + new[0]), 3), round(self._video(self.offset + start + new[1]), 3), *words[i][2:])
-        self.words = words
-        self.aligned = True
-        print(f"prefetch {self.id}: words re-timed", flush=True)
-
     def _tell_speakers(self):
-        """Who speaks when: DiariZen over the audio from where it last told
-        them, as soon as the captions' batches have an edge a section on
-        (see SECTION_SECONDS), or over all the rest at once when the fetch
-        is done, a section at a time again if that is more than DiariZen
-        can hold; or all of it found before over this very audio."""
+        """Who speaks when: DiariZen a section at a time (SECTION_SECONDS,
+        ending at an edge of the captions' batches), each once the captions
+        are past it, the last one to the end once they are all made; or all
+        of it found before over this very audio. Never more at once: its
+        memory grows with the audio given it (3.8 GB for ten minutes, 4.6
+        for twenty-four, which with the rest ran the GPU out of memory),
+        and the captions come first."""
         while not self.stop_event.is_set() and not self.fetch_done and not self.audio.size:
             time.sleep(0.2)
         if self.cache and self.cached and (kept := self.cache.load_findings("speakers")):
@@ -3566,32 +3920,26 @@ class PrefetchJob:
             self.turn_runs = [self.turns]
             self.told = self.offset + self.fetched
             return
-        piecewise = False
         while not self.stop_event.is_set() and self.state in ("running", "done"):
             # Read once: the fetch may end while a section is being told,
             # and the rest after it must still be.
             fetched_all, heard_all = self.fetch_done, self.heard_all
             whole = self.offset + self.fetched
             later = [e for e in list(self.edges) if e >= self.told + SECTION_SECONDS]
-            if fetched_all and (not piecewise or (heard_all and not (later and whole - later[0] >= SECTION_TAIL))):
-                end = whole
-            elif later:
+            last = fetched_all and heard_all
+            if later and not (last and whole - later[0] < SECTION_TAIL):
                 end = later[0]
+            elif last:
+                end = whole
             else:
                 time.sleep(0.5)
                 continue
             if end > self.told + 0.05:
                 if not self._wait_while_paused():
                     return
-                if (not self._speakers_over(self.told, end) and fetched_all and not piecewise
-                        and end - self.told > SECTION_SECONDS + SECTION_TAIL):
-                    # More audio than DiariZen holds at once (it runs out of
-                    # memory on a long video beside the other models).
-                    print(f"prefetch {self.id}: speakers told a section at a time instead", flush=True)
-                    piecewise = True
-                    continue
+                self._speakers_over(self.told, end)
             self.told = max(self.told, end)
-            if fetched_all and end >= whole:
+            if last and end >= whole:
                 break
         else:
             return
@@ -3611,7 +3959,7 @@ class PrefetchJob:
             audio = self.audio[int((low - self.offset) * SAMPLE_RATE):int((high - self.offset) * SAMPLE_RATE)].copy()
         self.telling = (round(self._video(low), 2), round(self._video(high), 2))
         try:
-            with self.activity.doing("Speaker detection"):
+            with self.activity.doing("Speaker detection"), _gpu_gate:
                 found = run_devtool("diarize", {}, audio)["segments"]
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             print(f"prefetch {self.id}: speakers: {exc}", flush=True)
@@ -3717,6 +4065,9 @@ class PrefetchJob:
                 continue
             try:
                 new = self.rehear(line["start"], line["end"])
+            except TranslatorDown as exc:
+                self.fail(str(exc))
+                break
             except Exception as exc:
                 print(f"prefetch {self.id}: not cut: {type(exc).__name__}: {exc}", flush=True)
                 continue
@@ -3762,7 +4113,7 @@ class PrefetchJob:
                     time.sleep(0.2)
                 if self.cached and (found := self.cache.load_findings("others")):
                     # (Less what VibeVoice heard, when it was one of them.)
-                    names = {key for name, _ in DEV_OTHER_HEARERS for key in (name, f"{name}_en")}
+                    names = {key for name in version_names() for key in (name, f"{name}_en")}
                     kept.update({(a, b): {n: t for n, t in texts.items() if n in names}
                                  for a, b, texts in found.get("others", [])})
             done = 0
@@ -3792,7 +4143,9 @@ class PrefetchJob:
     def _hear_other_texts(self, spans):
         """The captions at `spans` heard again by DEV_OTHER_HEARERS, one
         after another; a recognizer that is not set up or fails is passed
-        over."""
+        over. Heard as equals, they have heard every caption already."""
+        if self.equal:
+            return
         for name, tool in DEV_OTHER_HEARERS:
             if not self._wait_while_paused():
                 return
@@ -3846,7 +4199,7 @@ class PrefetchJob:
                 if spans is not None and span not in spans:
                     continue
                 texts = self.others.get(span, {})
-                for name, _ in DEV_OTHER_HEARERS:
+                for name in version_names():
                     text = texts.get(name)
                     if not text or f"{name}_en" in texts:
                         continue
@@ -3867,6 +4220,8 @@ class PrefetchJob:
                         asked += 1
                     texts[f"{name}_en"] = done[content]
                     added += 1
+        except TranslatorDown as exc:
+            self.fail(str(exc))
         except Exception as exc:
             print(f"prefetch {self.id}: the others not translated: {exc}", flush=True)
         finally:
@@ -3903,15 +4258,24 @@ class PrefetchJob:
         self.grid.add_speech(speech, start, end, end_reason=reason)
         lines = self._on_video_clock(
             hear_pieces(self.grid, audio, start, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:],
-                        turns=self.turns if DEV_SPEAKER_CUTS else None))
+                        turns=self.turns if DEV_SPEAKER_CUTS else None, heard=self.heard if self.equal else None))
         ja = "".join(line["ja"] for line in lines)
         if self.stop_event.is_set():
             # Stopped while this was heard: its audio may be let go already.
             return
+        self._keep_heard(lines)
         self.lines.extend(lines)
         self.feed.extend(lines)
         self.text += ja
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
+
+    def _keep_heard(self, lines):
+        """The other recognizers' text over each of `lines` (hear_pieces's
+        "heard"), taken off the line into `others`, by its times."""
+        for line in lines:
+            heard = line.pop("heard", None)
+            if heard:
+                self.others[(line["start"], line["end"])] = dict(heard)
 
     def rehear(self, start, end):
         """The pieces of the grid at `start`..`end` heard again from the
@@ -3934,8 +4298,9 @@ class PrefetchJob:
         began = self.offset + from_sample / SAMPLE_RATE
         lines = self._on_video_clock(hear_pieces(
             self.grid, audio, began, beam_size=10, prompt="".join(before), within=(pieces[0][0], pieces[-1][1]),
-            turns=self.turns if DEV_SPEAKER_CUTS else None,
+            turns=self.turns if DEV_SPEAKER_CUTS else None, heard=self.heard if self.equal else None,
         ))
+        self._keep_heard(lines)
         print(f"prefetch {self.id}: {start:.1f}-{end:.1f}s heard again, {len(lines)} lines in {time.time() - t0:.1f}s",
               flush=True)
         return lines
@@ -4058,12 +4423,8 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "asr": {"reazon": "reazonspeech-k2", "hybrid": f"reazonspeech-k2+{ASR_MODEL}"}.get(ASR_BACKEND, ASR_MODEL),
                 "device": DEVICE,
-                "translation": TRANSLATE_BACKEND != "nllb" or _nllb is not None,
-                "translation_backend": (
-                    "whisper"
-                    if TRANSLATE_BACKEND == "ollama" and not _ollama_ok
-                    else TRANSLATE_BACKEND
-                ),
+                "translation": _ollama_ok if TRANSLATE_BACKEND == "ollama" else TRANSLATE_BACKEND != "nllb" or _nllb is not None,
+                "translation_backend": TRANSLATE_BACKEND,
                 "ollama_model": OLLAMA_MODEL if _ollama_ok else None,
                 "prefetch": True,
                 "target": TARGET,

@@ -93,37 +93,45 @@ struct PrefetchStatus: Decodable, Equatable {
 struct OtherHearing: Decodable, Equatable {
     var start: Double
     var end: Double
+    /// k2's, when the caption is another recognizer's.
+    var k2: String?
     var nemo: String?
     var qwen: String?
     /// Each one's translation, once it is in.
+    var k2English: String?
     var nemoEnglish: String?
     var qwenEnglish: String?
 
     enum CodingKeys: String, CodingKey {
-        case start, end, nemo, qwen
+        case start, end, k2, nemo, qwen
+        case k2English = "k2_en"
         case nemoEnglish = "nemo_en"
         case qwenEnglish = "qwen_en"
     }
 
-    /// The recognizers, in the order shown, with the names they are shown by.
-    static let shown: [(label: String, text: KeyPath<OtherHearing, String?>, english: KeyPath<OtherHearing, String?>)] = [
-        ("nemo", \.nemo, \.nemoEnglish), ("qwen", \.qwen, \.qwenEnglish),
-    ]
+    typealias Shown = (label: String, text: KeyPath<OtherHearing, String?>, english: KeyPath<OtherHearing, String?>)
+
+    /// The recognizers heard after the captions, with the names they are
+    /// shown by: the lanes of their progress.
+    static let shown: [Shown] = [("nemo", \.nemo, \.nemoEnglish), ("qwen", \.qwen, \.qwenEnglish)]
+
+    /// Every recognizer that can stand beside a caption, in the order shown:
+    /// k2 too, when the caption is nemo's or qwen's.
+    static let versions: [Shown] = [("k2", \.k2, \.k2English)] + shown
 }
 
-/// A word Whisper heard over a dev job's audio: sent as
-/// [start, end, text, probability].
+/// A word nemo-v2 heard over a dev job's audio (a character, as it has
+/// no times of its own and the aligner times each): sent as
+/// [start, end, text].
 struct HeardWord: Decodable, Equatable {
     var start: Double
     var end: Double
     var text: String
-    var probability: Double
 
-    init(start: Double, end: Double, text: String, probability: Double) {
+    init(start: Double, end: Double, text: String) {
         self.start = start
         self.end = end
         self.text = text
-        self.probability = probability
     }
 
     init(from decoder: Decoder) throws {
@@ -131,7 +139,6 @@ struct HeardWord: Decodable, Equatable {
         start = try fields.decode(Double.self)
         end = try fields.decode(Double.self)
         text = try fields.decode(String.self)
-        probability = try fields.decode(Double.self)
     }
 
     var range: ClosedRange<Double> { start...max(start, end) }
@@ -169,8 +176,8 @@ struct StepFindings: Decodable, Equatable {
     /// The steps with FireRedVAD in them only: where it hears singing, and music with
     /// neither singing nor speech, by kind ("singing", "music"), as pairs.
     var events: [String: [[Double]]]?
-    /// The words Whisper alone hears over the audio, and up to where;
-    /// whether their times are the aligner's rather than Whisper's.
+    /// The words nemo-v2 alone hears over the audio, and up to where;
+    /// whether their times are the aligner's.
     var words: [HeardWord]?
     var worded: Double?
     var aligned: Bool?
@@ -206,6 +213,13 @@ struct CaptionPair: Decodable, Equatable {
     /// when the server could place its words.
     var start: Double?
     var end: Double?
+    /// The recognizer whose text this is, when the host hears with three.
+    var heardBy: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ja, en, start, end
+        case heardBy = "heard_by"
+    }
 }
 
 struct Transcription: Equatable {
