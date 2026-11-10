@@ -52,15 +52,17 @@ final class RunningStatusTests: XCTestCase {
         XCTAssertLessThanOrEqual(size.height, 1, "an empty slot, as before")
     }
 
-    /// Each task with a place on the video's bar is marked as it is drawn
-    /// there, so its color can be told; the others keep the room empty.
+    /// Each task with a bar in Activity is marked in its color there; the
+    /// others keep the room empty.
     func testEachTaskIsMarkedInItsColorOnTheBar() {
-        XCTAssertEqual(RunningStatus.mark(for: "k2 captioning"), .init(color: VideoBar.color(of: "k2"), thick: true))
+        XCTAssertEqual(RunningStatus.mark(for: "k2 captioning"), .init(color: JobProgressView.color(ofRecognizer: "k2")))
         XCTAssertEqual(
-            RunningStatus.mark(for: "Translating nemo captions"), .init(color: VideoBar.translatedColor(of: "nemo"), thick: false)
+            RunningStatus.mark(for: "Translating nemo captions"),
+            .init(color: JobProgressView.color(ofRecognizer: "nemo").opacity(0.5))
         )
-        XCTAssertEqual(RunningStatus.mark(for: "Audio download"), .init(color: VideoBar.fetchedColor, thick: true))
+        XCTAssertEqual(RunningStatus.mark(for: "Audio download"), .init(color: JobProgressView.fetchedColor))
         XCTAssertEqual(RunningStatus.mark(for: "Speaker detection")?.dashed, true)
+        XCTAssertNotNil(RunningStatus.mark(for: "Cutting captions at speaker changes"), "the cuts have a bar too")
         XCTAssertNil(RunningStatus.mark(for: "nemo words"))
         show(["k2 captioning", "Translating qwen captions"], width: 320)
         snapshot("running-colored")

@@ -3,7 +3,8 @@ import SwiftUI
 /// Dev mode's view, under the captions: the timeline of the step being
 /// run, its height dragged at the line above it, and under that, folded
 /// away until asked for, how this Mac and the GPU server stand and what
-/// each has done, newest at the bottom.
+/// each has done, newest at the bottom, with a bar for each of the
+/// host's tasks on the video.
 struct ActivityView: View {
     static let symbol = "waveform.path.ecg"
 
@@ -15,6 +16,7 @@ struct ActivityView: View {
     @Environment(ActivityLog.self) private var log
     @Environment(CaptionEngine.self) private var engine
     @Environment(DevPipeline.self) private var dev
+    @Environment(Prefetcher.self) private var prefetch
     @AppStorage(AppSettings.activityTimelineHeight) private var timelineHeight = 180.0
     @AppStorage(AppSettings.activityLogShown) private var logShown = false
 
@@ -50,6 +52,14 @@ struct ActivityView: View {
             .padding(.horizontal)
             .padding(.vertical, 4)
             if logShown {
+                if let progress = dev.progress(on: prefetch.playhead) {
+                    JobProgressView(
+                        total: progress.total, tasks: progress.tasks, playhead: prefetch.position,
+                        running: dev.job?.running ?? []
+                    )
+                    .padding(.horizontal)
+                    .padding(.bottom, 6)
+                }
                 VStack(alignment: .leading, spacing: 6) {
                     StatusRow(name: macName, color: Self.macColor(engine.status), text: macStatus)
                     StatusRow(

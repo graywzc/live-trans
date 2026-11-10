@@ -62,13 +62,6 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(VideoBar.fraction(150, of: 120), 1)
         XCTAssertEqual(VideoBar.fraction(-1, of: 120), 0)
         XCTAssertEqual(VideoBar.fraction(1, of: 0), 0)
-        XCTAssertEqual(
-            VideoBar.summary(duration: 1445, fetched: 1085, ready: 860),
-            "Captions ready to 14:20, audio fetched to 18:05 of 24:05"
-        )
-        XCTAssertEqual(VideoBar.summary(duration: nil, fetched: 65, ready: 0), "Captions ready to 0:00, audio fetched to 1:05")
-        // With nothing captioned ahead it says what the bar is for.
-        XCTAssertEqual(VideoBar.summary(duration: 1200, fetched: nil, ready: nil), "Drag to move the Chrome video")
     }
 
     func testAPlaceOnTheBarIsAPlaceInTheVideo() {

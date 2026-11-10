@@ -3,8 +3,8 @@ import SwiftUI
 /// What the host is busy with right now for the video ("Audio download",
 /// "k2 captioning", "Speaker detection"), right of the Start button. All of
 /// it when it fits; else the first and how many more, or only how many,
-/// and a click opens the whole list. Each task with a place on the video's
-/// bar has a swatch drawn as it is there, so its color can be told.
+/// and a click opens the whole list. Each task with a bar in Activity has
+/// a swatch of its color there.
 struct RunningStatus: View {
     let items: [String]
 
@@ -99,28 +99,16 @@ struct RunningStatus: View {
         .foregroundStyle(.gray)
     }
 
-    /// How a task is drawn on the video's bar: the audio and each
-    /// recognizer's captions on the bar itself, thick; translations and
-    /// the speakers in the thin lanes under it, the speakers dashed while
-    /// they are being told apart.
+    /// A task's swatch: its color on its bar in Activity, striped for the
+    /// speakers as their bar is over the stretch being told.
     struct Mark: Equatable {
         let color: Color
-        let thick: Bool
         var dashed = false
     }
 
-    static let recognizers = ["k2", "nemo", "qwen"]
-
     static func mark(for item: String) -> Mark? {
-        if item == "Audio download" { return Mark(color: VideoBar.fetchedColor, thick: true) }
-        if item == "Speaker detection" { return Mark(color: VideoBar.speakersColor, thick: false, dashed: true) }
-        for name in recognizers {
-            if item == "\(name) captioning" { return Mark(color: VideoBar.color(of: name), thick: true) }
-            if item == "Translating \(name) captions" {
-                return Mark(color: VideoBar.translatedColor(of: name), thick: false)
-            }
-        }
-        return nil
+        guard JobProgressView.hasBar(item) else { return nil }
+        return Mark(color: JobProgressView.color(of: item), dashed: item == "Speaker detection")
     }
 
     static let swatchWidth: CGFloat = 14
@@ -129,7 +117,7 @@ struct RunningStatus: View {
     @ViewBuilder
     static func swatch(for item: String) -> some View {
         if let mark = mark(for: item) {
-            let height = mark.thick ? 6 : VideoBar.laneHeight
+            let height = JobProgressView.barHeight
             if mark.dashed {
                 Path { path in
                     path.move(to: CGPoint(x: 0, y: height / 2))

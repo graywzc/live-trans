@@ -4399,6 +4399,10 @@ class PrefetchJob:
             "speakers": self.fetch_done and self.told >= self.offset + self.fetched - 0.05 and self.telling is None,
             "spoken": round(self._video(self.told), 2),
             "telling": list(self.telling) if self.telling else None,
+            # Up to where in the video the captions are cut where the
+            # speaker changes, a section at a time behind the speakers.
+            "cut": round(min(max((b for _, b in list(self.sections)), default=0.0),
+                             self._video(self.offset + self.fetched)), 2),
             # How many texts the other recognizers have given so far.
             "others": sum(len(texts) for texts in list(self.others.values())),
             # Whether they are all heard and translated, which keeping the

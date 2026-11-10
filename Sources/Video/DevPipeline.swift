@@ -64,6 +64,9 @@ final class DevPipeline {
         var spoken = false
         var spokenTo = 0.0
         var telling: ClosedRange<Double>?
+        /// Up to where the captions are cut where the speaker changes, when
+        /// the host says.
+        var cut: Double?
         /// How many texts the other recognizers have given.
         var others = 0
         var state = "running"
@@ -323,6 +326,45 @@ final class DevPipeline {
         var telling: ClosedRange<Double>?
         /// Told over the whole video.
         var done = false
+    }
+
+    /// One of the host's tasks, a bar of its own in Activity: named as the
+    /// running list names it, how far from the video's start it has come,
+    /// and the stretch it is working on, when it says.
+    struct Progress: Equatable {
+        let task: String
+        var reached: Double
+        var underWay: ClosedRange<Double>?
+    }
+
+    /// The tasks on the video at `playhead`, when it is the job's, in the
+    /// order each works through it, and the length they are drawn against.
+    func progress(on playhead: VideoMoment?) -> (total: Double, tasks: [Progress])? {
+        guard let job, let speakers = speakerState(on: playhead) else { return nil }
+        let total = Self.total(of: job)
+        return (total, Self.progress(
+            fetched: job.fetched, total: total, reached: reached(on: playhead), translated: translated(on: playhead),
+            speakers: speakers, cut: job.cut
+        ))
+    }
+
+    /// The audio, then k2's captions, the speakers told apart and the
+    /// captions cut where they change (when the host says), the other
+    /// recognizers hearing the cut captions, and each one's translations.
+    nonisolated static func progress(
+        fetched: Double, total: Double, reached: [(label: String, seconds: Double)],
+        translated: [(label: String, seconds: Double)], speakers: SpeakerState, cut: Double?
+    ) -> [Progress] {
+        let heard = reached.map { Progress(task: "\($0.label) captioning", reached: $0.seconds) }
+        var tasks = [Progress(task: "Audio download", reached: fetched)] + heard.prefix(1)
+        tasks.append(Progress(
+            task: "Speaker detection", reached: speakers.done ? total : speakers.told,
+            underWay: speakers.done ? nil : speakers.telling
+        ))
+        if let cut { tasks.append(Progress(task: "Cutting captions at speaker changes", reached: cut)) }
+        tasks += heard.dropFirst()
+        tasks += translated.map { Progress(task: "Translating \($0.label) captions", reached: $0.seconds) }
+        return tasks
     }
 
     private static func total(of job: Job) -> Double {
@@ -612,6 +654,7 @@ final class DevPipeline {
                 updated.spokenTo = status.spoken ?? 0
             }
             updated.othersReady = status.othersReady ?? true
+            updated.cut = status.cut
             updated.telling = status.telling.flatMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
             if let bundle = status.bundle, bundle != updated.bundle {
                 if let news = Self.phoneCopyNews(from: updated.bundle, to: bundle) { ActivityLog.tell(news) }
