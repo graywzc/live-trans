@@ -23,15 +23,8 @@ final class VideoBarTests: XCTestCase {
         window = nil
     }
 
-    private func show(
-        duration: Double?, playhead: Double? = 300, captioned: [ClosedRange<Double>] = [240...600, 0...120],
-        fetched: ClosedRange<Double>? = 240...900, reached: [(label: String, seconds: Double)] = [],
-        translated: [(label: String, seconds: Double)] = [], speakers: DevPipeline.SpeakerState? = nil
-    ) {
-        let bar = VideoBar(
-            duration: duration, playhead: playhead, captioned: captioned, fetched: fetched, reached: reached,
-            translated: translated, speakers: speakers
-        ) { [unowned self] in sought.append($0) }
+    private func show(duration: Double?, playhead: Double? = 300) {
+        let bar = VideoBar(duration: duration, playhead: playhead) { [unowned self] in sought.append($0) }
         window.contentView = NSHostingView(
             rootView: bar.padding(.horizontal, 12).padding(.bottom, 8)
                 .frame(width: Self.size.width, height: Self.size.height, alignment: .bottom)
@@ -121,119 +114,6 @@ final class VideoBarTests: XCTestCase {
         show(duration: nil)
         drag(from: CGPoint(x: 200, y: Self.barY), to: CGPoint(x: 300, y: Self.barY))
         XCTAssertEqual(sought, [])
-    }
-
-    /// In Default each recognizer's reach has its own color from the start,
-    /// the one furthest behind on top, and the fetched audio past them grey.
-    func testEachRecognizerShowsHowFarItHasCaptionedInItsOwnColor() throws {
-        show(
-            duration: 1200, playhead: nil, captioned: [], fetched: 0...1050,
-            reached: [("k2", 900), ("nemo", 600), ("qwen", 300)]
-        )
-        let track = try trackEnds()
-        func at(_ seconds: Double) throws -> NSColor {
-            let x = track.left + (track.right - track.left) * CGFloat(seconds / 1200)
-            return try XCTUnwrap(pixel(at: CGPoint(x: x, y: Self.barY)))
-        }
-        let qwen = try at(150), nemo = try at(450), k2 = try at(750), fetched = try at(1000), empty = try at(1150)
-        XCTAssertGreaterThan(k2.blueComponent, k2.redComponent + 0.2, "k2 is blue")
-        XCTAssertGreaterThan(nemo.blueComponent, 0.3, "nemo is purple")
-        XCTAssertGreaterThan(nemo.redComponent, 0.3, "nemo is purple")
-        XCTAssertGreaterThan(qwen.redComponent, qwen.blueComponent, "qwen is pink")
-        for (a, b) in [(qwen, nemo), (nemo, k2), (k2, fetched)] {
-            XCTAssertGreaterThan(Self.distance(a, b), 0.15, "each stretch its own color")
-        }
-        XCTAssertLessThan(abs(fetched.redComponent - fetched.blueComponent), 0.05, "the fetched audio stays grey")
-        XCTAssertGreaterThan(fetched.brightnessComponent, empty.brightnessComponent, "brighter than the unfetched track")
-        snapshot("video-bar-recognizers")
-        // In the help, each with its time.
-        XCTAssertEqual(
-            VideoBar.summary(duration: 1200, fetched: 1050, reached: [("k2", 900), ("nemo", 600), ("qwen", 300)]),
-            "k2 15:00 · nemo 10:00 · qwen 5:00, audio fetched to 17:30 of 20:00"
-        )
-    }
-
-    /// Under the bar, a lane of how far each one's text is translated, in
-    /// its color, and one of the speakers: lit as far as they are told
-    /// apart, striped over the stretch being told, whole once they all are.
-    func testTranslationsAndSpeakersHaveLanesUnderTheBar() throws {
-        let reached = [("k2", 900.0), ("nemo", 600.0), ("qwen", 300.0)]
-        show(
-            duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached,
-            translated: [("k2", 900), ("nemo", 450), ("qwen", 150)],
-            speakers: .init(told: 0, telling: 0...1200)
-        )
-        let track = try trackEnds()
-        // The bar is 16 high, the lanes 3 each 2 apart under it, all of it
-        // standing on the window's foot, 8 above the bottom.
-        let foot = Self.size.height - 8
-        let bar = foot - 2 * (VideoBar.laneGap + VideoBar.laneHeight) - VideoBar.barHeight / 2
-        let translatedLane = foot - VideoBar.laneHeight - VideoBar.laneGap - VideoBar.laneHeight / 2
-        let speakersLane = foot - VideoBar.laneHeight / 2
-        func at(_ seconds: Double, _ y: CGFloat) throws -> NSColor {
-            let x = track.left + (track.right - track.left) * CGFloat(seconds / 1200)
-            return try XCTUnwrap(pixel(at: CGPoint(x: x, y: y)))
-        }
-        XCTAssertGreaterThan(try at(750, bar).blueComponent, 0.5, "the bar keeps its colors")
-        // k2 translated to 15:00, nemo to 7:30, qwen to 2:30.
-        let qwen = try at(100, translatedLane), nemo = try at(300, translatedLane), k2 = try at(700, translatedLane)
-        XCTAssertGreaterThan(k2.blueComponent, k2.redComponent + 0.1, "k2's translations in its blue")
-        XCTAssertGreaterThan(qwen.redComponent, qwen.blueComponent, "qwen's in its pink")
-        XCTAssertGreaterThan(Self.distance(nemo, k2), 0.1)
-        XCTAssertLessThan(Self.distance(try at(1000, translatedLane), try at(1100, translatedLane)), 0.05, "nothing past them")
-        // Striped while running: some of the lane lit, some not.
-        let lit = stride(from: 0.0, to: 1200, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
-        XCTAssertTrue(lit.contains { $0 > 0.3 } && lit.contains { $0 < 0.2 }, "striped while being told apart")
-        snapshot("video-bar-lanes")
-
-        show(duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached, speakers: .init(done: true))
-        let whole = stride(from: 20.0, to: 1180, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
-        XCTAssertTrue(whole.allSatisfy { $0 > 0.3 }, "whole once told apart")
-        XCTAssertEqual(
-            VideoBar.summary(
-                duration: 1200, fetched: 1050, reached: reached, translated: [("k2", 900), ("nemo", 450), ("qwen", 150)],
-                speakers: .init(told: 0, telling: 0...1200)
-            ),
-            "k2 15:00 · nemo 10:00 · qwen 5:00, audio fetched to 17:30 of 20:00\n"
-                + "Translated: k2 15:00 · nemo 7:30 · qwen 2:30\nSpeakers: being told apart, 0:00–20:00"
-        )
-
-        // A section at a time while the audio comes: told to 10:00, the
-        // next section being told, nothing past it.
-        show(
-            duration: 1200, playhead: nil, captioned: [], fetched: 0...1050, reached: reached,
-            speakers: .init(told: 600, telling: 600...900)
-        )
-        let told = stride(from: 20.0, to: 580, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
-        XCTAssertTrue(told.allSatisfy { $0 > 0.3 }, "lit as far as told")
-        let telling = stride(from: 620.0, to: 880, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
-        XCTAssertTrue(telling.contains { $0 > 0.3 } && telling.contains { $0 < 0.2 }, "striped over the section being told")
-        let after = stride(from: 920.0, to: 1180, by: 5).map { (try? at($0, speakersLane))?.greenComponent ?? 0 }
-        XCTAssertTrue(after.allSatisfy { $0 < 0.2 }, "nothing past it")
-        snapshot("video-bar-speaker-sections")
-        XCTAssertEqual(
-            VideoBar.summary(duration: 1200, fetched: 1050, reached: reached, speakers: .init(told: 600, telling: 600...900)),
-            "k2 15:00 · nemo 10:00 · qwen 5:00, audio fetched to 17:30 of 20:00\n"
-                + "Speakers: told apart to 10:00, telling 10:00–15:00"
-        )
-    }
-
-    func testTheRecognizerFurthestBehindIsDrawnLast() {
-        let order = VideoBar.drawingOrder([("k2", 900), ("nemo", 300), ("qwen", 600)]).map(\.label)
-        XCTAssertEqual(order, ["k2", "qwen", "nemo"])
-        XCTAssertEqual(VideoBar.drawingOrder([("k2", 900), ("nemo", 900), ("qwen", 0)]).map(\.label), ["k2", "nemo", "qwen"])
-    }
-
-    private func pixel(at point: CGPoint) -> NSColor? {
-        let view = window.contentView!
-        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
-        view.cacheDisplay(in: view.bounds, to: rep)
-        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
-        return rep.colorAt(x: Int(point.x * scale), y: Int(point.y * scale))?.usingColorSpace(.deviceRGB)
-    }
-
-    private static func distance(_ a: NSColor, _ b: NSColor) -> CGFloat {
-        abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent) + abs(a.blueComponent - b.blueComponent)
     }
 
     /// Whether anything light is drawn in `rect`, from the window's top

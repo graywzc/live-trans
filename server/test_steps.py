@@ -835,7 +835,7 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
     # The caption of the second section was cut where the voice changed,
     # before the others heard it.
     assert [l["ja"] for l in job.lines][:4] == ["ことばはい", "ことば", "はい", "ことばはい"], job.lines
-    assert status["captions"] == "done" and status["speakers"] and status["spoken"] >= 6.9, status
+    assert status["captions"] == "done" and status["speakers"] and status["spoken"] >= 6.9 and status["cut"] >= 6.9, status
     assert status["others_ready"] and status["others"] == 2 * 2 * len(job.lines), status
 
 

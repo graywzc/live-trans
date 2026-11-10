@@ -49,6 +49,9 @@ struct PrefetchStatus: Decodable, Equatable {
     /// now ([start, end]).
     var spoken: Double?
     var telling: [Double]?
+    /// Up to where in the video the captions are cut where the speaker
+    /// changes; a server from before says nothing.
+    var cut: Double?
     /// Whether a dev job's audio came from the host's cache of it.
     var cached: Bool?
     /// Whether the audio is still being fetched. A server that does not
@@ -80,7 +83,7 @@ struct PrefetchStatus: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case state, error, duration, start, fetched, ready, count, lines, step, analysed, worded, aligned, speakers
-        case cached, fetching, captions, others, video, bundle, running, spoken, telling
+        case cached, fetching, captions, others, video, bundle, running, spoken, telling, cut
         case othersReady = "others_ready"
         case bundleFetched = "bundle_fetched"
         case bundleURL = "bundle_url"
