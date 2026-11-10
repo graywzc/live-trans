@@ -929,8 +929,32 @@ def hear_equally(audio, clips, began=0.0, cache=None):
 
 
 def _reading(heard, name, low=float("-inf"), high=float("inf")):
-    """`name`'s reading of the characters it heard in `low`..`high`."""
-    return "".join(r for (c, a, b, _), r in zip(heard["versions"][name], heard["readings"][name]) if low <= (a + b) / 2 < high)
+    """`name`'s reading of the characters it heard in `low`..`high`. The
+    aligner puts a word's reading on its first character, "" on the rest,
+    so a word a cut falls inside is read in proportion to its characters
+    either side: else a caption cut off at a change of speaker inside
+    what the aligner took for one word (なんて｜うんどうだろう) reads as
+    nothing, no two agree on it, and it is dropped."""
+    chars = heard["versions"][name]
+    return _read_where(heard, name, lambda i: low <= (chars[i][1] + chars[i][2]) / 2 < high)
+
+
+def _read_where(heard, name, keep):
+    """`name`'s reading of the characters it heard whose index `keep`
+    holds true of, a word a cut falls inside read in proportion (see _reading)."""
+    chars, reads = heard["versions"][name], heard["readings"][name]
+    parts = []
+    k = 0
+    while k < len(chars):
+        j = k + 1
+        while j < len(chars) and not reads[j]:
+            j += 1
+        inside = [i - k for i in range(k, j) if keep(i)]
+        if inside:
+            size, reading = j - k, reads[k]
+            parts.append(reading[round(len(reading) * inside[0] / size):round(len(reading) * (inside[-1] + 1) / size)])
+        k = j
+    return "".join(parts)
 
 
 def _agreeing(heard, low=float("-inf"), high=float("inf")):
@@ -3164,10 +3188,11 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             score += 0.3  # Whisper writes a space where the speaker broke off
         return score
 
-    def cut_after(i, heard, why, min_chars=SPLIT_MIN_PIECE_CHARS):
+    def cut_after(i, heard, why, min_chars=SPLIT_MIN_PIECE_CHARS, quiet=None):
         """A cut after word i, asked for by `why`, when the pieces either
         side can stand alone (`min_chars` each) and the cut falls in
-        `within`."""
+        `within`. `quiet`, (from, to), is looked in for a pause too, as
+        if under the two words: the quiet between two speakers' turns."""
         if not (low <= words[i][2] and words[i + 1][1] <= high) or heard_in[i] != heard_in[i + 1]:
             return False
         for _, _, members in grouped():
@@ -3179,7 +3204,11 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
                     return False
                 if before.count("「") + before.count("『") > before.count("」") + before.count("』"):
                     return False  # a sentence being quoted ends inside the one quoting it
-                return grid.cut_between(words[i], words[i + 1], heard, tail=before, head=after, why=why)
+                first, second = words[i], words[i + 1]
+                if quiet:
+                    first = (first[0], min(first[1], quiet[0]), first[2])
+                    second = (second[0], second[1], max(second[2], quiet[1]))
+                return grid.cut_between(first, second, heard, tail=before, head=after, why=why)
         return False
 
     # Where Whisper ended a sentence: heard to, in its punctuation; or
@@ -3200,22 +3229,47 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
     # early, so the first break in the quiet is the speakers' own (晴れる
     # かな｜ええ, not かなえ｜え); and a cut only between two words heard on
     # either side of it as the two speakers'.
+    def heard_apart(k, end, start):
+        """How unlike the others' versions a cut after word k reads: the
+        edit distance of the chosen recognizer's reading either side of
+        it to each other's either side of the middle of the quiet `end`..
+        `start`, within the clip; None without others to go by."""
+        if equal is None or not equal[heard_in[k]] or equal[heard_in[k]].get("alone"):
+            return None
+        clip, name = equal[heard_in[k]], chosen_by[heard_in[k]]
+        if name is None or len(clip["versions"]) < 2:
+            return None
+        # The chosen one's own characters by their place, the words being
+        # them in order: k2 can time two in a row the same.
+        at, middle = k - heard_in.index(heard_in[k]), (end + start) / 2
+        mine = (_read_where(clip, name, lambda i: i <= at), _read_where(clip, name, lambda i: i > at))
+        return sum(_edit_distance(mine[0], _reading(clip, other, high=middle)) + _edit_distance(mine[1], _reading(clip, other, middle))
+                   for other in clip["versions"] if other != name)
+
     if turns:
         floor = steady_floor(turns)
         for (_, end, before), (start, _, after) in zip(floor, floor[1:]):
             if before == after:
                 continue
-            breaks = [
-                k for k in range(len(words) - 1)
-                if end - SPEAKER_SNAP <= words[k + 1][1] <= start + SPEAKER_SNAP
-                and speaker_at(floor, (words[k][1] + words[k][2]) / 2) in (before, None)
+            near = [k for k in range(len(words) - 1) if end - SPEAKER_SNAP <= words[k + 1][1] <= start + SPEAKER_SNAP]
+            # Each side heard as its speaker's, by the words' times; or, with
+            # the others' versions to judge by, any: k2 can time the first
+            # speaker's last word into the second's turn.
+            breaks = near if near and all(heard_apart(k, end, start) is not None for k in near) else [
+                k for k in near
+                if speaker_at(floor, (words[k][1] + words[k][2]) / 2) in (before, None)
                 and speaker_at(floor, (words[k + 1][1] + words[k + 1][2]) / 2) in (after, None)
             ]
             if breaks:
                 # In the quiet between the two turns if one is, the first
-                # such; else the nearest to it.
-                k = min(breaks, key=lambda k: (max(end - words[k + 1][1], words[k + 1][1] - start, 0), words[k + 1][1]))
-                cut_after(k, heard=True, why="a change of speaker", min_chars=SPEAKER_MIN_PIECE_CHARS)
+                # such; else the nearest to it. With the other recognizers'
+                # versions to hand, first the break whose text either side
+                # reads most like theirs either side of the quiet: k2 can
+                # stretch a speaker's last word across it (恋な｜んて, its ん
+                # half a second long), where the aligner's times for the
+                # others put it where it was said.
+                k = min(breaks, key=lambda k: (heard_apart(k, end, start) or 0, max(end - words[k + 1][1], words[k + 1][1] - start, 0), words[k + 1][1]))
+                cut_after(k, heard=True, why="a change of speaker", min_chars=SPEAKER_MIN_PIECE_CHARS, quiet=(end, start))
 
     pieces = grouped()
     texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
