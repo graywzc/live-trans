@@ -52,6 +52,10 @@ struct PrefetchStatus: Decodable, Equatable {
     /// Up to where in the video the captions are cut where the speaker
     /// changes; a server from before says nothing.
     var cut: Double?
+    /// The stretches the captions are made over, in the order of the
+    /// video: from its start, and from each place it was played ahead of
+    /// them. A server from before says nothing.
+    var stretches: [CaptionStretch]?
     /// Whether a dev job's audio came from the host's cache of it.
     var cached: Bool?
     /// Whether the audio is still being fetched. A server that does not
@@ -83,12 +87,25 @@ struct PrefetchStatus: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case state, error, duration, start, fetched, ready, count, lines, step, analysed, worded, aligned, speakers
-        case cached, fetching, captions, others, video, bundle, running, spoken, telling, cut
+        case cached, fetching, captions, others, video, bundle, running, spoken, telling, cut, stretches
         case othersReady = "others_ready"
         case bundleFetched = "bundle_fetched"
         case bundleURL = "bundle_url"
         case bundleServeError = "bundle_serve_error"
     }
+}
+
+/// A stretch of the video the host makes the captions over from its start
+/// on, as it does the whole video from the top: the first from there, each
+/// other from where the video was played ahead of them. Where it begins and
+/// where the next does (nil: to the end), and up to where its captions,
+/// its speakers and its speaker cuts are made, in seconds of the video.
+struct CaptionStretch: Decodable, Equatable {
+    var start: Double
+    var end: Double?
+    var ready: Double
+    var spoken: Double
+    var cut: Double
 }
 
 /// A dev job's caption heard again by the other recognizers, to set beside
@@ -418,6 +435,21 @@ struct ASRClient {
         let (data, response) = try await session.data(for: request)
         struct Payload: Decodable { var state: String? }
         _ = try Self.decode(Payload.self, from: data, statusCode: response)
+    }
+
+    /// The video was played from `seconds`: whether the host makes the
+    /// job's captions on from there, which it does only where it has the
+    /// audio and they are well behind. A server from before answers 404,
+    /// which throws.
+    func jumpPrefetch(job: String, to seconds: Double) async throws -> Bool {
+        var request = URLRequest(url: baseURL.appending(path: "prefetch/\(job)/jump"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["at": seconds])
+        let (data, response) = try await session.data(for: request)
+        struct Payload: Decodable { var jumped: Bool }
+        return try Self.decode(Payload.self, from: data, statusCode: response).jumped
     }
 
     /// The server's log from line `since` on. A server from before it kept

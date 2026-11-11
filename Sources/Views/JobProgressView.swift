@@ -38,6 +38,13 @@ struct JobProgressView: View {
                         Capsule().fill(color)
                             .frame(width: max(width * VideoBar.fraction(task.reached, of: total), Self.barHeight))
                     }
+                    // Lit too where the video was played ahead of it, from there.
+                    ForEach(Array(task.ahead.enumerated()), id: \.offset) { _, stretch in
+                        let from = width * VideoBar.fraction(stretch.lowerBound, of: total)
+                        Capsule().fill(color)
+                            .frame(width: max(width * VideoBar.fraction(stretch.upperBound, of: total) - from, Self.barHeight))
+                            .offset(x: from)
+                    }
                     if let stretch = task.underWay {
                         // Striped: under way over that stretch.
                         let from = width * VideoBar.fraction(stretch.lowerBound, of: total)
