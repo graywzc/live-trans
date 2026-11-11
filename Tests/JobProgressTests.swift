@@ -24,6 +24,20 @@ final class JobProgressTests: XCTestCase {
         XCTAssertEqual(tasks[2].underWay, 600...900, "the stretch being told apart")
         XCTAssertTrue(tasks.allSatisfy { RunningStatus.mark(for: $0.task) != nil }, "each has its swatch in the running list")
 
+        // The speech found from the start, where the host says how far it
+        // has looked, after the audio and never past it.
+        let found = DevPipeline.progress(
+            fetched: 1050, total: 1200, reached: Self.reached, translated: Self.translated,
+            speakers: .init(told: 600), cut: 600, analysed: 1000
+        )
+        XCTAssertEqual(found.prefix(3).map(\.task), ["Audio download", "Speech detection", "k2 captioning"])
+        XCTAssertEqual(found[1].reached, 1000)
+        XCTAssertEqual(DevPipeline.progress(
+            fetched: 300, total: 1200, reached: [], translated: [], speakers: .init(told: 0), cut: nil, analysed: 320
+        )[1].reached, 300)
+        XCTAssertEqual(RunningStatus.mark(for: "Speech detection (FireRedVAD + segmentation-3.0)")?.color,
+                       JobProgressView.speechColor, "the host's task, named with its finder, is the bar's")
+
         let done = DevPipeline.progress(
             fetched: 1200, total: 1200, reached: Self.reached, translated: [], speakers: .init(told: 0, done: true), cut: nil
         )
@@ -36,9 +50,9 @@ final class JobProgressTests: XCTestCase {
     func testEachBarIsLitAsFarAsItsTaskHasCome() throws {
         let tasks = DevPipeline.progress(
             fetched: 1050, total: 1200, reached: Self.reached, translated: Self.translated,
-            speakers: .init(told: 600, telling: 600...900), cut: 600
+            speakers: .init(told: 600, telling: 600...900), cut: 600, analysed: 1000
         )
-        let size = CGSize(width: 640, height: 200)
+        let size = CGSize(width: 640, height: 220)
         let window = TestScreen.window(size: size)
         defer { window.close() }
         window.contentView = NSHostingView(

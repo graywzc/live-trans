@@ -77,8 +77,9 @@ struct JobProgressView: View {
     /// Each task's color, also its swatch in the running list: none of them
     /// the playhead's orange.
     static func color(of task: String) -> Color {
-        switch task {
+        switch barName(of: task) {
         case "Audio download": fetchedColor
+        case "Speech detection": speechColor
         case "Speaker detection": speakersColor
         case "Cutting captions at speaker changes": Color.teal.opacity(0.8)
         default:
@@ -94,13 +95,21 @@ struct JobProgressView: View {
 
     /// Whether the task has a bar here, and so a swatch in the running list.
     static func hasBar(_ task: String) -> Bool {
-        ["Audio download", "Speaker detection", "Cutting captions at speaker changes"].contains(task)
+        ["Audio download", "Speech detection", "Speaker detection", "Cutting captions at speaker changes"]
+            .contains(barName(of: task))
             || recognizers.contains { task == "\($0) captioning" || task == "Translating \($0) captions" }
+    }
+
+    /// The bar a running task is shown on: the speech detection the host
+    /// names with its finder, "Speech detection (FireRedVAD)", on its one.
+    static func barName(of task: String) -> String {
+        task.hasPrefix("Speech detection (") ? "Speech detection" : task
     }
 
     static let recognizers = ["k2", "nemo", "qwen"]
     static let fetchedColor = Color.white.opacity(0.3)
     static let speakersColor = Color.green.opacity(0.7)
+    static let speechColor = Color.yellow.opacity(0.75)
 
     static func color(ofRecognizer name: String) -> Color {
         switch name {

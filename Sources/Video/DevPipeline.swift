@@ -358,7 +358,7 @@ final class DevPipeline {
         let total = Self.total(of: job)
         let tasks = Self.progress(
             fetched: job.fetched, total: total, reached: reached(on: playhead), translated: translated(on: playhead),
-            speakers: speakers, cut: job.cut
+            speakers: speakers, cut: job.cut, analysed: job.analysed
         )
         return (total, Self.adding(ahead: Self.ahead(
             stretches: job.stretches, total: total, own: ownCaptions(of: job), others: others
@@ -407,15 +407,19 @@ final class DevPipeline {
         }
     }
 
-    /// The audio, then k2's captions, the speakers told apart and the
-    /// captions cut where they change (when the host says), the other
-    /// recognizers hearing the cut captions, and each one's translations.
+    /// The audio, the speech found in it from the start (when the host
+    /// says), then k2's captions, the speakers told apart and the captions
+    /// cut where they change (when the host says), the other recognizers
+    /// hearing the cut captions, and each one's translations.
     nonisolated static func progress(
         fetched: Double, total: Double, reached: [(label: String, seconds: Double)],
-        translated: [(label: String, seconds: Double)], speakers: SpeakerState, cut: Double?
+        translated: [(label: String, seconds: Double)], speakers: SpeakerState, cut: Double?,
+        analysed: Double? = nil
     ) -> [Progress] {
         let heard = reached.map { Progress(task: "\($0.label) captioning", reached: $0.seconds) }
-        var tasks = [Progress(task: "Audio download", reached: fetched)] + heard.prefix(1)
+        var tasks = [Progress(task: "Audio download", reached: fetched)]
+        if let analysed { tasks.append(Progress(task: "Speech detection", reached: min(analysed, fetched))) }
+        tasks += heard.prefix(1)
         tasks.append(Progress(
             task: "Speaker detection", reached: speakers.done ? total : speakers.told,
             underWay: speakers.done ? nil : speakers.telling
