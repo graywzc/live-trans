@@ -299,6 +299,48 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(status.lines, [CaptionPair(ja: "あ", en: "a", start: 35, end: 36)])
     }
 
+    func testTheVideoMovedIsToldFromOneThatPlayedOnOrStalled() {
+        let at = Date()
+        let playing = VideoMoment(tabID: 1, url: "u", seconds: 100, rate: 1, playing: true)
+        let moment = { (seconds: Double) in VideoMoment(tabID: 1, url: "u", seconds: seconds, rate: 1, playing: true) }
+        // Played on a second, or held up a moment by Chrome: not moved.
+        XCTAssertFalse(Prefetcher.wasMoved(from: playing, at: at, to: moment(101), at: at + 1))
+        XCTAssertFalse(Prefetcher.wasMoved(from: playing, at: at, to: moment(99.5), at: at + 1))
+        // Clicked far on, or back.
+        XCTAssertTrue(Prefetcher.wasMoved(from: playing, at: at, to: moment(700), at: at + 1))
+        XCTAssertTrue(Prefetcher.wasMoved(from: playing, at: at, to: moment(40), at: at + 1))
+        // Paused, it stays where it was.
+        let paused = VideoMoment(tabID: 1, url: "u", seconds: 100, rate: 1, playing: false)
+        XCTAssertFalse(Prefetcher.wasMoved(from: paused, at: at, to: moment(100), at: at + 10))
+        XCTAssertTrue(Prefetcher.wasMoved(from: paused, at: at, to: moment(110), at: at + 10))
+    }
+
+    func testOnlyAPlaceInTheFetchedAudioPastTheCaptionsIsAhead() {
+        var job = DevPipeline.Job(id: "j", tabID: 1, page: "u", step: .speechMean)
+        job.fetched = 1800
+        job.ready = 300
+        XCTAssertFalse(DevPipeline.isAhead(of: job, at: 200), "captioned already")
+        XCTAssertTrue(DevPipeline.isAhead(of: job, at: 900))
+        XCTAssertFalse(DevPipeline.isAhead(of: job, at: 1900), "not fetched yet")
+        // Once played ahead into, each stretch by its own captions.
+        job.stretches = [
+            CaptionStretch(start: 0, end: 900, ready: 300, spoken: 0, cut: 0),
+            CaptionStretch(start: 900, end: nil, ready: 1000, spoken: 900, cut: 900),
+        ]
+        XCTAssertTrue(DevPipeline.isAhead(of: job, at: 600), "passed over")
+        XCTAssertFalse(DevPipeline.isAhead(of: job, at: 950))
+        XCTAssertTrue(DevPipeline.isAhead(of: job, at: 1500))
+    }
+
+    func testStatusTellsTheStretchesTheCaptionsAreMadeOver() throws {
+        let json = #"{"state":"running","fetched":1800,"ready":300,"count":0,"lines":[],"stretches":[{"start":0,"end":900,"ready":300,"spoken":0,"cut":0},{"start":900,"end":null,"ready":1000,"spoken":900,"cut":900}]}"#
+        let status = try JSONDecoder().decode(PrefetchStatus.self, from: Data(json.utf8))
+        XCTAssertEqual(status.stretches, [
+            CaptionStretch(start: 0, end: 900, ready: 300, spoken: 0, cut: 0),
+            CaptionStretch(start: 900, end: nil, ready: 1000, spoken: 900, cut: 900),
+        ])
+    }
+
     @MainActor
     func testFetchedLinesLandByVideoTimeAndReplaceWhatWasHeardLive() {
         let engine = CaptionEngine()

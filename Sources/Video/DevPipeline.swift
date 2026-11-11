@@ -52,8 +52,11 @@ final class DevPipeline {
         var keeps = true
         /// How far the audio has come, from the video's start.
         var fetched = 0.0
-        /// Up to where k2's captions are made.
+        /// Up to where k2's captions are made from the video's start.
         var ready = 0.0
+        /// The stretches they are made over, from the start and from each
+        /// place the video was played ahead of them.
+        var stretches: [CaptionStretch] = []
         /// Up to where the step has looked.
         var analysed = 0.0
         /// Up to where the words have been heard; whether re-timed.
@@ -300,9 +303,10 @@ final class DevPipeline {
     /// it is the job's: k2's, then the others', as `reached(...)` tells it.
     func reached(on playhead: VideoMoment?) -> [(label: String, seconds: Double)] {
         guard let job, isOnJob(playhead) else { return [] }
+        let end = Self.firstEnd(of: job)
         return Self.reached(
-            captions: job.captions, ready: job.ready, total: Self.total(of: job), own: ownCaptions(of: job).map(\.range),
-            others: others
+            captions: job.captions, ready: job.ready, total: Self.total(of: job),
+            own: ownCaptions(of: job).map(\.range).filter { $0.lowerBound < end }, others: others.filter { $0.start < end }
         )
     }
 
@@ -310,7 +314,11 @@ final class DevPipeline {
     /// `playhead`, when it is the job's, as `translated(...)` tells it.
     func translated(on playhead: VideoMoment?) -> [(label: String, seconds: Double)] {
         guard let job, isOnJob(playhead) else { return [] }
-        return Self.translated(captions: job.captions, total: Self.total(of: job), own: ownCaptions(of: job), others: others)
+        let end = Self.firstEnd(of: job)
+        return Self.translated(
+            captions: job.captions, total: Self.total(of: job), own: ownCaptions(of: job).filter { $0.range.lowerBound < end },
+            others: others.filter { $0.start < end }
+        )
     }
 
     /// Where telling the speakers apart is in the video at `playhead`, when
@@ -338,6 +346,9 @@ final class DevPipeline {
         let task: String
         var reached: Double
         var underWay: ClosedRange<Double>?
+        /// How far it has come in each stretch the video was played ahead
+        /// into, from its start.
+        var ahead: [ClosedRange<Double>] = []
     }
 
     /// The tasks on the video at `playhead`, when it is the job's, in the
@@ -345,10 +356,55 @@ final class DevPipeline {
     func progress(on playhead: VideoMoment?) -> (total: Double, tasks: [Progress])? {
         guard let job, let speakers = speakerState(on: playhead) else { return nil }
         let total = Self.total(of: job)
-        return (total, Self.progress(
+        let tasks = Self.progress(
             fetched: job.fetched, total: total, reached: reached(on: playhead), translated: translated(on: playhead),
             speakers: speakers, cut: job.cut
-        ))
+        )
+        return (total, Self.adding(ahead: Self.ahead(
+            stretches: job.stretches, total: total, own: ownCaptions(of: job), others: others
+        ), to: tasks))
+    }
+
+    /// Where the captions made from the video's start end: where the first
+    /// stretch the video was played ahead into begins.
+    private static func firstEnd(of job: Job) -> Double {
+        job.stretches.count > 1 ? job.stretches[0].end ?? .infinity : .infinity
+    }
+
+    /// How far each task has come in each stretch after the first, by its
+    /// name: from the stretch's start, as `reached(...)`, `translated(...)`
+    /// and the host tell it there.
+    nonisolated static func ahead(
+        stretches: [CaptionStretch], total: Double, own: [(range: ClosedRange<Double>, english: Bool)],
+        others: [OtherHearing]
+    ) -> [String: [ClosedRange<Double>]] {
+        var ahead: [String: [ClosedRange<Double>]] = [:]
+        for stretch in stretches.dropFirst() {
+            let end = stretch.end ?? total
+            let inside = own.filter { stretch.start <= $0.range.lowerBound && $0.range.lowerBound < end }
+            let heard = others.filter { stretch.start <= $0.start && $0.start < end }
+            func add(_ task: String, _ reach: Double) {
+                let reach = min(reach, end)
+                if reach > stretch.start { ahead[task, default: []].append(stretch.start...reach) }
+            }
+            for (label, seconds) in reached(captions: "running", ready: stretch.ready, total: end, own: inside.map(\.range), others: heard) {
+                add("\(label) captioning", seconds)
+            }
+            for (label, seconds) in translated(captions: "running", total: end, own: inside, others: heard) {
+                add("Translating \(label) captions", seconds)
+            }
+            add("Speaker detection", stretch.spoken)
+            add("Cutting captions at speaker changes", stretch.cut)
+        }
+        return ahead
+    }
+
+    nonisolated static func adding(ahead: [String: [ClosedRange<Double>]], to tasks: [Progress]) -> [Progress] {
+        tasks.map { task in
+            var task = task
+            task.ahead = ahead[task.task] ?? []
+            return task
+        }
     }
 
     /// The audio, then k2's captions, the speakers told apart and the
@@ -498,6 +554,34 @@ final class DevPipeline {
         self.speakers = speakers
     }
 
+    /// The video was moved to `moment`, by the bar, the timeline or in
+    /// Chrome: when that is past where the captions are made and the host
+    /// has its audio, the host makes them on from there, the speakers, the
+    /// cuts and the other recognizers following a section at a time as
+    /// from the start, and comes back for what they passed over after.
+    /// The fetch goes on as it was.
+    func seeked(to moment: VideoMoment) {
+        guard let job, isOnJob(moment), job.captions == "running", !isPaused,
+              Self.isAhead(of: job, at: moment.seconds), let client = engine.client else { return }
+        Task {
+            do {
+                guard try await client.jumpPrefetch(job: job.id, to: moment.seconds), self.job?.id == job.id else { return }
+                ActivityLog.tell("Captions go on from \(Self.clock(moment.seconds)), where the video was played;"
+                    + " what they passed over comes after")
+            } catch {
+                print("step jump: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Whether `seconds` of the job's video is in audio the host has, past
+    /// where the captions of the stretch it falls in are made.
+    nonisolated static func isAhead(of job: Job, at seconds: Double) -> Bool {
+        guard seconds < job.fetched - 1 else { return false }
+        let stretch = job.stretches.last { $0.start <= seconds }
+        return seconds > (stretch?.ready ?? job.ready)
+    }
+
     /// Plays the selected stretch in the Chrome video, which pauses at its
     /// end: the stretch itself, with no lead or tail.
     func playSelectionInChrome() {
@@ -630,6 +714,7 @@ final class DevPipeline {
             }
             updated.fetched = max(status.fetched, 0)
             updated.ready = max(status.ready, 0)
+            updated.stretches = status.stretches ?? []
             updated.duration = status.duration ?? updated.duration
             updated.state = status.state
             if status.cached == true, !updated.cached {

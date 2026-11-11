@@ -12,6 +12,13 @@ final class Prefetcher {
     /// otherwise whether there is one.
     static let pollInterval: TimeInterval = 1
     static let probeInterval: TimeInterval = 3
+    /// How far from where it was carried on to a reading of the video
+    /// must be, to have been moved there rather than have stalled a while.
+    static let seekGap: TimeInterval = 3
+
+    /// Told where the video was moved to, by the bar or in Chrome, as soon
+    /// as it is known.
+    var onSeek: (@MainActor (VideoMoment) -> Void)?
 
     /// Where the video was when last asked, and when that was.
     private(set) var playhead: VideoMoment?
@@ -94,6 +101,7 @@ final class Prefetcher {
         )
         playheadAt = Date()
         scrubbedAt = Date()
+        if let moved = self.playhead { onSeek?(moved) }
     }
 
     /// Asks the video where it is, while there is a reason to know: captions
@@ -115,6 +123,10 @@ final class Prefetcher {
         }
         missedReadings = 0
         guard asked >= scrubbedAt else { return }
+        if let before = playhead, before.tabID == moment.tabID, before.url == moment.url,
+           Self.wasMoved(from: before, at: playheadAt, to: moment, at: asked) {
+            onSeek?(moment)
+        }
         playhead = moment
         playheadAt = asked
     }
@@ -135,6 +147,13 @@ final class Prefetcher {
         if between != lull { lull = between }
         let near = id ?? between?.captionID
         if near != playingCaptionID { playingCaptionID = near }
+    }
+
+    /// Whether the video read as `after` at `afterAt` was moved there, by
+    /// more than `seekGap` from where it was carried on to from `before`.
+    nonisolated static func wasMoved(from before: VideoMoment, at beforeAt: Date, to after: VideoMoment, at afterAt: Date) -> Bool {
+        let carried = before.playing ? before.advanced(by: afterAt.timeIntervalSince(beforeAt)).seconds : before.seconds
+        return abs(after.seconds - carried) > seekGap
     }
 
     /// The caption being spoken at `seconds` of the page's video, as

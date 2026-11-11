@@ -680,6 +680,34 @@ PRODUCTION_FINISH = os.getenv("LIVETRANS_PRODUCTION_FINISH", "1") != "0"
 # rest at once when the fetch is done, else a section at a time.
 SECTION_SECONDS = float(os.getenv("LIVETRANS_SECTION_SECONDS", "600"))
 SECTION_TAIL = 60.0
+# The video played from where the captions have not reached, its audio
+# fetched already: the captions, the speakers, the speaker cuts and the
+# other recognizers go on from there, a section at a time as from the
+# start, and come back for what they passed over once they reach the end
+# or what was made before (see Stretch). Only when they are this far
+# behind the moment, so a video played on just past them is not cut into
+# pieces. They begin JUMP_LEAD before it, so the sentence being spoken
+# there is heard whole.
+JUMP_AHEAD = 20.0
+JUMP_LEAD = 3.0
+
+
+class Stretch:
+    """A stretch of a job's audio that its captions are made over from
+    its start on, as the whole of it is from the job's start: the first
+    from there, each other from where the video was played ahead of them.
+    On the samples' clock: where it starts and where the next one does
+    (None: to the end of the audio); up to where its captions, its
+    speakers and its speaker cuts are made; its batches' ends, where a
+    section may end; and whether its captions and its cuts have reached
+    its end."""
+
+    def __init__(self, start, end=None):
+        self.start, self.end = start, end
+        self.ready = self.told = self.cut = start
+        self.edges = []
+        self.heard_all = False
+        self.cut_all = False
 # Each caption is heard from a little before its start to a little after
 # its end, as a click on it plays it.
 OTHER_LEAD, OTHER_TAIL = 0.5, 0.3
@@ -3557,12 +3585,14 @@ class PrefetchJob:
         self.audio = np.zeros(0, dtype=np.float32)
         self.audio_lock = threading.Lock()
         self.fetch_done = False
+        # The captions, in the order of the video; their changes under
+        # `lines_lock`, as they are made in one place and cut in another.
         self.lines = []
+        self.lines_lock = threading.Lock()
         # What the client is sent, in order: each line as it is made, and
         # again any line made anew, which takes the place of those it
         # overlaps (a caption cut where the speaker changes).
         self.feed = []
-        self.text = ""
         self.grid = CutGrid()
         # Where the speech is found, for the batches and a step's findings.
         self.speech_model = step_speech_model(step)
@@ -3577,7 +3607,15 @@ class PrefetchJob:
         # brings its clock with it.
         self.clock = PacketClock(
             os.path.join(tempfile.gettempdir(), f"livetrans-clock-{os.getpid()}-{uuid.uuid4().hex}.crc"), self.offset)
-        self.ready = self.offset
+        # The stretches the captions are made over, in the order of the
+        # video, from the job's start and from each place the video was
+        # played ahead of them (see Stretch, jump); the one played into
+        # last, which is worked on first; and where the next is to begin,
+        # once the batch being heard is done.
+        self.stretches = [Stretch(self.offset)]
+        self.stretch_lock = threading.Lock()
+        self.focus = self.stretches[0]
+        self.jump_to = None
         # The speech step's findings: where the speech is, in seconds of
         # the video, and up to where in it Silero (or FireRedVAD) has looked.
         self.speech = []
@@ -3600,18 +3638,15 @@ class PrefetchJob:
         self.speakers = None
         self.turns = None
         # Each run of DiariZen's turns by itself, on the samples' clock: its
-        # names are its own, S1 in one run maybe not S1 in the next. Up to
-        # where on the samples' clock the speakers are told (or passed over
-        # where DiariZen failed), and the stretch being told now, in seconds
-        # of the video.
+        # names are its own, S1 in one run maybe not S1 in the next. The
+        # stretch being told now, in seconds of the video; and whether all
+        # of them came from the dev cache.
         self.turn_runs = []
-        self.told = self.offset
         self.telling = None
-        # The batches' ends, on the samples' clock, where a section may end;
-        # whether the captions have reached the end of the audio, before
-        # they are cut where the speaker changes; and whether they came
-        # whole from the dev cache (or none are made), cut already.
-        self.edges = []
+        self.speakers_kept = False
+        # Whether the captions have reached the end of every stretch,
+        # before they are cut where the speaker changes; and whether they
+        # came whole from the dev cache (or none are made), cut already.
         self.heard_all = False
         self.captions_kept = False
         # The sections cut where the speaker changes, (start, end) in
@@ -3651,7 +3686,7 @@ class PrefetchJob:
         if not step or DEV_CAPTIONS:
             threading.Thread(target=self._transcribe, daemon=True).start()
         else:
-            self.captioned = self.heard_all = self.captions_kept = True
+            self.captioned = self.heard_all = self.captions_kept = self.stretches[0].heard_all = True
         if step:
             threading.Thread(target=self._analyse, daemon=True).start()
             threading.Thread(target=self._hear_words, daemon=True).start()
@@ -3693,7 +3728,7 @@ class PrefetchJob:
         what it looked at is let go."""
         self.stop()
         with self.audio_lock:
-            kept = max(self.ready, self._samples(self.analysed)) - self.offset
+            kept = max(max(s.ready for s in self.stretches), self._samples(self.analysed)) - self.offset
             self.audio = self.audio[:int(max(kept, 0) * SAMPLE_RATE)].copy()
         if self.state == "running":
             self.state = "stopped"
@@ -3804,48 +3839,49 @@ class PrefetchJob:
         self.fetch_done = True
 
     def _transcribe(self):
-        """The captions, a batch at a time as the audio comes. A step job's
-        own state is its step's, which may be done before the captions. They
-        are cut where the speaker changes a section at a time behind them
-        (see _cut_sections); or a step job takes the captions made before
-        over the same audio, from the dev cache, and keeps those it makes
+        """The captions, a batch at a time as the audio comes: over the
+        stretch the video was last played ahead into first, then those
+        after it, then those before (see jump). A step job's own state is
+        its step's, which may be done before the captions. They are cut
+        where the speaker changes a section at a time behind them (see
+        _cut_sections); or a step job takes the captions made before over
+        the same audio, from the dev cache, and keeps those it makes
         there."""
         if self.step and self._captions_from_cache():
             return
-        position = 0.0
-        # How far the audio had come when it was last looked at for a batch.
-        looked = -1.0
+        # How far the audio had come when each stretch was last looked at
+        # for a batch.
+        looked = {}
         while not self.stop_event.is_set() and self.state in (("running", "done") if self.step else ("running",)):
-            with self.audio_lock:
-                have = self.fetched
-                done = self.fetch_done
-            if done and have <= position + 0.05:
+            self._take_jump()
+            todo = [s for s in self._in_order() if not s.heard_all]
+            if not todo:
                 print(f"prefetch {self.id}: done, {len(self.lines)} lines", flush=True)
                 self.heard_all = True
                 if not self.step:
                     self.state = "done"
                 return
-            window_end = min(have, position + PREFETCH_SCAN)
-            capped = window_end < have
-            if self.paused.is_set() or (not done and not capped and window_end - looked < PREFETCH_SCAN_STEP):
+            if self.paused.is_set():
                 time.sleep(0.25)
                 continue
-            looked = window_end
             with self.audio_lock:
-                window = self.audio[int(position * SAMPLE_RATE):int(window_end * SAMPLE_RATE)].copy()
-            with self.activity.doing(self._captioning):
-                speech = speech_stretches(window, model=self.speech_model)
-            batch = choose_batch(speech, window.size / SAMPLE_RATE, more=not done, capped=capped)
+                have = self.fetched
+                done = self.fetch_done
+            batch = None
+            for stretch in todo:
+                batch = self._next_batch(stretch, have, done, looked)
+                if batch:
+                    break
             if batch is None:
                 time.sleep(0.25)
                 continue
-            length, reason = batch
-            boundary = position + length
+            stretch, position, boundary, window, speech, reason = batch
             try:
                 with self.activity.doing(self._captioning):
                     self._transcribe_batch(
-                        self.offset + position, self.offset + boundary, window[:int(length * SAMPLE_RATE)],
-                        [(self.offset + position + a, self.offset + position + min(b, length)) for a, b in speech if a < length],
+                        self.offset + position, self.offset + boundary, window,
+                        [(self.offset + position + a, self.offset + position + min(b, boundary - position))
+                         for a, b in speech if a < boundary - position],
                         reason,
                     )
             except TranslatorDown as exc:
@@ -3861,10 +3897,97 @@ class PrefetchJob:
                 return
             if self.stop_event.is_set():
                 return
-            position = boundary
-            looked = -1.0
-            self.edges.append(self.offset + boundary)
-            self.ready = self.offset + boundary
+            looked.pop(stretch, None)
+            stretch.edges.append(self.offset + boundary)
+            stretch.ready = self.offset + boundary
+
+    def _next_batch(self, stretch, have, done, looked):
+        """The next batch of `stretch`'s captions, from where they are, when
+        there is one to hear now, given `have` seconds of audio and whether
+        that is all of it: (stretch, from, to, its audio, the speech in
+        the audio looked at, why it ends there), the times from `offset`.
+        None when it waits for more audio, or its captions are made to its
+        end, as it is then marked."""
+        position = stretch.ready - self.offset
+        ahead = None
+        if stretch.end is not None and stretch.end - self.offset <= have + 1e-6:
+            # Up to the next stretch, whose captions were begun first.
+            have, done, ahead = stretch.end - self.offset, True, "where the captions went on ahead"
+        if done and have <= position + 0.05:
+            stretch.heard_all = True
+            return None
+        window_end = min(have, position + PREFETCH_SCAN)
+        capped = window_end < have
+        if not done and not capped and window_end - looked.get(stretch, -1.0) < PREFETCH_SCAN_STEP:
+            return None
+        looked[stretch] = window_end
+        with self.audio_lock:
+            window = self.audio[int(position * SAMPLE_RATE):int(window_end * SAMPLE_RATE)].copy()
+        with self.activity.doing(self._captioning):
+            speech = speech_stretches(window, model=self.speech_model)
+        batch = choose_batch(speech, window.size / SAMPLE_RATE, more=not done, capped=capped)
+        if batch is None:
+            return None
+        length, reason = batch
+        if ahead and reason == "end of the audio":
+            reason = ahead
+        return stretch, position, position + length, window[:int(length * SAMPLE_RATE)], speech, reason
+
+    def _in_order(self):
+        """The stretches in the order they are worked on: the one the video
+        was last played ahead into, those after it, then those before."""
+        with self.stretch_lock:
+            stretches = list(self.stretches)
+            at = stretches.index(self.focus)
+        return stretches[at:] + stretches[:at]
+
+    def _end_of(self, stretch):
+        """Where `stretch` ends, on the samples' clock: where the next one
+        begins, or the end of the audio so far."""
+        return stretch.end if stretch.end is not None else self.offset + self.fetched
+
+    def jump(self, at):
+        """The video played from `at`, in seconds of it: whether the
+        captions are to go on from a little before there, once the batch
+        being heard is done (see JUMP_AHEAD). Only where the audio is
+        fetched already, and they are that far behind; the fetch goes on
+        as it was."""
+        if self.captions_kept or self.heard_all or self.stop_event.is_set() or self.caption_error \
+                or self.state not in ("running", "done"):
+            return False
+        point = self._samples(float(at))
+        with self.stretch_lock:
+            if point > self.offset + self.fetched - 1.0:
+                return False
+            stretch = next((s for s in self.stretches
+                            if s.start <= point < (s.end if s.end is not None else float("inf"))), None)
+            if stretch is None or stretch.heard_all or point - stretch.ready < JUMP_AHEAD:
+                return False
+            self.jump_to = max(point - JUMP_LEAD, stretch.ready)
+        print(f"prefetch {self.id}: played from {float(at):.0f}s, ahead of the captions", flush=True)
+        return True
+
+    def _take_jump(self):
+        """The stretch asked for by jump begun, between two batches: the one
+        it falls in ends there. When the captions have nearly reached it
+        meanwhile, they go on as they are, that stretch first."""
+        with self.stretch_lock:
+            start, self.jump_to = self.jump_to, None
+            if start is None:
+                return
+            stretch = next((s for s in self.stretches
+                            if s.start <= start < (s.end if s.end is not None else float("inf"))), None)
+            if stretch is None or stretch.heard_all:
+                return
+            if start < stretch.ready + 1.0:
+                self.focus = stretch
+                return
+            ahead = Stretch(start, stretch.end)
+            stretch.end = start
+            self.stretches.insert(self.stretches.index(stretch) + 1, ahead)
+            self.focus = ahead
+        print(f"prefetch {self.id}: captions go on from {self._video(start):.0f}s, "
+              f"{len(self.stretches)} stretches", flush=True)
 
     def _analyse(self):
         """The job's step run over the whole of its audio, from the start,
@@ -4009,49 +4132,65 @@ class PrefetchJob:
     def _tell_speakers(self):
         """Who speaks when: DiariZen a section at a time (SECTION_SECONDS,
         ending at an edge of the captions' batches), each once the captions
-        are past it, the last one to the end once they are all made; or all
-        of it found before over this very audio. Never more at once: its
-        memory grows with the audio given it (3.8 GB for ten minutes, 4.6
-        for twenty-four, which with the rest ran the GPU out of memory),
-        and the captions come first."""
+        are past it, the last one of a stretch to its end once they are all
+        made there; the stretches in the order the captions are made (see
+        _in_order). Or all of it found before over this very audio. Never
+        more at once: its memory grows with the audio given it (3.8 GB for
+        ten minutes, 4.6 for twenty-four, which with the rest ran the GPU
+        out of memory), and the captions come first."""
         while not self.stop_event.is_set() and not self.fetch_done and not self.audio.size:
             time.sleep(0.2)
         if self.cache and self.cached and (kept := self.cache.load_findings("speakers")):
             self.speakers = [tuple(s) for s in kept.get("speakers", [])]
             self.turns = [(self._samples(a), self._samples(b), who) for a, b, who in self.speakers]
             self.turn_runs = [self.turns]
-            self.told = self.offset + self.fetched
+            self.speakers_kept = True
             return
         while not self.stop_event.is_set() and self.state in ("running", "done"):
-            # Read once: the fetch may end while a section is being told,
-            # and the rest after it must still be.
-            fetched_all, heard_all = self.fetch_done, self.heard_all
-            whole = self.offset + self.fetched
-            later = [e for e in list(self.edges) if e >= self.told + SECTION_SECONDS]
-            last = fetched_all and heard_all
-            if later and not (last and whole - later[0] < SECTION_TAIL):
-                end = later[0]
-            elif last:
-                end = whole
-            else:
-                time.sleep(0.5)
-                continue
-            if end > self.told + 0.05:
+            # Read first: no stretch begins once the captions are all made.
+            heard_all = self.heard_all
+            work = None
+            for stretch in self._in_order():
+                end = self._speakers_to(stretch)
+                if end is None:
+                    continue
+                if end > stretch.told + 0.05:
+                    work = stretch, end
+                    break
+                stretch.told = max(stretch.told, end)
+            if work:
+                stretch, end = work
                 if not self._wait_while_paused():
                     return
-                self._speakers_over(self.told, end)
-            self.told = max(self.told, end)
-            if last and end >= whole:
+                self._speakers_over(stretch.told, end)
+                stretch.told = max(stretch.told, end)
+            elif heard_all and self.fetch_done and all(s.told >= self._end_of(s) - 0.05 for s in self.stretches):
                 break
+            else:
+                time.sleep(0.5)
         else:
             return
         print(f"prefetch {self.id}: {len({s[2] for s in self.speakers or []})} speakers told apart in "
               f"{len(self.turn_runs)} runs", flush=True)
         if self.cache and self.speakers is not None:
             try:
-                self.cache.save_findings("speakers", {"speakers": [list(s) for s in self.speakers]})
+                self.cache.save_findings("speakers", {"speakers": [list(s) for s in sorted(self.speakers)]})
             except OSError as exc:
                 print(f"prefetch {self.id}: speakers not cached: {exc}", flush=True)
+
+    def _speakers_to(self, stretch):
+        """Up to where the speakers of `stretch` can be told now, on the
+        samples' clock: the end of the next section the captions are past,
+        or of the stretch once they are all made there; None while they
+        are not."""
+        # Read once, before where it ends: the fetch may end while a
+        # section is being told, and the rest after it must still be.
+        last = stretch.heard_all and (stretch.end is not None or self.fetch_done)
+        whole = self._end_of(stretch)
+        later = [e for e in list(stretch.edges) if e >= stretch.told + SECTION_SECONDS]
+        if later and not (last and whole - later[0] < SECTION_TAIL):
+            return later[0]
+        return whole if last else None
 
     def _speakers_over(self, low, high):
         """DiariZen over `low`..`high` of the audio, on the samples' clock;
@@ -4076,50 +4215,58 @@ class PrefetchJob:
             (round(self._video(a), 3), round(self._video(b), 3), who) for a, b, who in turns]
         return True
 
-    def _section_after(self, low):
-        """Where the section from `low` (the samples' clock) ends, once the
-        captions are past it, and whether it is the last; None when the job
-        is stopped, has failed, or its captions have."""
-        while not self.stop_event.is_set() and self.state != "failed" and not self.caption_error:
-            heard_all = self.heard_all
-            later = [e for e in list(self.edges) if e >= low + SECTION_SECONDS]
-            if heard_all:
-                end = max(self.offset + self.fetched, low)
-                if later and end - later[0] >= SECTION_TAIL:
-                    return later[0], False
-                return end, True
-            if later and not (self.duration and self.duration - self._video(later[0]) < SECTION_TAIL):
+    def _section_after(self, stretch):
+        """Where the section of `stretch` from where its captions are cut
+        ends, once the captions are past it, and whether it is its last;
+        None while they are not."""
+        low = stretch.cut
+        heard_all = stretch.heard_all
+        later = [e for e in list(stretch.edges) if e >= low + SECTION_SECONDS]
+        if heard_all:
+            end = max(self._end_of(stretch), low)
+            if later and end - later[0] >= SECTION_TAIL:
                 return later[0], False
-            time.sleep(0.5)
+            return end, True
+        limit = self._video(stretch.end) if stretch.end is not None else self.duration
+        if later and not (limit and limit - self._video(later[0]) < SECTION_TAIL):
+            return later[0], False
         return None
 
     def _cut_sections(self):
         """The captions a section at a time, once they and the speakers are
-        past it: each caption a change of speaker falls inside heard again
-        and cut there, then given to the other recognizers (see
-        _hear_others). Once the last is cut, the captions are done, and a
-        step job keeps them."""
-        low = self.offset
+        past it, the stretches in the order the captions are made (see
+        _in_order): each caption a change of speaker falls inside heard
+        again and cut there, then given to the other recognizers (see
+        _hear_others). Once every stretch is cut to its end, the captions
+        are done, and a step job keeps them."""
         while True:
-            section = self._section_after(low)
-            if section is None:
+            if self.stop_event.is_set() or self.state == "failed" or self.caption_error:
                 return
-            high, last = section
-            while self.told < high - 0.05 and not self.stop_event.is_set() and self.state != "failed":
+            # Read first: no stretch begins once the captions are all made.
+            heard_all = self.heard_all
+            work = None
+            for stretch in self._in_order():
+                section = None if stretch.cut_all else self._section_after(stretch)
+                if section and (self.speakers_kept or stretch.told >= section[0] - 0.05):
+                    work = stretch, *section
+                    break
+            if work is None:
+                if heard_all and all(s.cut_all for s in self.stretches):
+                    break
                 time.sleep(0.5)
-            if self.stop_event.is_set() or self.state == "failed":
-                return
-            a, b = self._video(low), self._video(high)
+                continue
+            stretch, high, last = work
+            a = self._video(stretch.cut)
+            b = self._video(high) if not last else self._video(stretch.end) if stretch.end is not None else float("inf")
             if DEV_SPEAKER_CUTS and not self.captions_kept and self.turns:
                 with self.activity.doing("Cutting captions at speaker changes"):
-                    recut = self._cut_at_speakers(a, b if not last else float("inf"))
+                    recut = self._cut_at_speakers(a, b)
                 if self.stop_event.is_set():
                     return
-                print(f"prefetch {self.id}: {recut} captions cut in {a:.0f}-{b:.0f}s", flush=True)
-            self.sections.append((a, b if not last else float("inf")))
-            if last:
-                break
-            low = high
+                print(f"prefetch {self.id}: {recut} captions cut in {a:.0f}-{min(b, 1e9):.0f}s", flush=True)
+            self.sections.append((a, b))
+            stretch.cut = high
+            stretch.cut_all = last
         if self.step and self.turns:
             # Where the speaker cuts went, in seconds of the video (no
             # text), for measuring them.
@@ -4173,9 +4320,12 @@ class PrefetchJob:
             except Exception as exc:
                 print(f"prefetch {self.id}: not cut: {type(exc).__name__}: {exc}", flush=True)
                 continue
-            if len(new) > 1 and line in self.lines:
-                at = self.lines.index(line)
-                self.lines[at:at + 1] = new
+            with self.lines_lock:
+                if len(new) > 1 and line in self.lines:
+                    at = self.lines.index(line)
+                    self.lines[at:at + 1] = new
+                else:
+                    continue
                 # What was heard over it whole is no caption's now.
                 self.others.pop((line["start"], line["end"]), None)
                 self.feed.extend(new)
@@ -4195,8 +4345,7 @@ class PrefetchJob:
         self.lines = kept["lines"]
         self.cache.note_video()
         self.feed = list(self.lines)
-        self.text = "".join(line["ja"] for line in self.lines)
-        self.captions_kept = self.heard_all = True
+        self.captions_kept = self.heard_all = self.stretches[0].heard_all = True
         print(f"prefetch {self.id}: {len(self.lines)} captions from the cache", flush=True)
         tell(f"{self.step}: {len(self.lines)} captions kept from before")
         return True
@@ -4358,17 +4507,24 @@ class PrefetchJob:
         it there."""
         t0 = time.time()
         self.grid.add_speech(speech, start, end, end_reason=reason)
+        # What was said before it, which a batch of a stretch begun ahead
+        # of the captions has none of yet.
+        before = self._video(start) + 0.05
+        prompt = "".join(line["ja"] for line in list(self.lines) if (line.get("end") or 0) <= before)
         lines = self._on_video_clock(
-            hear_pieces(self.grid, audio, start, beam_size=5, prompt=self.text[-PREFETCH_PROMPT_CHARS:],
+            hear_pieces(self.grid, audio, start, beam_size=5, prompt=prompt[-PREFETCH_PROMPT_CHARS:],
                         turns=self.turns if DEV_SPEAKER_CUTS else None, heard=self.heard if self.equal else None))
-        ja = "".join(line["ja"] for line in lines)
         if self.stop_event.is_set():
             # Stopped while this was heard: its audio may be let go already.
             return
         self._keep_heard(lines)
-        self.lines.extend(lines)
+        with self.lines_lock:
+            # In the order of the video, before the captions of any stretch
+            # after it.
+            at = next((i for i, line in enumerate(self.lines) if (line.get("start") or 0) >= self._video(start)),
+                      len(self.lines))
+            self.lines[at:at] = lines
         self.feed.extend(lines)
-        self.text += ja
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
 
     def _keep_heard(self, lines):
@@ -4423,7 +4579,19 @@ class PrefetchJob:
             # Loudness of the last second fetched, on the int16 scale: a
             # fetch that yields silence is a fetch of the wrong thing.
             "level": round(float(np.sqrt(np.mean(last * last))) * 32768, 1) if last.size else 0,
-            "ready": round(self._video(self.ready), 2),
+            # Up to where the captions are made from the start; and each
+            # stretch they are made over, from there and from each place the
+            # video was played ahead of them (see Stretch), in the order of
+            # the video: up to where its captions, its speakers and its
+            # speaker cuts are made.
+            "ready": round(self._video(self.stretches[0].ready), 2),
+            "stretches": [{
+                "start": round(self._video(s.start), 2),
+                "end": round(self._video(s.end), 2) if s.end is not None else None,
+                "ready": round(self._video(s.ready), 2),
+                "spoken": round(self._video(self._end_of(s) if self.speakers_kept else s.told), 2),
+                "cut": round(self._video(min(s.cut, self._end_of(s))), 2),
+            } for s in list(self.stretches)],
             "count": len(self.feed),
             "lines": self.feed[since:],
             "step": self.step,
@@ -4433,13 +4601,13 @@ class PrefetchJob:
             # Whether the speakers are told apart over all the audio; up
             # to where in the video they are so far, and the stretch being
             # told now, [start, end] or None.
-            "speakers": self.fetch_done and self.told >= self.offset + self.fetched - 0.05 and self.telling is None,
-            "spoken": round(self._video(self.told), 2),
+            "speakers": self.fetch_done and self.telling is None and (self.speakers_kept or all(
+                s.told >= self._end_of(s) - 0.05 for s in list(self.stretches))),
+            "spoken": round(self._video(self._end_of(self.stretches[0]) if self.speakers_kept else self.stretches[0].told), 2),
             "telling": list(self.telling) if self.telling else None,
             # Up to where in the video the captions are cut where the
             # speaker changes, a section at a time behind the speakers.
-            "cut": round(min(max((b for _, b in list(self.sections)), default=0.0),
-                             self._video(self.offset + self.fetched)), 2),
+            "cut": round(self._video(min(self.stretches[0].cut, self._end_of(self.stretches[0]))), 2),
             # How many texts the other recognizers have given so far.
             "others": sum(len(texts) for texts in list(self.others.values())),
             # Whether they are all heard and translated, which keeping the
@@ -4611,6 +4779,13 @@ class Handler(BaseHTTPRequestHandler):
                 job.paused.clear()
             print(f"prefetch {job.id}: {action}d", flush=True)
             self._send(200, {"state": job.status(len(job.lines))["state"]})
+        elif action == "jump":
+            try:
+                at = float(json.loads(self._read_body() or b"{}")["at"])
+            except (ValueError, KeyError, TypeError) as exc:
+                self._send(400, {"error": f"bad body: {exc}"})
+                return
+            self._send(200, {"jumped": job.jump(at)})
         elif action == "bundle":
             try:
                 request = json.loads(self._read_body() or b"{}")

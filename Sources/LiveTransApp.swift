@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         prefetcher.start()
         devPipeline.start()
         devPipeline.keeps = { [panel] in panel.isDev }
+        prefetcher.onSeek = { [devPipeline] in devPipeline.seeked(to: $0) }
         // The activity is listed in either mode, in memory only; what was
         // listed in one goes when the other is chosen.
         activity.isEnabled = true

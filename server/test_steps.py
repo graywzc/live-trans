@@ -839,6 +839,92 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
     assert status["others_ready"] and status["others"] == 2 * 2 * len(job.lines), status
 
 
+def test_played_ahead_of_the_captions_they_go_on_from_there_and_come_back_for_what_they_passed():
+    original = (srv.speech_stretches, srv.hear_pieces, srv.choose_batch, srv.run_devtool, srv.run_devtool_lines,
+                srv.translate_text, srv.sound_events, srv.DEV_CAPTIONS, srv.SECTION_SECONDS, srv.SECTION_TAIL,
+                srv.JUMP_AHEAD, srv.JUMP_LEAD)
+    batches, told = [], []
+    # The first batch is heard only once the video has been played ahead.
+    played = threading.Event()
+
+    def heard(grid, audio, start, turns=None, within=None, **kwargs):
+        if not within:
+            batches.append(round(start, 2))
+            played.wait(10)
+        return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": round(b, 2)}
+                for a, b in grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)]
+
+    def tool(name, header, audio):
+        if name != "diarize":
+            return _not_set_up(name, header, audio)
+        told.append(round(audio.size / srv.SAMPLE_RATE))
+        return {"segments": []}
+
+    srv.speech_stretches, srv.hear_pieces = (lambda audio, model=None: loud_stretches(audio)), heard
+    srv.choose_batch = lambda speech, length, more, capped=False: (2.0, "test") if length >= 2.0 else (
+        None if more else (length, "end of the audio"))
+    srv.run_devtool = tool
+    srv.run_devtool_lines = lambda name, header, audio, on_line: None
+    srv.translate_text = lambda ja: f"译:{ja}"
+    srv.sound_events = lambda audio: {"singing": [], "music": []}
+    srv.DEV_CAPTIONS, srv.SECTION_SECONDS, srv.SECTION_TAIL = True, 2.0, 0.5
+    srv.JUMP_AHEAD, srv.JUMP_LEAD = 2.0, 0.0
+    try:
+        url = wav_file(noise_and_silence([(1, False), (0.9, True), (0.1, False)] * 4 + [(1, False)]))
+        job = srv.start_prefetch(url, "https://example.com/played-ahead", {}, 9.0, step="speech", keep=False)
+        deadline = time.time() + 20
+        while time.time() < deadline and not (job.fetch_done and batches):
+            time.sleep(0.05)
+        # Not where the captions are about to be, nor past the audio.
+        assert not job.jump(1.0) and not job.jump(20.0)
+        assert job.jump(4.0)
+        played.set()
+        deadline = time.time() + 30
+        while time.time() < deadline and not (job.others_done and job.status()["speakers"]):
+            time.sleep(0.1)
+        status = job.status()
+        # All made: no more stretches.
+        assert not job.jump(6.0)
+        job.stop()
+    finally:
+        (srv.speech_stretches, srv.hear_pieces, srv.choose_batch, srv.run_devtool, srv.run_devtool_lines,
+         srv.translate_text, srv.sound_events, srv.DEV_CAPTIONS, srv.SECTION_SECONDS, srv.SECTION_TAIL,
+         srv.JUMP_AHEAD, srv.JUMP_LEAD) = original
+    # The batch being heard was finished; then the captions went on from
+    # where the video was played to the end, and came back for the rest.
+    assert batches == [0.0, 4.0, 6.0, 8.0, 2.0], batches
+    assert [(s["start"], s["end"]) for s in status["stretches"]] == [(0.0, 4.0), (4.0, None)], status["stretches"]
+    assert all(s["ready"] == s["spoken"] == s["cut"] == (s["end"] or 9.0) for s in status["stretches"]), status
+    # The captions in the order of the video, each heard once.
+    assert [l["start"] for l in job.lines] == sorted(l["start"] for l in job.lines), job.lines
+    assert len(job.lines) == 5 and len({l["start"] for l in job.lines}) == 5, job.lines
+    # The speakers and the cuts a section at a time in each stretch, with
+    # nothing passed over and nothing twice.
+    assert sum(told) == 9 and max(told) <= 2, told
+    sections = sorted(job.sections)
+    assert sections[0][0] == 0.0 and sections[-1][1] == float("inf"), sections
+    assert all(a[1] == b[0] for a, b in zip(sections, sections[1:])), sections
+    assert status["captions"] == "done" and status["speakers"], status
+
+
+def test_the_video_played_past_the_audio_fetched_leaves_the_captions_where_they_are():
+    original = srv.JUMP_AHEAD, srv.JUMP_LEAD
+    srv.JUMP_AHEAD, srv.JUMP_LEAD = 2.0, 0.0
+    samples = noise_and_silence([(1, False), (0.9, True), (0.1, False)] * 4 + [(1, False)])
+    # A second of audio a second, as a video fetched at playback pace.
+    job = srv.start_prefetch(slow_wav_file(samples, srv.SAMPLE_RATE * 2), "https://example.com/played-past",
+                             {}, 9.0, step="speech", keep=False)
+    try:
+        deadline = time.time() + 10
+        while time.time() < deadline and job.fetched < 1:
+            time.sleep(0.05)
+        assert job.fetched < 6 and not job.jump(7.0)
+        assert job.jump_to is None and len(job.stretches) == 1
+    finally:
+        job.stop()
+        srv.JUMP_AHEAD, srv.JUMP_LEAD = original
+
+
 def slow_wav_file(samples, rate):
     """`samples` as a WAV file served over HTTP at `rate` bytes a second,
     like a video fetched at playback pace."""

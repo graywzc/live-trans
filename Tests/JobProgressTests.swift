@@ -80,6 +80,36 @@ final class JobProgressTests: XCTestCase {
         }
     }
 
+    /// Played ahead of the captions, each bar is lit in the stretch from
+    /// there as far as its task has come in it too.
+    func testEachBarIsLitInTheStretchesPlayedAheadInto() {
+        let stretches = [
+            CaptionStretch(start: 0, end: 600, ready: 300, spoken: 0, cut: 0),
+            CaptionStretch(start: 600, end: nil, ready: 900, spoken: 800, cut: 700),
+        ]
+        let own: [(range: ClosedRange<Double>, english: Bool)] = [
+            (10...20, true), (610...620, true), (880...890, false),
+        ]
+        let others = [OtherHearing(start: 610, end: 620, nemo: "甲", nemoEnglish: "a")]
+        let ahead = DevPipeline.ahead(stretches: stretches, total: 1200, own: own, others: others)
+        XCTAssertEqual(ahead["k2 captioning"], [600...900])
+        XCTAssertEqual(ahead["Speaker detection"], [600...800])
+        XCTAssertEqual(ahead["Cutting captions at speaker changes"], [600...700])
+        XCTAssertEqual(ahead["nemo captioning"], [600...620])
+        XCTAssertNil(ahead["qwen captioning"], "nothing heard there yet")
+        XCTAssertEqual(ahead["Translating k2 captions"], [600...620])
+        XCTAssertEqual(ahead["Translating nemo captions"], [600...620])
+
+        let tasks = DevPipeline.adding(ahead: ahead, to: DevPipeline.progress(
+            fetched: 1200, total: 1200, reached: Self.reached, translated: Self.translated,
+            speakers: .init(told: 0), cut: 0
+        ))
+        XCTAssertEqual(tasks.first { $0.task == "k2 captioning" }?.ahead, [600...900])
+        XCTAssertEqual(tasks.first { $0.task == "Audio download" }?.ahead, [])
+        // A job never played ahead has nothing there.
+        XCTAssertTrue(DevPipeline.ahead(stretches: Array(stretches.prefix(1)), total: 1200, own: own, others: others).isEmpty)
+    }
+
     private func pump() {
         while let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.2), inMode: .default, dequeue: true) {
             NSApp.sendEvent(event)
