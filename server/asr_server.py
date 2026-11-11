@@ -567,7 +567,34 @@ _WORD_LOOP = re.compile(r"(.{1,4}?)\1{3,}")
 # loaded: Qwen3-ASR, the aligner and DiariZen take turns. DiariZen holds
 # 4.6 GB over a whole episode; let in beside the other two (and an older
 # server still running) it ran the card out of memory, and they with it.
-_gpu_gate = threading.Lock()
+class GpuGate:
+    """A lock that knows who holds it and since when, so the time a job
+    waits for the GPU can be put down to what kept it (see `held`)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.holder, self.since = None, None
+
+    def use(self, name):
+        gate = self
+
+        class _Use:
+            def __enter__(self):
+                gate._lock.acquire()
+                gate.holder, gate.since = name, time.time()
+
+            def __exit__(self, *exc):
+                gate.holder, gate.since = None, None
+                gate._lock.release()
+        return _Use()
+
+    def held(self):
+        """Who holds the GPU now and for how long, for a log line."""
+        holder, since = self.holder, self.since
+        return f"{holder} for {time.time() - since:.0f}s" if holder and since else "free"
+
+
+_gpu_gate = GpuGate()
 # What nemo-v2 writes that is not said, which the aligner cannot place.
 _UNSPOKEN = set("。、，．,.!?！？…‥「」『』（）()[]{}〜~・♪♬♩* \t\n\u3000")
 
@@ -585,7 +612,7 @@ def heard_words(audio, pieces):
 
     run_devtool_lines("hear_nemo", {"clips": [[start, start + length] for start, length in pieces]}, audio, heard)
     chars = [[ch for ch in _WORD_LOOP.sub("", text) if ch not in _UNSPOKEN] for text in texts]
-    with _gpu_gate:
+    with _gpu_gate.use("timeline words aligner"):
         timed = run_devtool("align", {"pieces": [
             {"start": start, "length": length, "words": [[0.0, 0.0, ch, 1.0] for ch in heard_chars]}
             for (start, length), heard_chars in zip(pieces, chars)
@@ -912,7 +939,7 @@ def _unstray(chars, speech):
     return chars
 
 
-def hear_equally(audio, clips, began=0.0, cache=None, speech=None):
+def hear_equally(audio, clips, began=0.0, cache=None, speech=None, timing=None):
     """Each of `clips` [(start, end), ...] (seconds into `audio`, which
     starts `began` into the video) heard by the three recognizers: per
     clip {"versions": {name: [[char, start, end, ends a sentence], ...]},
@@ -925,8 +952,10 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None):
     keeps each clip heard by its times, so hearing it again (cutting a
     caption where the speaker changes) runs no recognizer. `speech`,
     [(start, end)] in seconds of the video, is where the speech is, for
-    telling a stray first or last character (_unstray)."""
+    telling a stray first or last character (_unstray). `timing`, a dict,
+    is given how long each took and waited for the GPU, in seconds."""
     cache = {} if cache is None else cache
+    timing = {} if timing is None else timing
     found = {}
     key = lambda clip: (round(began + clip[0], 2), round(began + clip[1], 2))
     todo = [clip for clip in clips if key(clip) not in cache]
@@ -936,24 +965,34 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None):
         activity = getattr(_activity, "current", None)
 
         def hear_k2():
+            t0 = time.time()
             with (activity.doing("k2 captioning") if activity else contextlib.nullcontext()):
                 for k, (a, b) in enumerate(todo):
                     heard = []
                     run_reazon(audio, words=heard, clips=[(a, b)], piece=EQUAL_K2_PIECE)
                     k2[k] = [[text, min(start + K2_LEAD, b), min(end + K2_LEAD, b), False]
                              for text, start, end in heard if text.strip()]
+            timing["k2"] = time.time() - t0
 
         def hear(name, worker, gate):
+            t0 = time.time()
             with (activity.doing(f"{name} captioning") if activity else contextlib.nullcontext()), gate:
+                got = time.time()
+                if got - t0 > 0.5:
+                    timing[f"{name} waited"] = got - t0
                 try:
                     answers = _workers[worker].ask({"clips": [list(clip) for clip in todo]}, audio)
                     texts[name] = {answer["i"]: answer["text"] for answer in answers}
                 except Exception as exc:
                     print(f"{name} not heard: {exc}", flush=True)
+                timing[name] = time.time() - got
 
         threads = [threading.Thread(target=hear_k2, daemon=True)]
         threads += [threading.Thread(target=hear, args=(name, worker, gate), daemon=True)
-                    for name, worker, gate in (("nemo", "hear_nemo", contextlib.nullcontext()), ("qwen", "hear_qwen", _gpu_gate))]
+                    for name, worker, gate in (("nemo", "hear_nemo", contextlib.nullcontext()), ("qwen", "hear_qwen", _gpu_gate.use("qwen captioning")))]
+        held = _gpu_gate.held()
+        if held != "free":
+            timing["GPU held by"] = held
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -962,7 +1001,14 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None):
         timed, readings = {}, None
         names = list(chars)
         try:
-            with (activity.doing("Timing the three versions") if activity else contextlib.nullcontext()), _gpu_gate:
+            t0 = time.time()
+            held = _gpu_gate.held()
+            with (activity.doing("Timing the three versions") if activity else contextlib.nullcontext()), \
+                    _gpu_gate.use("the aligner"):
+                got = time.time()
+                if got - t0 > 0.5:
+                    timing["aligner waited"] = got - t0
+                    timing["aligner waited for"] = held
                 answer = _workers["align"].ask({
                     "pieces": [{"start": a, "length": b - a, "words": [[0.0, 0.0, c, 1.0] for c, _ in chars[name][k]]}
                                for name in names for k, (a, b) in enumerate(todo)]
@@ -971,6 +1017,7 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None):
                     "read": ["".join(c for c, *_ in k2[k]) for k in range(len(todo))]
                             + ["".join(c for c, _ in chars[name][k]) for name in names for k in range(len(todo))],
                 }, audio, lines=False)
+            timing["aligner"] = time.time() - got
             pieces, readings = answer["pieces"], answer["readings"]
             for n, name in enumerate(names + ["k2"]):
                 timed[name] = pieces[n * len(todo):(n + 1) * len(todo)]
@@ -3157,7 +3204,7 @@ def steady_floor(turns):
     return steady
 
 
-def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None, heard=None):
+def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None, heard=None, timing=None):
     """`audio`, the video from `began` on, heard by its hard pieces, and
     its words put into the pieces of `grid`: the lines [{"ja", "en",
     "start", "end"}] of the pieces with words in them, those partly in
@@ -3170,7 +3217,8 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
     (hear_equally), keeping what they heard in it: each line is then the
     chosen recognizer's, "heard_by" naming it and "heard" holding the
     others' text over it, and a stretch fewer than two of them heard alike
-    is no line."""
+    is no line; `timing`, a dict, is given how long they took (see
+    hear_equally)."""
     import bisect
 
     low, high = within or (began, began + audio.size / SAMPLE_RATE)
@@ -3180,7 +3228,8 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
     if heard is not None:
         with grid.lock:
             speech = list(grid.speech)
-        equal = hear_equally(audio, [(max(a - began, 0), b - began) for a, b in clips], began, heard, speech)
+        equal = hear_equally(audio, [(max(a - began, 0), b - began) for a, b in clips], began, heard, speech,
+                             timing=timing)
         chosen_by = equal_words(equal, words, breaks, began)
     else:
         run_whisper(
@@ -3349,6 +3398,7 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
 
     pieces = grouped()
     texts = ["".join(words[j][0] for j in members).strip() for _, _, members in pieces]
+    translating = time.time()
     with doing(f"Translating {recognizer_name()} captions"):
         pairs = None
         if TRANSLATE_BACKEND == "ollama" and not _ollama_ok:
@@ -3395,6 +3445,8 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
                 raise
             except Exception as exc:
                 print(f"pieces not checked: {exc}", flush=True)
+    if timing is not None:
+        timing["translator"] = time.time() - translating
     lines = []
     for (a, b, members), text, en in zip(pieces, texts, english):
         if not text:
@@ -3616,6 +3668,14 @@ class PrefetchJob:
         self.stretch_lock = threading.Lock()
         self.focus = self.stretches[0]
         self.jump_to = None
+        # For the timing lines in the log after a jump: when it was asked
+        # for, where its stretch begins, and whether its first captions
+        # were made and sent to the app yet.
+        self.jumped_at = None
+        self.jumped_from = None
+        self.jump_made = self.jump_sent = False
+        # How long the speech was looked for, for the last batch.
+        self.finding = 0.0
         # The speech step's findings: where the speech is, in seconds of
         # the video, and up to where in it Silero (or FireRedVAD) has looked.
         self.speech = []
@@ -3923,8 +3983,10 @@ class PrefetchJob:
         looked[stretch] = window_end
         with self.audio_lock:
             window = self.audio[int(position * SAMPLE_RATE):int(window_end * SAMPLE_RATE)].copy()
+        found = time.time()
         with self.activity.doing(self._captioning):
             speech = speech_stretches(window, model=self.speech_model)
+        self.finding = time.time() - found
         batch = choose_batch(speech, window.size / SAMPLE_RATE, more=not done, capped=capped)
         if batch is None:
             return None
@@ -3952,19 +4014,28 @@ class PrefetchJob:
         being heard is done (see JUMP_AHEAD). Only where the audio is
         fetched already, and they are that far behind; the fetch goes on
         as it was."""
+        def refused(why):
+            print(f"prefetch {self.id}: timing: played from {float(at):.0f}s, captions stay: {why}", flush=True)
+            return False
+
         if self.captions_kept or self.heard_all or self.stop_event.is_set() or self.caption_error \
                 or self.state not in ("running", "done"):
-            return False
+            return refused("captions kept, done or stopped")
         point = self._samples(float(at))
         with self.stretch_lock:
             if point > self.offset + self.fetched - 1.0:
-                return False
+                return refused(f"audio fetched only to {self._video(self.offset + self.fetched):.0f}s")
             stretch = next((s for s in self.stretches
                             if s.start <= point < (s.end if s.end is not None else float("inf"))), None)
-            if stretch is None or stretch.heard_all or point - stretch.ready < JUMP_AHEAD:
-                return False
+            if stretch is None or stretch.heard_all:
+                return refused("captions made there already")
+            if point - stretch.ready < JUMP_AHEAD:
+                return refused(f"captions at {self._video(stretch.ready):.0f}s, within {JUMP_AHEAD:.0f}s")
             self.jump_to = max(point - JUMP_LEAD, stretch.ready)
-        print(f"prefetch {self.id}: played from {float(at):.0f}s, ahead of the captions", flush=True)
+            self.jumped_at, self.jumped_from = time.time(), self.jump_to
+            self.jump_made = self.jump_sent = False
+        print(f"prefetch {self.id}: timing: played from {float(at):.0f}s, ahead of the captions at "
+              f"{self._video(stretch.ready):.0f}s; GPU {_gpu_gate.held()}", flush=True)
         return True
 
     def _take_jump(self):
@@ -3986,8 +4057,12 @@ class PrefetchJob:
             stretch.end = start
             self.stretches.insert(self.stretches.index(stretch) + 1, ahead)
             self.focus = ahead
-        print(f"prefetch {self.id}: captions go on from {self._video(start):.0f}s, "
-              f"{len(self.stretches)} stretches", flush=True)
+        print(f"prefetch {self.id}: timing: captions go on from {self._video(start):.0f}s, "
+              f"{len(self.stretches)} stretches, {self._since_jump()} (the batch before it heard)", flush=True)
+
+    def _since_jump(self):
+        """How long since the video was played ahead, for a log line."""
+        return f"{time.time() - self.jumped_at:.1f}s after the jump" if self.jumped_at else "no jump"
 
     def _analyse(self):
         """The job's step run over the whole of its audio, from the start,
@@ -4200,8 +4275,12 @@ class PrefetchJob:
             audio = self.audio[int((low - self.offset) * SAMPLE_RATE):int((high - self.offset) * SAMPLE_RATE)].copy()
         self.telling = (round(self._video(low), 2), round(self._video(high), 2))
         try:
-            with self.activity.doing("Speaker detection"), _gpu_gate:
+            asked = time.time()
+            with self.activity.doing("Speaker detection"), _gpu_gate.use(f"speakers {self._video(low):.0f}-{self._video(high):.0f}s"):
+                got = time.time()
                 found = run_devtool("diarize", {}, audio)["segments"]
+            print(f"prefetch {self.id}: timing: speakers {self._video(low):.0f}-{self._video(high):.0f}s in "
+                  f"{time.time() - got:.1f}s, {got - asked:.1f}s waiting for the GPU", flush=True)
         except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             print(f"prefetch {self.id}: speakers: {exc}", flush=True)
             self.turns = self.turns or []
@@ -4511,9 +4590,12 @@ class PrefetchJob:
         # of the captions has none of yet.
         before = self._video(start) + 0.05
         prompt = "".join(line["ja"] for line in list(self.lines) if (line.get("end") or 0) <= before)
+        timing = {}
+        began = time.time()
         lines = self._on_video_clock(
             hear_pieces(self.grid, audio, start, beam_size=5, prompt=prompt[-PREFETCH_PROMPT_CHARS:],
-                        turns=self.turns if DEV_SPEAKER_CUTS else None, heard=self.heard if self.equal else None))
+                        turns=self.turns if DEV_SPEAKER_CUTS else None, heard=self.heard if self.equal else None,
+                        timing=timing))
         if self.stop_event.is_set():
             # Stopped while this was heard: its audio may be let go already.
             return
@@ -4526,6 +4608,17 @@ class PrefetchJob:
             self.lines[at:at] = lines
         self.feed.extend(lines)
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
+        spoken = sum(b - a for a, b in speech)
+        parts = ", ".join(f"{name} {value:.1f}s" if isinstance(value, float) else f"{name} {value}"
+                          for name, value in timing.items())
+        first = self.jumped_from is not None and not self.jump_made and start >= self.jumped_from - 0.05
+        if first:
+            self.jump_made = True
+        print(f"prefetch {self.id}: timing: batch {self._video(start):.0f}-{self._video(end):.0f}s "
+              f"({spoken:.0f}s of speech, ends at {reason}): {time.time() - began:.1f}s heard ({parts}), "
+              f"{time.time() - t0:.1f}s in all, the speech found in {self.finding:.1f}s"
+              + (f"; the first after the jump, {self._since_jump()}" if first else ""),
+              flush=True)
 
     def _keep_heard(self, lines):
         """The other recognizers' text over each of `lines` (hear_pieces's
@@ -4566,6 +4659,11 @@ class PrefetchJob:
     def status(self, since=0):
         with self.audio_lock:
             last = self.audio[-SAMPLE_RATE:]
+        if self.jump_made and not self.jump_sent and any(
+                (line.get("start") or 0) >= self._video(self.jumped_from) - 0.05 for line in self.feed[since:]):
+            self.jump_sent = True
+            print(f"prefetch {self.id}: timing: the first captions after the jump sent to the app, "
+                  f"{self._since_jump()}", flush=True)
         bundle, bundle_fetched = bundle_status(self.cache)
         bundle_url, bundle_serve_error = bundle_serving()
         if bundle == "done" and not bundle_url and not bundle_serve_error:
