@@ -1021,6 +1021,11 @@ struct CaptionRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Dimmed while it is k2's alone, before the three are weighed,
+            // and for good where no two of them agreed.
+            .opacity(caption.isTentative ? Self.tentativeOpacity : 1)
+            .help(caption.isDraft ? "k2's caption, shown until the three recognizers' is chosen"
+                  : caption.isAgreed ? "" : "No two recognizers heard this alike")
         }
         .foregroundStyle(.white)
         // The highlight reaches a little past the text, without moving it.
@@ -1099,6 +1104,8 @@ struct CaptionRow: View {
     }
 
     static let highlightInset: CGFloat = 6
+    /// How a caption still k2's alone, or never agreed on, shows.
+    static let tentativeOpacity = 0.5
 
     /// "4:05–4:09", from where the sentence starts to where it ends; the
     /// start alone while the end is not known.

@@ -356,4 +356,38 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(engine.captions.map(\.english), ["Yesterday", "Tasty"])
         XCTAssertEqual(engine.captions[1].moment?.end, 15)
     }
+
+    /// k2's early lines show dimmed, and give way to the batch's own at
+    /// its settling line, whatever they say; a line no two agreed on
+    /// stays dimmed.
+    @MainActor
+    func testEarlyLinesShowDimmedAndGiveWayWhenTheirBatchSettles() {
+        let engine = CaptionEngine()
+        engine.add([CaptionPair(ja: "前の文", en: "before", start: 2, end: 4)], tabID: 1, url: "u")
+        engine.add([
+            CaptionPair(ja: "雨だね", en: "rain", start: 10, end: 11.5, heardBy: "k2", draft: true),
+            CaptionPair(ja: "行こうか", en: "go", start: 12, end: 13, heardBy: "k2", draft: true),
+        ], tabID: 1, url: "u")
+        XCTAssertEqual(engine.captions.map(\.japanese), ["前の文", "雨だね", "行こうか"])
+        XCTAssertEqual(engine.captions.map(\.isTentative), [false, true, true])
+        // Settled in the same poll as more early lines of the next batch.
+        engine.add([
+            CaptionPair(ja: "次の", en: "next", start: 20, end: 21, heardBy: "k2", draft: true),
+            CaptionPair(ja: "", en: "", settles: [9, 14]),
+            CaptionPair(ja: "雨が降るね、行こう", en: "rain, go", start: 10, end: 13, heardBy: "nemo"),
+            CaptionPair(ja: "ららら", en: "la", start: 15, end: 16, heardBy: "k2", agreed: false),
+        ], tabID: 1, url: "u")
+        XCTAssertEqual(engine.captions.map(\.japanese), ["前の文", "雨が降るね、行こう", "ららら", "次の"])
+        XCTAssertEqual(engine.captions.map(\.isTentative), [false, false, true, true])
+        XCTAssertEqual(engine.captions[1].heardBy, "nemo")
+    }
+
+    /// The host's lines decode with what marks an early one.
+    func testAnEarlyLineAndASettlingLineDecode() throws {
+        let data = Data(#"[{"ja": "雨", "en": "rain", "start": 1, "end": 2, "heard_by": "k2", "draft": true}, {"ja": "", "en": "", "settles": [0, 3]}, {"ja": "雨", "en": "rain", "start": 1, "end": 2, "agreed": false}]"#.utf8)
+        let lines = try JSONDecoder().decode([CaptionPair].self, from: data)
+        XCTAssertEqual(lines.map(\.draft), [true, nil, nil])
+        XCTAssertEqual(lines[1].settles, [0, 3])
+        XCTAssertEqual(lines[2].agreed, false)
+    }
 }

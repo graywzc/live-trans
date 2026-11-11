@@ -14,6 +14,14 @@ struct Caption: Identifiable, Equatable {
     /// one the other two agreed with most. Nil from a host that names
     /// none, where it is k2's.
     var heardBy: String?
+    /// k2's line, ahead of the one chosen of the three, until its batch
+    /// settles it.
+    var isDraft = false
+    /// False where fewer than two of the three heard it alike.
+    var isAgreed = true
+
+    /// Shown dimmed: still k2's alone, or never agreed on.
+    var isTentative: Bool { isDraft || !isAgreed }
 
     /// The name the caption's own text is shown by.
     var ownRecognizer: String { heardBy ?? Caption.defaultRecognizer }

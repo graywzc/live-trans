@@ -182,14 +182,42 @@ final class CaptionEngine {
     }
 
     /// Captions fetched ahead, put among the others by where in the video
-    /// they are.
+    /// they are; at a line that settles a stretch, the early lines in it
+    /// taken out first (see `settled`).
     func add(_ lines: [CaptionPair], tabID: Int, url: String) {
+        var pending: [CaptionPair] = []
+        for line in lines {
+            if let settles = line.settles, settles.count == 2 {
+                insert(pending, tabID: tabID, url: url)
+                pending = []
+                captions = Self.settled(captions, from: settles[0], to: settles[1], url: url)
+            } else {
+                pending.append(line)
+            }
+        }
+        insert(pending, tabID: tabID, url: url)
+    }
+
+    /// `captions` without the early ones of `url` whose middle lies in
+    /// `from`...`to`: those the lines of the batch after them stand for,
+    /// whatever they say.
+    nonisolated static func settled(_ captions: [Caption], from: Double, to: Double, url: String) -> [Caption] {
+        captions.filter { caption in
+            guard caption.isDraft, let moment = caption.moment, moment.url == url else { return true }
+            let middle = (moment.seconds + (moment.end ?? moment.seconds)) / 2
+            return middle < from - 0.05 || middle > to + 0.05
+        }
+    }
+
+    private func insert(_ lines: [CaptionPair], tabID: Int, url: String) {
         let captions = lines.compactMap { line -> Caption? in
             guard !line.ja.isEmpty, let start = line.start, let end = line.end else { return nil }
             var moment = VideoMoment(tabID: tabID, url: url, seconds: start)
             moment.end = end
             var caption = makeCaption(japanese: line.ja, english: line.en, moment: moment)
             caption.heardBy = line.heardBy
+            caption.isDraft = line.draft ?? false
+            caption.isAgreed = line.agreed ?? true
             return caption
         }
         guard !captions.isEmpty else { return }
