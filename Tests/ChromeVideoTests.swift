@@ -102,6 +102,7 @@ final class ChromeVideoTests: XCTestCase {
             ChromeScript.momentJavaScript, ChromeScript.mediaProbeJavaScript,
             ChromeScript.javaScript(ChromeScript.action(for: .seek(moment))),
             ChromeScript.javaScript(ChromeScript.action(for: .scrub(to: 754.25))),
+            ChromeScript.javaScript(ChromeScript.action(for: .end)),
         ] {
             // Parsed but not run: there is no document here.
             context.exception = nil
@@ -159,6 +160,42 @@ final class ChromeVideoTests: XCTestCase {
         // With no video anywhere, the frames change nothing.
         context.evaluateScript("video.readyState = 0")
         XCTAssertEqual(context.evaluateScript(ChromeScript.javaScript(""))?.toString(), "none")
+    }
+
+    /// The pre-roll ad the player's frame config names is told from the
+    /// episode that follows it in the same video element.
+    func testTellsTheSitesPreRollAdFromTheVideo() throws {
+        let context = try XCTUnwrap(JSContext())
+        context.evaluateScript(#"""
+            const config = '<script>let ConFig={"config":{"ads":{"vod":{"time":"https:\\/\\/ads.example.net\\/u\\/clip_1.mp4","link":"https:\\/\\/x"}}}}</script>';
+            const view = { performance: { getEntriesByType: () => [] } };
+            const video = {
+                readyState: 4, clientWidth: 640, clientHeight: 360, paused: false, duration: 22,
+                currentSrc: 'https://ads.example.net/u/clip_1.mp4?k=2', mediaKeys: null,
+            };
+            video.ownerDocument = {
+                defaultView: view,
+                querySelectorAll: q => q === 'video' ? [video] : q === 'script' ? [{ textContent: config }] : [],
+            };
+            const document = video.ownerDocument;
+            const window = view;
+            const location = { href: 'https://example.tv/play/1-3.html' };
+            const navigator = { userAgent: 'Agent' };
+            """#)
+        let probe = { () throws -> MediaProbe in
+            let result = try XCTUnwrap(context.evaluateScript(ChromeScript.mediaProbeJavaScript)?.toString())
+            XCTAssertNil(context.exception)
+            return try XCTUnwrap(ChromeScript.mediaProbe(fromResult: result + "|7|Title"))
+        }
+        XCTAssertTrue(try probe().isAd)
+        // The episode, its stream assembled by the player.
+        context.evaluateScript("video.currentSrc = 'blob:https://example.tv/9'; video.duration = 1440")
+        XCTAssertFalse(try probe().isAd)
+        // Another ad file than the config's: only a pre-roll by its name.
+        context.evaluateScript("video.currentSrc = 'https://cdn.example.net/a/preroll-video_5_ab.mp4'")
+        XCTAssertTrue(try probe().isAd)
+        context.evaluateScript("video.currentSrc = 'https://cdn.example.net/a/episode.mp4'")
+        XCTAssertFalse(try probe().isAd)
     }
 
     /// Playing one sentence pauses at its end, and only that once.
@@ -418,6 +455,11 @@ final class MediaProbeTests: XCTestCase {
         ))
         XCTAssertEqual(probe.mediaURL, manifest)
         XCTAssertTrue(probe.isFetchable)
+        XCTAssertFalse(probe.isAd)
+        let ad = try XCTUnwrap(ChromeScript.mediaProbe(fromResult: result.replacingOccurrences(
+            of: "|567", with: " ad|567"
+        )))
+        XCTAssertTrue(ad.isAd)
     }
 
     func testAFileSourceComesFirstAndDRMCannotBeFetched() throws {

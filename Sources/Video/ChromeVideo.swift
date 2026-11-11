@@ -28,6 +28,9 @@ final class ChromeVideo {
         case seek(VideoMoment, exact: Bool = false)
         /// To this many seconds in, playing on if it was playing.
         case scrub(to: Double)
+        /// Straight to the end, as if it had played through: how the site's
+        /// own pre-roll ad is skipped, its player going on to the episode.
+        case end
     }
 
     private(set) var state = State.unknown
@@ -367,6 +370,8 @@ struct MediaProbe: Equatable {
     /// Under DRM: nothing can be fetched.
     let encrypted: Bool
     let userAgent: String
+    /// The site's own pre-roll ad is playing, not the video.
+    var isAd = false
 
     /// The URL ffmpeg can read, if the page gave one away; else the server
     /// asks yt-dlp about the page.
@@ -474,6 +479,10 @@ enum ChromeScript {
                 + "const resume = () => { if (v.paused) v.play(); }; "
                 + "if (was) { if (v.seeking) { v.addEventListener('seeked', resume, { once: true }); } else { resume(); } } "
                 + "return was ? 'playing' : 'paused';"
+        case .end:
+            // Not paused first: a player waits for the ad's 'ended', and
+            // play() on an ended video would start it over.
+            "if (isFinite(v.duration) && v.duration > 0) v.currentTime = v.duration;"
         }
     }
 
@@ -517,9 +526,12 @@ enum ChromeScript {
 
     /// What the page's video is made of, so its audio can be fetched ahead
     /// of the viewer: "<clear|drm> <duration> <source> <manifest> <page>
-    /// <user agent>", the texts percent-encoded. The source is empty for a
-    /// player that assembles the stream itself (a blob:), and the manifest
-    /// is the last HLS or DASH playlist the video's frame loaded, if any.
+    /// <user agent> <ad|video>", the texts percent-encoded. The source is
+    /// empty for a player that assembles the stream itself (a blob:), and
+    /// the manifest is the last HLS or DASH playlist the video's frame
+    /// loaded, if any. "ad" when the video plays the pre-roll its frame's
+    /// player config names (`"vod":{"time":"<ad file>"`, as huavod's does),
+    /// or a file named `preroll-video_…` should that config change.
     static let mediaProbeJavaScript = javaScript(
         "const src = v.currentSrc || v.src || ''; "
             // The player's own frame is the one that loaded the playlist.
@@ -528,9 +540,15 @@ enum ChromeScript {
             + "const isManifest = n => { const p = n.split('?')[0].toLowerCase(); "
             + "return p.endsWith('.m3u8') || p.endsWith('.mpd'); }; "
             + "const manifest = names.filter(isManifest).pop() || ''; "
+            + "const file = n => n.split('?')[0]; "
+            + "const config = [...v.ownerDocument.querySelectorAll('script')].map(e => e.textContent || '')"
+            + #".map(t => t.match(/"vod":\{"time":"([^"]+)"/)).find(m => m); "#
+            // The config is JSON, its slashes written "\/".
+            + #"const adFile = config ? file(config[1].replace(/\\\//g, '/')) : ''; "#
+            + #"const ad = src !== '' && (file(src) === adFile || /\/preroll-video_[^/]*$/.test(file(src))); "#
             + "return [v.mediaKeys ? 'drm' : 'clear', isFinite(v.duration) ? v.duration : 0, "
             + "encodeURIComponent(src.startsWith('blob:') ? '' : src), encodeURIComponent(manifest), "
-            + "encodeURIComponent(location.href), encodeURIComponent(navigator.userAgent)].join(' ');"
+            + "encodeURIComponent(location.href), encodeURIComponent(navigator.userAgent), ad ? 'ad' : 'video'].join(' ');"
     )
 
     /// A `mediaProbeJavaScript` result.
@@ -538,7 +556,8 @@ enum ChromeScript {
         let parts = result.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2, let id = tabID(parts[1]) else { return nil }
         let fields = parts[0].split(separator: " ", omittingEmptySubsequences: false)
-        guard fields.count == 6, fields[0] == "clear" || fields[0] == "drm", let duration = Double(fields[1]),
+        guard fields.count == 6 || fields.count == 7, fields[0] == "clear" || fields[0] == "drm",
+              let duration = Double(fields[1]),
               let source = String(fields[2]).removingPercentEncoding,
               let manifest = String(fields[3]).removingPercentEncoding,
               let page = String(fields[4]).removingPercentEncoding,
@@ -547,7 +566,7 @@ enum ChromeScript {
         return MediaProbe(
             tabID: id, page: page, duration: duration > 0 ? duration : nil,
             source: source.isEmpty ? nil : source, manifest: manifest.isEmpty ? nil : manifest,
-            encrypted: fields[0] == "drm", userAgent: agent
+            encrypted: fields[0] == "drm", userAgent: agent, isAd: fields.count == 7 && fields[6] == "ad"
         )
     }
 
