@@ -298,7 +298,7 @@ final class PlaybackModel {
     // MARK: Picks
 
     /// `name`'s text is the caption's from now on; nil takes the pick back,
-    /// and all of them show again.
+    /// and the host's choice is shown again.
     func pick(_ name: String?, for caption: Caption) {
         guard let moment = caption.moment else { return }
         pickBook.pick(caption.pickToKeep(name.map(Pick.recognizer)), at: PickClient.place(of: moment.seconds))

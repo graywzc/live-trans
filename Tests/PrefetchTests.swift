@@ -121,15 +121,14 @@ final class PrefetchTests: XCTestCase {
     }
 
     /// The host's choice among the recognizers is a pick made for the person:
-    /// shown alone until they take it back, which shows every version, or
-    /// pick another; picking the host's choice again keeps nothing.
-    func testTheHostsChoiceIsAPickThatCanBeTakenBack() {
+    /// shown alone until they pick another; picking the host's choice again
+    /// keeps nothing.
+    func testTheHostsChoiceIsAPickMadeForThePerson() {
         var caption = Caption(id: 1, japanese: "あ", ruby: [], english: "a")
         caption.heardBy = "nemo"
         XCTAssertEqual(caption.shownPick(nil, hasOthers: true), "nemo", "chosen for them")
         XCTAssertNil(caption.shownPick(nil, hasOthers: false), "nothing to choose from")
-        XCTAssertEqual(caption.pickToKeep(nil), .recognizer(Pick.allName), "taken back: every version")
-        XCTAssertNil(caption.shownPick(.recognizer(Pick.allName), hasOthers: true))
+        XCTAssertNil(caption.pickToKeep(nil), "typed text taken back: the host's choice")
         XCTAssertEqual(caption.pickToKeep("qwen"), .recognizer("qwen"))
         XCTAssertEqual(caption.shownPick("qwen", hasOthers: true), "qwen")
         XCTAssertNil(caption.pickToKeep("nemo"), "the host's choice again keeps nothing")
@@ -139,6 +138,31 @@ final class PrefetchTests: XCTestCase {
         XCTAssertNil(plain.shownPick(nil, hasOthers: true))
         XCTAssertNil(plain.pickToKeep(nil))
         XCTAssertEqual(plain.pickToKeep("k2"), .recognizer("k2"))
+    }
+
+    /// A click on the name shown alone shows every version in that row and
+    /// sends nothing; only picking another from among them is a pick.
+    func testShowingEveryVersionIsTheRowsOwnAndPicksNothing() {
+        var shown = VersionsShown()
+        var sent: [String?] = []
+        XCTAssertEqual(shown.shown("nemo"), "nemo")
+        shown.click(nil, picked: "nemo") { sent.append($0) }
+        XCTAssertNil(shown.shown("nemo"), "all of them")
+        XCTAssertEqual(sent, [], "nothing kept or sent")
+        shown.click("nemo", picked: "nemo") { sent.append($0) }
+        XCTAssertEqual(shown.shown("nemo"), "nemo", "the same one again: shown alone")
+        XCTAssertEqual(sent, [])
+        shown.click(nil, picked: "nemo") { sent.append($0) }
+        shown.click("qwen", picked: "nemo") { sent.append($0) }
+        XCTAssertEqual(sent, ["qwen"], "another: a pick")
+        XCTAssertEqual(shown.shown("qwen"), "qwen")
+
+        // Typed text taken back is dropped, and what was heard shows.
+        shown.click(nil, picked: Pick.typedName) { sent.append($0) }
+        XCTAssertEqual(sent, ["qwen", nil])
+        XCTAssertNil(shown.shown("nemo"))
+        shown.typed()
+        XCTAssertEqual(shown.shown(Pick.typedName), Pick.typedName, "typed: it shows alone")
     }
 
     /// Incognito's picks are the captions' own, in memory, and go with them.

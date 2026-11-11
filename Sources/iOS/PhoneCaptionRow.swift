@@ -54,7 +54,8 @@ struct RubyText: View {
 /// it, where in the video it was said at its end, lit while it is being
 /// spoken. Heard by several recognizers, each one's text is stacked with
 /// its name, a tap on which picks it: the others hide and the translation
-/// is the picked text's, and a tap on the name again brings them back.
+/// is the picked text's, and a tap on the name again brings them back,
+/// on this row only until another is picked (`VersionsShown`).
 /// With `onType`, a pencil after each line opens an editor with its text,
 /// for typing the caption when none heard it right: saved, it is picked
 /// under `Pick.typedName`. A tap elsewhere plays the sentence again; the
@@ -79,6 +80,10 @@ struct PhoneCaptionRow: View, Equatable {
 
     /// The text in the editor, while it is open.
     @State private var draft: String?
+    @State private var versionsShown = VersionsShown()
+
+    /// The one shown alone, of `picked`; nil while all of them show.
+    private var shownPick: String? { versionsShown.shown(picked) }
 
     /// What can change what the row draws: a caption never changes, nor
     /// does what the closures do with it. With `.equatable()` in the list
@@ -94,8 +99,8 @@ struct PhoneCaptionRow: View, Equatable {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                let typedPicked = picked == Pick.typedName ? typed : nil
-                let shown = typedPicked ?? caption.heard(by: picked)
+                let typedPicked = shownPick == Pick.typedName ? typed : nil
+                let shown = typedPicked ?? caption.heard(by: shownPick)
                 if let typedPicked {
                     labelled(Pick.typedName, typedPicked, isPicked: true)
                 } else if caption.versions.isEmpty {
@@ -103,7 +108,7 @@ struct PhoneCaptionRow: View, Equatable {
                         ruby(of: shown)
                         typeButton(from: shown.japanese)
                     }
-                } else if let version = caption.versions.first(where: { $0.name == picked }) {
+                } else if let version = caption.versions.first(where: { $0.name == shownPick }) {
                     labelled(version)
                 } else {
                     ForEach(caption.versions, id: \.name) { labelled($0) }
@@ -153,7 +158,10 @@ struct PhoneCaptionRow: View, Equatable {
             TextField("As it was said", text: Binding(get: { draft ?? "" }, set: { draft = $0 }))
             Button("Cancel", role: .cancel) {}
             Button("Save") {
-                if let draft { onType?(draft) }
+                if let draft, let onType {
+                    versionsShown.typed()
+                    onType(draft)
+                }
             }
         } message: {
             Text("Typed in place of what was heard; the host translates it.")
@@ -193,14 +201,14 @@ struct PhoneCaptionRow: View, Equatable {
 
     /// A version's text after its name.
     private func labelled(_ version: CaptionVersion) -> some View {
-        labelled(version.name, caption.heard(by: version.name), isPicked: version.name == picked)
+        labelled(version.name, caption.heard(by: version.name), isPicked: version.name == shownPick)
     }
 
     /// `shown`'s text after `name`, and the pencil after it.
     private func labelled(_ name: String, _ shown: Caption, isPicked: Bool) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Button {
-                onPick?(isPicked ? nil : name)
+                if let onPick { versionsShown.click(isPicked ? nil : name, picked: picked, pick: onPick) }
             } label: {
                 Text(name)
                     .font(.system(size: fontSize * 0.6, weight: .medium))
@@ -215,7 +223,7 @@ struct PhoneCaptionRow: View, Equatable {
             .buttonStyle(.borderless)
             .accessibilityLabel(
                 name == Pick.typedName ? "Drop your text and show all versions"
-                    : isPicked ? "Show all versions" : "Keep \(name)'s version"
+                    : isPicked ? "Show what each recognizer heard" : "Keep \(name)'s version"
             )
             // Level with the Japanese, below the row of readings.
             .padding(.top, showFurigana ? fontSize * 0.45 : 0)

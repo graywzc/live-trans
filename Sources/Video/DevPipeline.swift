@@ -969,7 +969,7 @@ final class DevPipeline {
     }
 
     /// `name`'s text is the caption's from now on; nil takes the pick back,
-    /// and all of them show again.
+    /// and the host's choice is shown again.
     func pick(_ name: String?, for caption: Caption) {
         pick(name.map(Pick.recognizer), for: caption)
     }

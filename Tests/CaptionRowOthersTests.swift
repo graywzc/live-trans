@@ -12,6 +12,8 @@ final class CaptionRowOthersTests: XCTestCase {
         var selection: Range<Int>?
         var analyzed: [String] = []
         var picked: String?
+        /// Every pick the row made, as it would go to the host.
+        var sent: [String?] = []
         var seeks = 0
         /// The text typed in place of the lines, and its translation.
         var typed: String?
@@ -42,7 +44,7 @@ final class CaptionRowOthersTests: XCTestCase {
                 onAnalyzeOther: { model.analyzed.append($0.japanese) },
                 picked: model.picked,
                 // As DevPipeline's: a pick takes the place of typed text.
-                onPick: { model.picked = $0; model.typed = nil },
+                onPick: { model.picked = $0; model.typed = nil; model.sent.append($0) },
                 typed: model.typed.map { line(-4, $0, model.typedEnglish) },
                 onType: { text in
                     model.typed = text.isEmpty ? nil : text
@@ -82,7 +84,7 @@ final class CaptionRowOthersTests: XCTestCase {
         XCTAssertEqual(model.analyzed, ["k2", "明日は雨が降るらしい。", "明日、雨が降るらしい。", "明日は飴が降るらしい"])
     }
 
-    func testANamePicksItsLineAndAgainBringsTheOthersBack() throws {
+    func testANamePicksItsLineAndAgainShowsTheOthersWithNothingSent() throws {
         let tracker = try XCTUnwrap(TestScreen.wait { window.contentView.flatMap(Self.find) })
         tracker.mouseEntered(with: event(.mouseMoved, at: CGPoint(x: 200, y: 60)))
         pump()
@@ -95,15 +97,24 @@ final class CaptionRowOthersTests: XCTestCase {
         click(CGPoint(x: 434, y: 28))
         XCTAssertEqual(model.analyzed, ["明日は雨が降るらしい。"])
 
+        // Its name again shows every line, in this row only.
         click(CGPoint(x: 24, y: 28))
-        XCTAssertNil(model.picked)
+        XCTAssertEqual(model.picked, "nemo", "still the pick")
+        XCTAssertEqual(model.sent, ["nemo"], "nothing sent")
         click(CGPoint(x: 434, y: 28))
-        XCTAssertEqual(model.analyzed.last, "k2")
+        XCTAssertEqual(model.analyzed.last, "k2", "the caption's own line on top again")
 
+        // The same one from among them: alone again, with nothing sent.
+        click(CGPoint(x: 24, y: 56))
+        XCTAssertEqual(model.sent, ["nemo"])
+        click(CGPoint(x: 434, y: 28))
+        XCTAssertEqual(model.analyzed.last, "明日は雨が降るらしい。")
+
+        // Another: a pick.
+        click(CGPoint(x: 24, y: 28))
         click(CGPoint(x: 24, y: 28))
         XCTAssertEqual(model.picked, "k2")
-        click(CGPoint(x: 24, y: 28))
-        XCTAssertNil(model.picked)
+        XCTAssertEqual(model.sent, ["nemo", "k2"])
     }
 
     func testEachLinesChineseButtonPutsItsTranslationUnderTheRow() throws {
@@ -165,10 +176,11 @@ final class CaptionRowOthersTests: XCTestCase {
         click(CGPoint(x: 434, y: 28))
         XCTAssertEqual(model.analyzed, ["明日も雨が降るらしい"])
 
-        // Its name drops it, and the lines are back.
+        // Its name drops it, and every line shows.
         click(CGPoint(x: 24, y: 28))
         XCTAssertNil(model.picked)
         XCTAssertNil(model.typed)
+        XCTAssertEqual(model.sent, [nil])
         XCTAssertEqual(translation(), "It may rain tomorrow.")
     }
 
