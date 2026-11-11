@@ -9,9 +9,6 @@ enum Pick: Hashable, Sendable, ExpressibleByStringLiteral {
 
     /// What typed text is shown under, among the recognizers' names.
     static let typedName = "mine"
-    /// Kept for a caption whose host-chosen version was taken back: every
-    /// version shows, as a recognizer by this name has none.
-    static let allName = "all"
 
     init(stringLiteral name: String) {
         self = .recognizer(name)
@@ -47,6 +44,36 @@ enum Pick: Hashable, Sendable, ExpressibleByStringLiteral {
         } else {
             return nil
         }
+    }
+}
+
+/// Whether a row shows every version in place of the one shown alone. A
+/// click on that one's name shows them all, on this device and this row
+/// only: nothing is kept or sent until another is picked from among them.
+struct VersionsShown: Equatable {
+    private(set) var showsAll = false
+
+    /// The name shown alone, of the one `picked`; nil while all show.
+    func shown(_ picked: String?) -> String? {
+        showsAll ? nil : picked
+    }
+
+    /// A click on `name`'s name, nil for the one shown alone: `pick` gets
+    /// a pick that changes what is kept. Typed text is dropped by a click
+    /// on its name, as it is no recognizer's to come back to.
+    mutating func click(_ name: String?, picked: String?, pick: (String?) -> Void) {
+        guard let name else {
+            showsAll = true
+            if picked == Pick.typedName { pick(nil) }
+            return
+        }
+        showsAll = false
+        if name != picked { pick(name) }
+    }
+
+    /// Text typed: it shows alone.
+    mutating func typed() {
+        showsAll = false
     }
 }
 
@@ -155,6 +182,9 @@ final class PickBook {
     /// Changes not yet sent, nil taking a pick back.
     private var waiting: [Int: Pick?]
     private var isSending = false
+    /// Kept by v0.2.0 to v0.2.5 for a host-chosen version taken back, which
+    /// the host refused: left waiting, it held up every change after it.
+    private static let shownAll: Pick = "all"
 
     init(video: String, client: PickClient?, defaults: UserDefaults? = nil) {
         self.video = video
@@ -162,6 +192,7 @@ final class PickBook {
         self.defaults = defaults
         record = Self.read(Self.recordKey(for: video), from: defaults).compactMapValues { $0 }
         waiting = Self.read(Self.waitingKey(for: video), from: defaults)
+            .filter { $0.value != Self.shownAll }
         picks = Self.merged(record, waiting)
     }
 

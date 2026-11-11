@@ -20,20 +20,17 @@ struct Caption: Identifiable, Equatable {
     static let defaultRecognizer = "k2"
 
     /// The version shown by itself, given what a person picked: theirs;
-    /// none, every version, when they took the host's choice back
-    /// (`Pick.allName`); else, with others beside it, the one the host
-    /// chose, a pick made for them they can take back.
+    /// else, with others beside it, the one the host chose. Every version
+    /// shows only while a row is asked to (`VersionsShown`), never kept.
     func shownPick(_ pick: Pick?, hasOthers: Bool) -> String? {
-        if let pick { return pick.name == Pick.allName ? nil : pick.name }
+        if let pick { return pick.name }
         return hasOthers ? heardBy : nil
     }
 
-    /// What a person's pick of `name` is kept as: nothing when it is the
-    /// host's choice, which shows anyway; taking a pick back (nil) of a
-    /// caption the host chose for shows every version.
+    /// What a person's pick is kept as: nothing when it is the host's
+    /// choice, which shows anyway.
     func pickToKeep(_ pick: Pick?) -> Pick? {
-        guard let pick else { return heardBy == nil ? nil : .recognizer(Pick.allName) }
-        return pick == .recognizer(heardBy ?? "") ? nil : pick
+        pick == .recognizer(heardBy ?? "") ? nil : pick
     }
 
     /// The caption as the recognizer `name` heard it; as it is for a name

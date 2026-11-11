@@ -392,16 +392,19 @@ page in its tab, another tab chosen, or in Default a processed video picked)
 clears the captions and starts the new one at once: in Default loaded, when
 the host has processed it.
 
-In either mode, a caption shows what each recognizer heard, one above the other,
-with k2's Chinese under them. A click on a name, on the Mac or the iPhone,
-keeps that version: the others hide and its Chinese shows. A click on the name
-again brings them back. When none heard it right, the pencil after a line (on
-the Mac with the row hovered) opens an editor with that line's text: what is
-saved there is the caption, under the name `mine`, with the others hidden and
-its Chinese from the host's translator, as a pick is. A click on `mine` drops
-it and brings the versions back; saved blank, it is dropped too. Default's
-picks and typed text are kept on the GPU host, with the video, by
-`server/phone_service.py`, and either app can change them. A pick or text made
+In either mode, a caption shows the version the host chose, under its
+recognizer's name, with its Chinese. A click on the name, on the Mac or the
+iPhone, shows what each recognizer heard, one above the other: in that row and
+on that device only, with nothing kept or sent. A click on another name there
+keeps that version, the others hidden and its Chinese shown; the host's choice
+again keeps nothing, as it shows anyway. When none heard it right, the pencil
+after a line (on the Mac with the row hovered) opens an editor with that line's
+text: what is saved there is the caption, under the name `mine`, with the
+others hidden and its Chinese from the host's translator, as a pick is. A click
+on `mine` drops it and shows every version; saved blank, it is dropped too and
+the host's choice shows. Default's picks and typed text are kept on the GPU
+host, with the video, by `server/phone_service.py`, and either app can change
+them. A pick or text made
 on the iPhone with the host out of reach goes there, and is translated, when
 the host is next reached.
 

@@ -730,7 +730,7 @@ private struct OtherHearingLine: View {
     var onAnalyze: () -> Void = {}
     /// This line is the caption's, the others hidden.
     var isPicked = false
-    /// A click on the name picks the line, or takes the pick back.
+    /// A click on the name picks the line; nil, it is the one picked.
     var onPick: ((String?) -> Void)?
     /// Where the sentence is, shown on a line that stands for the caption.
     var span: String?
@@ -801,7 +801,7 @@ private struct OtherHearingLine: View {
 
     /// A recognizer's name at the left of its line, on the baseline of its
     /// first line, below the row of readings. With `onPick`, a button that
-    /// picks the line, or takes the pick back when it is the one picked.
+    /// picks the line, or with nil shows them all when it is the one picked.
     @ViewBuilder
     static func name(
         _ label: String, fontSize: Double, showFurigana: Bool, isPicked: Bool = false, onPick: ((String?) -> Void)? = nil
@@ -815,7 +815,7 @@ private struct OtherHearingLine: View {
                 .buttonStyle(.plain)
                 .help(
                     label == Pick.typedName ? "Drop your text and show what was heard again"
-                        : isPicked ? "Show all three again" : "Keep \(label)'s version and hide the others"
+                        : isPicked ? "Show what each recognizer heard" : "Keep \(label)'s version and hide the others"
                 )
                 .padding(.top, (showFurigana ? fontSize * 0.6 : 0) + fontSize * 0.4)
         } else {
@@ -920,8 +920,9 @@ struct CaptionRow: View {
     /// The recognizer picked, of the caption's own and `others`: its line alone shows,
     /// with its translation. Nil, all of them with the caption's own.
     var picked: String?
-    /// A click on a name picks it, or takes the pick back; none, and the
-    /// names are only names.
+    /// A click on a name among all of them picks it; on the one shown
+    /// alone, all of them show, here only (`VersionsShown`). Nil takes typed
+    /// text back. None, and the names are only names.
     var onPick: ((String?) -> Void)?
     /// The text typed in place of every recognizer's, when there is one.
     var typed: Caption?
@@ -933,13 +934,17 @@ struct CaptionRow: View {
     /// The recognizer whose Chinese is under the lines, of `others`; nil,
     /// the caption's own.
     @State private var translatedBy: String?
+    @State private var versionsShown = VersionsShown()
+
+    /// The one shown alone, of `picked`; nil while all of them show.
+    private var shownPick: String? { versionsShown.shown(picked) }
 
     /// The other recognizer picked, when its text is among `others`.
     private var pickedOther: (label: String, sentence: Caption)? {
-        others.first { $0.label == picked }
+        others.first { $0.label == shownPick }
     }
 
-    private var isOwnPicked: Bool { picked == caption.ownRecognizer && !others.isEmpty }
+    private var isOwnPicked: Bool { shownPick == caption.ownRecognizer && !others.isEmpty }
 
     /// The other recognizer whose Chinese shows: the one picked, else the
     /// one chosen by its 中, while it is still under the caption.
@@ -949,7 +954,7 @@ struct CaptionRow: View {
 
     /// With every line shown, each that has Chinese gets a 中 that puts it
     /// under them.
-    private var isTranslationSwitchable: Bool { picked == nil && !others.isEmpty }
+    private var isTranslationSwitchable: Bool { shownPick == nil && !others.isEmpty }
 
     /// The lines of the others under the caption's own, with no pick.
     private var othersShown: [(label: String, sentence: Caption)] {
@@ -958,7 +963,17 @@ struct CaptionRow: View {
 
     /// The typed text, when it is the caption: it alone shows.
     private var typedPicked: Caption? {
-        picked == Pick.typedName ? typed : nil
+        shownPick == Pick.typedName ? typed : nil
+    }
+
+    /// A click on a name, through what the row shows.
+    private var choose: ((String?) -> Void)? {
+        onPick.map { onPick in { versionsShown.click($0, picked: picked, pick: onPick) } }
+    }
+
+    /// Typed text shows alone, all of them shown or not.
+    private var typing: ((String) -> Void)? {
+        onType.map { onType in { versionsShown.typed(); onType($0) } }
     }
 
     var body: some View {
@@ -969,7 +984,7 @@ struct CaptionRow: View {
                         label: Pick.typedName, japanese: typed.japanese, ruby: typed.ruby, fontSize: fontSize,
                         showFurigana: showFurigana, onClick: onSeek, isRowHovered: isHovered,
                         isAnalyzed: isOtherAnalyzed(typed), onAnalyze: { onAnalyzeOther(typed) }, isPicked: true,
-                        onPick: onPick, span: momentSpan, onType: onType
+                        onPick: choose, span: momentSpan, onType: typing
                     )
                 } else {
                     if pickedOther == nil {
@@ -980,13 +995,13 @@ struct CaptionRow: View {
                             label: other.label, japanese: other.sentence.japanese, ruby: other.sentence.ruby,
                             fontSize: fontSize, showFurigana: showFurigana, onClick: onSeek, isRowHovered: isHovered,
                             isAnalyzed: isOtherAnalyzed(other.sentence), onAnalyze: { onAnalyzeOther(other.sentence) },
-                            isPicked: other.label == picked, onPick: onPick,
+                            isPicked: other.label == shownPick, onPick: choose,
                             // Standing for the caption, it says where it is.
-                            span: other.label == picked ? momentSpan : nil,
+                            span: other.label == shownPick ? momentSpan : nil,
                             isTranslated: translatingOther?.label == other.label,
                             onTranslate: isTranslationSwitchable && !other.sentence.english.isEmpty
                                 ? { translatedBy = other.label } : nil,
-                            onType: onType
+                            onType: typing
                         )
                     }
                 }
@@ -1030,7 +1045,7 @@ struct CaptionRow: View {
             if !others.isEmpty {
                 OtherHearingLine.name(
                     caption.ownRecognizer, fontSize: fontSize, showFurigana: showFurigana, isPicked: isOwnPicked,
-                    onPick: onPick
+                    onPick: choose
                 )
                 .help("What \(caption.ownRecognizer) heard, the caption's own text")
             }
@@ -1044,10 +1059,10 @@ struct CaptionRow: View {
                     showFurigana: showFurigana
                 ) { translatedBy = nil }
             }
-            if let onType {
+            if let typing {
                 TypeButton(
                     text: caption.japanese, fontSize: fontSize, showFurigana: showFurigana, isShown: isHovered,
-                    onSave: onType
+                    onSave: typing
                 )
             }
             Spacer(minLength: 8)

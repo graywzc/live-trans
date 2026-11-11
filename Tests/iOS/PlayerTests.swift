@@ -319,6 +319,17 @@ final class PlayerTests: XCTestCase {
         XCTAssertEqual(book.picks, [1000: "nemo", 2000: "qwen"])
     }
 
+    /// v0.2.0 to v0.2.5 kept "all" for a host-chosen version taken back, the
+    /// host refused it, and every change behind it waited forever.
+    func testAnAllLeftWaitingByAnEarlierBuildIsDropped() async {
+        let host = FakeHost()
+        defaults.set(["1000": "all", "2000": "qwen"], forKey: "picks.waiting.v")
+        let book = PickBook(video: "v", client: host.client, defaults: defaults)
+        XCTAssertEqual(book.picks, [2000: "qwen"])
+        await book.refresh()
+        XCTAssertEqual(host.record, [2000: "qwen"])
+    }
+
     func testAModelsTypedTextIsACaptionWithReadings() throws {
         let model = try versionsModel()
         let caption = model.captions[0]
