@@ -235,9 +235,17 @@ struct CaptionPair: Decodable, Equatable {
     var end: Double?
     /// The recognizer whose text this is, when the host hears with three.
     var heardBy: String?
+    /// k2's line, sent ahead of the one chosen of the three: shown until
+    /// the batch it is in settles.
+    var draft: Bool? = nil
+    /// False where fewer than two of the three heard the stretch alike.
+    var agreed: Bool? = nil
+    /// Not a caption but [from, to] in the video: the early lines there
+    /// give way to the lines after it.
+    var settles: [Double]? = nil
 
     enum CodingKeys: String, CodingKey {
-        case ja, en, start, end
+        case ja, en, start, end, draft, agreed, settles
         case heardBy = "heard_by"
     }
 }

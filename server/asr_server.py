@@ -939,7 +939,7 @@ def _unstray(chars, speech):
     return chars
 
 
-def hear_equally(audio, clips, began=0.0, cache=None, speech=None, timing=None):
+def hear_equally(audio, clips, began=0.0, cache=None, speech=None, timing=None, early=None):
     """Each of `clips` [(start, end), ...] (seconds into `audio`, which
     starts `began` into the video) heard by the three recognizers: per
     clip {"versions": {name: [[char, start, end, ends a sentence], ...]},
@@ -953,7 +953,10 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None, timing=None):
     caption where the speaker changes) runs no recognizer. `speech`,
     [(start, end)] in seconds of the video, is where the speech is, for
     telling a stray first or last character (_unstray). `timing`, a dict,
-    is given how long each took and waited for the GPU, in seconds."""
+    is given how long each took and waited for the GPU, in seconds.
+    `early`, a function, is given the clips as k2 alone heard them, on its
+    own times, as soon as k2 is done and while the others still hear
+    (see hear_pieces' `early`); it runs before this returns."""
     cache = {} if cache is None else cache
     timing = {} if timing is None else timing
     found = {}
@@ -995,6 +998,22 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None, timing=None):
             timing["GPU held by"] = held
         for thread in threads:
             thread.start()
+        threads[0].join()
+        if early is not None and any(k2):
+            first = {}
+            for k, (a, b) in enumerate(todo):
+                if k2[k]:
+                    chars = [[c, began + start, began + end, False] for c, start, end, _ in k2[k]]
+                    if speech:
+                        chars = _unstray(chars, speech)
+                    first[key((a, b))] = {"versions": {"k2": chars}, "readings": {"k2": [c for c, *_ in chars]},
+                                          "alone": True}
+            try:
+                early([first.get(key(clip)) or cache.get(key(clip), {}) for clip in clips])
+            except TranslatorDown:
+                pass  # the batch itself tells of it
+            except Exception as exc:
+                print(f"no early captions: {type(exc).__name__}: {exc}", flush=True)
         for thread in threads:
             thread.join()
         chars = {name: [_chars_of(heard.get(k, "")) for k in range(len(todo))] for name, heard in texts.items()}
@@ -1109,6 +1128,10 @@ def equal_words(heard, words, breaks, began=0.0):
     names = []
     for clip in heard:
         name = chosen(clip) if clip else None
+        if name is None and clip:
+            # No two agree: k2's all the same (the line is marked so), or
+            # the first to hear anything of those who did.
+            name = next((other for other in reversed(EQUAL_TIE_ORDER) if clip["versions"].get(other)), None)
         names.append(name)
         if name is None:
             continue
@@ -2163,7 +2186,7 @@ STEP_VERSIONS = {
     "words": "nemo-v2-reazon-aligned-2",
     # A step job's captions, kept as "captions-<step>": bumped with the
     # captioning's code, so captions made by the old code are made again.
-    **{f"captions-{step}": "k2-nemo-qwen-equal-aligned-3" for step in DEV_STEPS},
+    **{f"captions-{step}": "k2-nemo-qwen-equal-aligned-4" for step in DEV_STEPS},
 }
 
 
@@ -3017,6 +3040,15 @@ class CutGrid:
         self.reasons = {}
         self.lock = threading.Lock()
 
+    def copy(self):
+        """Another grid as this one is now, whose cuts are its own: for a
+        hearing whose cuts must not stay (an early caption's)."""
+        other = CutGrid()
+        with self.lock:
+            other.speech, other.pauses, other.cuts = list(self.speech), list(self.pauses), list(self.cuts)
+            other.hard, other.marks, other.reasons = set(self.hard), dict(self.marks), dict(self.reasons)
+        return other
+
     def add_speech(self, speech, began, end, end_reason="end of the audio"):
         """`speech`, the (start, end) stretches of it in the video from
         `began` to `end`, and the cuts the audio alone decides: at the
@@ -3204,7 +3236,8 @@ def steady_floor(turns):
     return steady
 
 
-def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None, heard=None, timing=None):
+def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, turns=None, heard=None, timing=None,
+                early=None, translated=None, given=None):
     """`audio`, the video from `began` on, heard by its hard pieces, and
     its words put into the pieces of `grid`: the lines [{"ja", "en",
     "start", "end"}] of the pieces with words in them, those partly in
@@ -3218,18 +3251,40 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
     chosen recognizer's, "heard_by" naming it and "heard" holding the
     others' text over it, and a stretch fewer than two of them heard alike
     is no line; `timing`, a dict, is given how long they took (see
-    hear_equally)."""
+    hear_equally). With `heard`, a stretch fewer than two of them heard
+    alike is k2's line all the same, marked "agreed": false.
+    `early`, a function, is given the lines k2 alone makes, translated,
+    as soon as k2 is done and while the others still hear: cut on a copy
+    of `grid`, so its cuts do not stay. `translated`, a dict, keeps the
+    translator's answers by what it was asked, so the lines k2 made early
+    are not translated again when k2's are chosen. `given` stands in for
+    hear_equally's clips (an early hearing's)."""
+    translated = {} if translated is None else translated
+
+    def remember(kind, asked, ask):
+        if (kind, asked) not in translated:
+            translated[(kind, asked)] = ask()
+        return translated[(kind, asked)]
+
     import bisect
 
     low, high = within or (began, began + audio.size / SAMPLE_RATE)
     clips = grid.clips(began, began + audio.size / SAMPLE_RATE)
     words, breaks = [], []
     equal = None
-    if heard is not None:
+    if given is not None:
+        equal = given
+        chosen_by = equal_words(equal, words, breaks, began)
+    elif heard is not None:
         with grid.lock:
             speech = list(grid.speech)
+
+        def k2_alone(clips_heard):
+            early(hear_pieces(grid.copy(), audio, began, beam_size, prompt, within=within, turns=turns,
+                              translated=translated, given=clips_heard))
+
         equal = hear_equally(audio, [(max(a - began, 0), b - began) for a, b in clips], began, heard, speech,
-                             timing=timing)
+                             timing=timing, early=k2_alone if early is not None else None)
         chosen_by = equal_words(equal, words, breaks, began)
     else:
         run_whisper(
@@ -3404,7 +3459,7 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
         if TRANSLATE_BACKEND == "ollama" and not _ollama_ok:
             raise TranslatorDown(f"the translator (ollama {OLLAMA_MODEL}) is out of reach")
         if TRANSLATE_BACKEND != "nllb" and _ollama_ok and any(not _is_untranslatable(t) for t in texts):
-            pairs = translate_ollama(texts)
+            pairs = remember("sentences", tuple(texts), lambda: translate_ollama(texts))
         if pairs:
             # Where the LLM ended a sentence inside a piece: a cut there.
             chars = [j for j, (text, _, _) in enumerate(words) for ch in text if ch not in _BOUNDARY_NOISE]
@@ -3428,7 +3483,7 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
         for k, (text, en) in enumerate(zip(texts, english)):
             if text and en is None:
                 try:
-                    english[k] = translate_text(text)
+                    english[k] = remember("piece", text, lambda: translate_text(text))
                 except TranslatorDown:
                     raise
                 except Exception as exc:
@@ -3440,7 +3495,8 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             # alone where a sentence of the answer straddled two pieces, then
             # all but repeats.
             try:
-                english = [en for _, en in _translate_what_is_left(list(zip(texts, english)))]
+                asked = tuple(zip(texts, english))
+                english = [en for _, en in remember("checked", asked, lambda: _translate_what_is_left(list(asked)))]
             except TranslatorDown:
                 raise
             except Exception as exc:
@@ -3458,7 +3514,7 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             if not clip.get("alone"):
                 agree, _ = _agreeing(clip, a, b)
                 if len(agree) < 2:
-                    continue
+                    line["agreed"] = False
             name = chosen_by[heard_in[members[0]]]
             line["heard_by"] = name
             others = {other: "".join(c + ("。" if end else "") for c, x, y, end in chars if a <= (x + y) / 2 < b)
@@ -4592,13 +4648,28 @@ class PrefetchJob:
         prompt = "".join(line["ja"] for line in list(self.lines) if (line.get("end") or 0) <= before)
         timing = {}
         began = time.time()
+        drafts = []
+
+        def early(lines):
+            """k2's lines ahead of the chosen ones, for the app to show
+            dimmed until the batch's own lines settle them."""
+            if self.stop_event.is_set():
+                return
+            lines = [{**line, "draft": True} for line in self._on_video_clock(lines)]
+            drafts.extend(lines)
+            self.feed.extend(lines)
+            timing["early"] = time.time() - began
+
         lines = self._on_video_clock(
             hear_pieces(self.grid, audio, start, beam_size=5, prompt=prompt[-PREFETCH_PROMPT_CHARS:],
                         turns=self.turns if DEV_SPEAKER_CUTS else None, heard=self.heard if self.equal else None,
-                        timing=timing))
+                        timing=timing, early=early if self.equal else None))
         if self.stop_event.is_set():
             # Stopped while this was heard: its audio may be let go already.
             return
+        unagreed = sum(line.get("agreed") is False for line in lines)
+        if unagreed:
+            timing["no two agreed on"] = f"{unagreed} of {len(lines)} lines"
         self._keep_heard(lines)
         with self.lines_lock:
             # In the order of the video, before the captions of any stretch
@@ -4606,6 +4677,10 @@ class PrefetchJob:
             at = next((i for i, line in enumerate(self.lines) if (line.get("start") or 0) >= self._video(start)),
                       len(self.lines))
             self.lines[at:at] = lines
+        if drafts:
+            # The early lines of the batch, whatever they were, give way to
+            # its own: a line without text, which only says so.
+            self.feed.append({"ja": "", "en": "", "settles": [round(self._video(start), 2), round(self._video(end), 2)]})
         self.feed.extend(lines)
         print(f"prefetch {self.id}: {start:.0f}-{end:.0f}s, {len(lines)} lines in {time.time() - t0:.1f}s", flush=True)
         spoken = sum(b - a for a, b in speech)

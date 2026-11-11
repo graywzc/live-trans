@@ -79,6 +79,12 @@ def test_the_words_are_the_chosen_ones_with_a_sentence_end_only_where_another_he
     assert breaks == [(0, 0.0)]
 
 
+def test_where_no_two_agree_k2_is_taken_before_the_others():
+    words, breaks = [], []
+    names = srv.equal_words([heard(k2="あ", qwen="ごしちょうありがとう")], words, breaks)
+    assert names == ["k2"] and "".join(w[0] for w in words) == "あ"
+
+
 class FakeRecognizers:
     """k2 by clip start, and nemo, qwen and the aligner as workers: each
     hears what `said` gives it for the clip starting nearest, and counts
@@ -133,7 +139,7 @@ class FakeRecognizers:
         srv._workers.update(workers)
 
 
-def test_a_sentence_k2_dropped_is_a_caption_and_one_only_qwen_heard_is_none():
+def test_a_sentence_k2_dropped_is_a_caption_and_one_only_qwen_heard_is_marked_unagreed():
     grid = srv.CutGrid()
     grid.add_speech([(0.0, 2.0), (3.0, 5.0), (6.0, 7.0)], 0.0, 8.0)
     said = {
@@ -150,14 +156,83 @@ def test_a_sentence_k2_dropped_is_a_caption_and_one_only_qwen_heard_is_none():
         # Heard again (a caption cut where the speaker changes), no one listens.
         again = srv.hear_pieces(grid, silence(8.0), 0.0, beam_size=5, prompt="", heard=cache)
         assert fake.asked == first, fake.asked
-    # (nemo's full stops are its alone, so they are not kept.)
-    assert [line["ja"] for line in lines] == ["きょうはあめがふりそうだね", "かさをもっていこうか"], lines
-    assert [line["heard_by"] for line in lines] == ["nemo", "nemo"]
+    # (nemo's full stops are its alone, so they are not kept.) What only
+    # qwen heard is a line all the same, marked as no two agreeing on it.
+    assert [line["ja"] for line in lines] == ["きょうはあめがふりそうだね", "かさをもっていこうか",
+                                              "ごしちょうありがとうございました"], lines
+    assert [line["heard_by"] for line in lines] == ["nemo", "nemo", "qwen"]
+    assert [line.get("agreed", True) for line in lines] == [True, True, False]
     assert lines[0]["heard"] == {"k2": "そうだね", "qwen": "きょうはあめがふりそうだね"}, lines[0]["heard"]
     assert [line["ja"] for line in again] == [line["ja"] for line in lines]
     # Each heard the three clips once, at the same time.
     assert sorted(set(a[0] for a in first)) == ["align", "k2", "nemo", "qwen"], first
     assert ("nemo", 3) in first and ("qwen", 3) in first
+
+
+def test_k2_s_lines_come_early_translated_on_their_own_cuts_and_are_not_translated_again():
+    said = {
+        0.0: {"k2": "そうだね", "nemo": "きょうはあめがふりそうだね。", "qwen": "きょうはあめがふりそうだね"},
+        # k2's is nearest the other two here, so chosen.
+        3.0: {"k2": "かさをもっていこうか", "nemo": "かさをもっていこうかな", "qwen": "かさをもっていこ"},
+    }
+    asked = []
+
+    def translate(segments):
+        asked.append(tuple(segments))
+        return [(text, f"<{text}>") for text in segments]
+
+    def early(lines):
+        early.lines = lines
+
+    def grid():
+        grid = srv.CutGrid()
+        grid.add_speech([(0.0, 2.0), (3.0, 5.0)], 0.0, 6.0)
+        return grid
+
+    saved = srv.translate_ollama, srv._ollama_ok, srv._translate_what_is_left
+    srv.translate_ollama, srv._ollama_ok = translate, True
+    srv._translate_what_is_left = lambda pairs: pairs
+    try:
+        with FakeRecognizers(said) as fake:
+            with_early, without = grid(), grid()
+            lines = srv.hear_pieces(with_early, silence(6.0), 0.0, beam_size=5, prompt="", heard={}, early=early)
+            srv.hear_pieces(without, silence(6.0), 0.0, beam_size=5, prompt="", heard={})
+            assert ("align", 6) in fake.asked
+        # Per batch: k2's and the chosen lines over the first clip asked
+        # once each, k2's over the second once, though chosen there too.
+        first = list(asked)
+        asked.clear()
+        with FakeRecognizers({0.0: said[3.0]}):
+            only = srv.CutGrid()
+            only.add_speech([(0.0, 2.0)], 0.0, 3.0)
+            srv.hear_pieces(only, silence(3.0), 0.0, beam_size=5, prompt="", heard={}, early=early)
+    finally:
+        srv.translate_ollama, srv._ollama_ok, srv._translate_what_is_left = saved
+    assert [line["ja"] for line in early.lines] == ["かさをもっていこうか"], early.lines
+    assert [line["en"] for line in early.lines] == ["<かさをもっていこうか>"]
+    assert early.lines[0]["heard_by"] == "k2"
+    assert asked == [("かさをもっていこうか",)], asked
+    assert [line["ja"] for line in lines] == ["きょうはあめがふりそうだね", "かさをもっていこうか"]
+    assert [line["en"] for line in lines] == ["<きょうはあめがふりそうだね>", "<かさをもっていこうか>"]
+    # The early hearing's cuts were its own copy's.
+    assert with_early.cuts == without.cuts and with_early.reasons == without.reasons
+    assert first[0] == ("そうだね", "かさをもっていこうか"), first
+
+
+def test_a_batch_sends_k2_s_lines_first_then_settles_them_with_its_own():
+    job = srv.PrefetchJob.__new__(srv.PrefetchJob)
+    job.id, job.offset, job.lines, job.feed, job.others = "test", 0.0, [], [], {}
+    job.lines_lock, job.stop_event = threading.Lock(), threading.Event()
+    job.grid, job.heard, job.equal, job.turns = srv.CutGrid(), {}, True, []
+    job.jumped_from, job.jump_made, job.finding = None, False, 0.0
+    job._video = lambda seconds: seconds
+    said = {0.0: {"k2": "あめだね", "nemo": "あめがふるね", "qwen": "あめがふるね"}}
+    with FakeRecognizers(said):
+        job._transcribe_batch(0.0, 3.0, silence(3.0), [(0.5, 2.5)], "the end")
+    assert [(line["ja"], line.get("draft"), line.get("settles")) for line in job.feed] == [
+        ("あめだね", True, None), ("", None, [0.0, 3.0]), ("あめがふるね", None, None)], job.feed
+    # Only the batch's own lines are the job's captions.
+    assert [line["ja"] for line in job.lines] == ["あめがふるね"]
 
 
 def test_a_change_of_speaker_is_cut_where_the_others_heard_it_when_k2_stretches_a_word():
