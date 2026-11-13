@@ -1083,6 +1083,9 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None, timing=None, 
         except Exception as exc:
             print(f"the versions not timed: {exc}", flush=True)
             names = []
+        # Those that failed on the batch (after HEARER_TRIES), or all of
+        # them when they could not be timed.
+        failed = [name for name in ("nemo", "qwen") if name not in texts or name not in names]
         for k, (a, b) in enumerate(todo):
             versions, reads = {}, {}
             if k2[k]:
@@ -1103,7 +1106,11 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None, timing=None, 
             # With neither nemo nor qwen to be had, k2 alone, as before; and
             # not kept, so the clip is heard again when it is next asked for.
             found[key((a, b))] = {"versions": versions, "readings": reads, "alone": not names} if versions else {}
-            if names or not versions:
+            if failed and versions:
+                # Said, so the app shows a gap there rather than taking it
+                # for a stretch that one heard nothing in; not kept either.
+                found[key((a, b))]["missed"] = failed
+            if (names or not versions) and not failed:
                 cache[key((a, b))] = found[key((a, b))]
     return [found.get(key(clip)) or cache.get(key(clip), {}) for clip in clips]
 
@@ -3561,6 +3568,8 @@ def hear_pieces(grid, audio, began, beam_size, prompt, within=None, told=False, 
             others = {other: "".join(c + ("。" if end else "") for c, x, y, end in chars if a <= (x + y) / 2 < b)
                       for other, chars in clip["versions"].items() if other != name}
             line["heard"] = {other: text for other, text in others.items() if text}
+            if clip.get("missed"):
+                line["missed"] = list(clip["missed"])
         if within is None or (a >= low - 1e-6 and b <= high + 1e-6):
             lines.append(line)
             if told:
@@ -4540,7 +4549,7 @@ class PrefetchJob:
                     time.sleep(0.2)
                 if self.cached and (found := self.cache.load_findings("others")):
                     # (Less what VibeVoice heard, when it was one of them.)
-                    names = {key for name in version_names() for key in (name, f"{name}_en")}
+                    names = {key for name in version_names() for key in (name, f"{name}_en")} | {"missed"}
                     kept.update({(a, b): {n: t for n, t in texts.items() if n in names}
                                  for a, b, texts in found.get("others", [])})
             done = 0
@@ -4741,8 +4750,12 @@ class PrefetchJob:
         "heard"), taken off the line into `others`, by its times."""
         for line in lines:
             heard = line.pop("heard", None)
-            if heard:
-                self.others[(line["start"], line["end"])] = dict(heard)
+            missed = line.pop("missed", None)
+            # Kept even when no other heard anything there, so the app can
+            # tell a stretch they all heard from one still to come; with
+            # those that failed on it named.
+            if heard is not None:
+                self.others[(line["start"], line["end"])] = {**heard, **({"missed": missed} if missed else {})}
 
     def rehear(self, start, end):
         """The pieces of the grid at `start`..`end` heard again from the
@@ -4823,7 +4836,8 @@ class PrefetchJob:
             # speaker changes, a section at a time behind the speakers.
             "cut": round(self._video(min(self.stretches[0].cut, self._end_of(self.stretches[0]))), 2),
             # How many texts the other recognizers have given so far.
-            "others": sum(len(texts) for texts in list(self.others.values())),
+            # Each caption's entry counts, an empty one too (see _keep_heard).
+            "others": sum(len(texts) + 1 for texts in list(self.others.values())),
             # Whether they are all heard and translated, which keeping the
             # video for the phone waits for.
             "others_ready": not DEV_OTHER_HEARING or self.others_done,

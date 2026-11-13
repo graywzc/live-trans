@@ -372,7 +372,26 @@ def test_a_recognizer_that_fails_on_a_batch_is_asked_again_once():
         clip, = srv.hear_equally(silence(4.0), [(2.0, 3.5)], began=10.0)
         assert Flaky.asked == srv.HEARER_TRIES == 2, "and no more"
         assert "nemo" not in clip["versions"] and "k2" in clip["versions"], clip["versions"]
+        assert clip["missed"] == ["nemo"], "said, so the app shows a gap there"
+        # Not kept: asked for again, it is heard again.
+        cache = {}
+        srv.hear_equally(silence(4.0), [(2.0, 3.5)], began=10.0, cache=cache)
+        assert cache == {}, cache
+        srv._workers["hear_nemo"] = real
+        clip, = srv.hear_equally(silence(4.0), [(2.0, 3.5)], began=10.0, cache=cache)
+        assert "nemo" in clip["versions"] and "missed" not in clip and cache, clip
 
+
+def test_each_caption_has_an_entry_of_the_others_even_one_none_heard_with_who_failed():
+    job = srv.PrefetchJob.__new__(srv.PrefetchJob)
+    job.others = {}
+    job._keep_heard([
+        {"ja": "あ", "start": 1.0, "end": 2.0, "heard_by": "nemo", "heard": {"k2": "あ"}},
+        {"ja": "い", "start": 3.0, "end": 4.0, "heard_by": "k2", "heard": {}},
+        {"ja": "う", "start": 5.0, "end": 6.0, "heard_by": "k2", "heard": {"qwen": "う"}, "missed": ["nemo"]},
+        {"ja": "え", "start": 7.0, "end": 8.0},
+    ])
+    assert job.others == {(1.0, 2.0): {"k2": "あ"}, (3.0, 4.0): {}, (5.0, 6.0): {"qwen": "う", "missed": ["nemo"]}}, job.others
 
 def test_the_tools_temporary_files_are_on_the_disk_and_go_with_the_server():
     folder = tempfile.mkdtemp()

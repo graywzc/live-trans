@@ -663,7 +663,8 @@ def test_each_caption_is_heard_again_by_the_other_recognizers_and_kept_for_next_
     assert clip[0] == 0 and abs(clip[1] - (line["end"] + 0.3 - max(line["start"] - 0.5, 0))) < 0.01, (clip, line)
     assert found["others"][0] == {"start": line["start"], "end": line["end"],
                                   "nemo": "hear_nemoのことば", "nemo_en": "译:hear_nemoのことば"}, found["others"]
-    assert status["others"] == 2 * len(status["lines"]), status["others"]
+    # Each caption's text and its translation, and its entry itself.
+    assert status["others"] == (2 + 1) * len(status["lines"]), status["others"]
     assert [a[0] for a in asked] == ["hear_qwen"], asked
     assert found_again["others"] == found["others"], found_again
     # The translation is kept with the text, and not asked for again.
@@ -836,7 +837,7 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
     # before the others heard it.
     assert [l["ja"] for l in job.lines][:4] == ["ことばはい", "ことば", "はい", "ことばはい"], job.lines
     assert status["captions"] == "done" and status["speakers"] and status["spoken"] >= 6.9 and status["cut"] >= 6.9, status
-    assert status["others_ready"] and status["others"] == 2 * 2 * len(job.lines), status
+    assert status["others_ready"] and status["others"] == (2 * 2 + 1) * len(job.lines), status
 
 
 def test_played_ahead_of_the_captions_they_go_on_from_there_and_come_back_for_what_they_passed():

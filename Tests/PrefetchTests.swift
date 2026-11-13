@@ -223,7 +223,7 @@ final class PrefetchTests: XCTestCase {
     /// caption each heard; once k2 is done, it and each other one that heard
     /// every caption reach the end.
     func testEachRecognizerReachesAsFarAsItHasCaptioned() {
-        let own = [10.0...14, 20...25, 40...44]
+        let own = [10.0...14, 20...25, 40...44].map { DevPipeline.OwnCaption(range: $0) }
         let others = [
             OtherHearing(start: 10, end: 14, nemo: "甲", qwen: "甲"),
             OtherHearing(start: 20, end: 25, nemo: "乙"),
@@ -239,38 +239,54 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(reach("done", ready: 0, heardAll), ["k2 600", "nemo 600", "qwen 14"], "from the cache: done at once")
     }
 
-    /// A batch a recognizer never heard (its worker failed) leaves captions
-    /// out behind where it has come: its bar reaches the end once nothing
-    /// after is to come, with those as holes, rather than never being done.
-    func testCaptionsARecognizerLeftOutAreHolesNotAnEndNeverReached() {
-        let own: [(range: ClosedRange<Double>, english: Bool)] = [(2...6, true), (10...14, true), (20...25, true)]
-        let others = [
-            OtherHearing(start: 10, end: 14, nemo: "乙", qwen: "乙", nemoEnglish: "b", qwenEnglish: "b"),
-            OtherHearing(start: 20, end: 25, nemo: "丙", qwen: "丙", nemoEnglish: "c"),
-            OtherHearing(start: 2, end: 6, qwen: "甲", qwenEnglish: "a"),
+    /// Heard as equals, each caption is the chosen recognizer's text, the
+    /// others' beside it: the chosen one heard it too, and one that heard
+    /// nothing there has nothing to come. Only where the host says one
+    /// failed (its worker died on the batch) is there a gap on its bars,
+    /// which then reach the end rather than never being done.
+    func testOnlyWhereTheHostSaysARecognizerFailedIsThereAGap() {
+        typealias Own = DevPipeline.OwnCaption
+        let own = [
+            Own(range: 2...6, heardBy: "qwen"),
+            Own(range: 10...14, heardBy: "nemo"),
+            Own(range: 20...25, heardBy: "nemo"),
+            Own(range: 30...33, heardBy: "k2"),
         ]
-        let reached = DevPipeline.reached(captions: "done", ready: 0, total: 600, own: own.map(\.range), others: others)
-        XCTAssertEqual(reached.map { "\($0.label) \(Int($0.seconds))" }, ["k2 600", "nemo 600", "qwen 600"])
-        let translated = DevPipeline.translated(captions: "done", total: 600, own: own, others: others)
-        XCTAssertEqual(translated.map { "\($0.label) \(Int($0.seconds))" }, ["k2 600", "nemo 600", "qwen 14"],
-                       "qwen's last is still to be translated")
-        let holes = DevPipeline.holes(own: own, others: others)
-        XCTAssertEqual(holes, ["nemo captioning": [2...6], "Translating nemo captions": [2...6]])
-        // Still running, the ones after the furthest are to come, not holes.
-        XCTAssertEqual(DevPipeline.reached(captions: "running", ready: 30, total: 600, own: own.map(\.range), others: others)
-            .map { "\($0.label) \(Int($0.seconds))" }, ["k2 30", "nemo 25", "qwen 25"])
+        var others = [
+            OtherHearing(start: 2, end: 6, k2: "甲", k2English: "a", missed: ["nemo"]),
+            OtherHearing(start: 10, end: 14, k2: "乙", qwen: "乙", k2English: "b", qwenEnglish: "b"),
+            OtherHearing(start: 20, end: 25, k2: "丙", qwen: "丙", k2English: "c"),
+            // Over music only k2 heard words.
+            OtherHearing(start: 30, end: 33),
+        ]
+        func line(_ result: [(label: String, seconds: Double)]) -> [String] { result.map { "\($0.label) \(Int($0.seconds))" } }
+        XCTAssertEqual(line(DevPipeline.reached(captions: "done", ready: 0, total: 600, own: own, others: others)),
+                       ["k2 600", "nemo 600", "qwen 600"])
+        XCTAssertEqual(line(DevPipeline.translated(captions: "done", total: 600, own: own, others: others)),
+                       ["k2 600", "nemo 600", "qwen 33"], "qwen's text over 20–25 is still to be translated")
+        others[2].qwenEnglish = "c"
+        XCTAssertEqual(line(DevPipeline.translated(captions: "done", total: 600, own: own, others: others)),
+                       ["k2 600", "nemo 600", "qwen 600"])
+        XCTAssertEqual(DevPipeline.holes(own: own, others: others), ["nemo captioning": [2...6], "Translating nemo captions": [2...6]])
+        // k2's early lines are still being heard by the others; left over
+        // once the captions are done, they count for nothing.
+        let early = own + [Own(range: 40...44, draft: true)]
+        XCTAssertEqual(line(DevPipeline.reached(captions: "running", ready: 50, total: 600, own: early, others: others)),
+                       ["k2 50", "nemo 33", "qwen 33"])
+        XCTAssertEqual(line(DevPipeline.reached(captions: "done", ready: 50, total: 600, own: early, others: others)),
+                       ["k2 600", "nemo 600", "qwen 600"])
     }
 
     /// Each reaches the furthest caption with its translation; once k2 is
     /// done, the whole video for each with every caption translated.
     func testEachRecognizerIsTranslatedAsFarAsItsTranslationsGo() {
-        let own: [(range: ClosedRange<Double>, english: Bool)] = [(10...14, true), (20...25, true), (40...44, false)]
+        let own = [(10.0...14, true), (20...25, true), (40...44, false)].map { DevPipeline.OwnCaption(range: $0, english: $1) }
         var others = [
             OtherHearing(start: 10, end: 14, nemo: "甲", qwen: "甲", nemoEnglish: "a", qwenEnglish: "a"),
             OtherHearing(start: 20, end: 25, nemo: "乙", qwen: "乙", nemoEnglish: ""),
             OtherHearing(start: 40, end: 44, nemo: "丙"),
         ]
-        func reach(_ captions: String, _ own: [(range: ClosedRange<Double>, english: Bool)]) -> [String] {
+        func reach(_ captions: String, _ own: [DevPipeline.OwnCaption]) -> [String] {
             DevPipeline.translated(captions: captions, total: 600, own: own, others: others)
                 .map { "\($0.label) \(Int($0.seconds))" }
         }
@@ -278,7 +294,7 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(reach("running", own), ["k2 25", "nemo 25", "qwen 14"])
         XCTAssertEqual(reach("done", own), ["k2 25", "nemo 25", "qwen 14"], "k2's last line has no translation")
         others[2].nemoEnglish = "c"
-        let allEnglish = own.map { ($0.range, true) }
+        let allEnglish = own.map { DevPipeline.OwnCaption(range: $0.range) }
         XCTAssertEqual(reach("done", allEnglish), ["k2 600", "nemo 600", "qwen 14"])
         XCTAssertEqual(reach("running", allEnglish), ["k2 44", "nemo 44", "qwen 14"], "not the whole video until k2 is done")
     }
