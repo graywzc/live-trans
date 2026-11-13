@@ -389,6 +389,7 @@ def test_the_tools_temporary_files_are_on_the_disk_and_go_with_the_server():
         assert os.listdir(folder) == []
     finally:
         srv.DEVTOOL_TEMP = original
+        os.rmdir(folder)
 
 
 def test_a_vowel_that_draws_out_the_one_before_is_not_aligned_on_its_own():
