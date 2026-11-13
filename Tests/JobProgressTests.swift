@@ -124,6 +124,40 @@ final class JobProgressTests: XCTestCase {
         XCTAssertTrue(DevPipeline.ahead(stretches: Array(stretches.prefix(1)), total: 1200, own: own, others: others).isEmpty)
     }
 
+    /// A bar with captions left out is lit to the end but dark over them,
+    /// and says so rather than "done".
+    func testABarIsDarkWhereItsTaskLeftCaptionsOut() throws {
+        var task = DevPipeline.Progress(task: "nemo captioning", reached: 1200)
+        task.holes = [0...300]
+        let size = CGSize(width: 640, height: 20)
+        let window = TestScreen.window(size: size)
+        defer { window.close() }
+        window.contentView = NSHostingView(
+            rootView: JobProgressView(total: 1200, tasks: [task])
+                .frame(width: size.width, height: size.height, alignment: .topLeading)
+                .background(Color.black)
+        )
+        window.makeKeyAndOrderFront(nil)
+        pump()
+        let view = try XCTUnwrap(window.contentView)
+        let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        let left = JobProgressView.nameWidth + 8
+        let right = size.width - 8 - 44
+        let x = { (seconds: Double) in left + (right - left) * CGFloat(seconds / 1200) }
+        func brightness(_ seconds: Double) -> CGFloat {
+            (0..<Int(size.height)).map { y in
+                rep.colorAt(x: Int(x(seconds) * scale), y: Int(CGFloat(y) * scale))?.usingColorSpace(.deviceRGB)?.brightnessComponent ?? 0
+            }.max() ?? 0
+        }
+        XCTAssertLessThan(brightness(150), 0.2, "dark over the captions left out")
+        XCTAssertGreaterThan(brightness(800), 0.25, "lit after them")
+        if let dir = ProcessInfo.processInfo.environment["SNAPSHOT_DIR"] {
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/job-progress-holes.png"))
+        }
+    }
+
     private func pump() {
         while let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.2), inMode: .default, dequeue: true) {
             NSApp.sendEvent(event)
