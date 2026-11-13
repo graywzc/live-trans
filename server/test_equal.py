@@ -339,6 +339,59 @@ def test_k2_is_timed_by_the_aligner_and_by_itself_only_when_the_aligner_fails():
         assert clip.get("alone"), "nemo and qwen untimed are left out"
 
 
+def test_a_recognizer_that_fails_on_a_batch_is_asked_again_once():
+    said = {1.0: {"k2": "あめだね", "nemo": "あめだね。", "qwen": "あめだね"}}
+    with FakeRecognizers(said) as fake:
+        real = srv._workers["hear_nemo"]
+
+        class Flaky:
+            """Fails the first time, as nemo's worker did starting with /tmp full."""
+            asked = 0
+
+            def available(self):
+                return True
+
+            def ask(self, header, audio, lines=True):
+                Flaky.asked += 1
+                if Flaky.asked == 1:
+                    raise RuntimeError("hear_nemo failed: OSError: [Errno 28] No space left on device")
+                return real.ask(header, audio, lines)
+
+        srv._workers["hear_nemo"] = Flaky()
+        clip, = srv.hear_equally(silence(4.0), [(1.0, 3.0)], began=10.0)
+        assert Flaky.asked == 2
+        assert "nemo" in clip["versions"], clip["versions"]
+
+        class Down(Flaky):
+            def ask(self, header, audio, lines=True):
+                Flaky.asked += 1
+                raise RuntimeError("hear_nemo failed: out of memory")
+
+        Flaky.asked = 0
+        srv._workers["hear_nemo"] = Down()
+        clip, = srv.hear_equally(silence(4.0), [(2.0, 3.5)], began=10.0)
+        assert Flaky.asked == srv.HEARER_TRIES == 2, "and no more"
+        assert "nemo" not in clip["versions"] and "k2" in clip["versions"], clip["versions"]
+
+
+def test_the_tools_temporary_files_are_on_the_disk_and_go_with_the_server():
+    folder = tempfile.mkdtemp()
+    original = srv.DEVTOOL_TEMP
+    srv.DEVTOOL_TEMP = folder
+    try:
+        env = srv.devtool_env()
+        assert env["TMPDIR"] == os.path.join(folder, str(os.getpid())) and os.path.isdir(env["TMPDIR"])
+        # A server that crashed left its folder; one still running keeps its.
+        os.makedirs(os.path.join(folder, "999999999", "unpacked-model"))
+        assert srv.erase_devtool_temp() == 1
+        assert sorted(os.listdir(folder)) == [str(os.getpid())]
+        assert srv.erase_devtool_temp(os.getpid()) == 1
+        assert os.listdir(folder) == []
+    finally:
+        srv.DEVTOOL_TEMP = original
+        os.rmdir(folder)
+
+
 def test_a_vowel_that_draws_out_the_one_before_is_not_aligned_on_its_own():
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "devtools"))
     import align

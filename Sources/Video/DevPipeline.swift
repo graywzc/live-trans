@@ -348,7 +348,9 @@ final class DevPipeline {
         var underWay: ClosedRange<Double>?
         /// How far it has come in each stretch the video was played ahead
         /// into, from its start.
-        var ahead: [ClosedRange<Double>] = []
+        var ahead: [ClosedRange<Double>] = []        /// The captions it left out behind where it has come, which
+        /// nothing later fills: dark on its bar, and it is not done.
+        var holes: [ClosedRange<Double>] = []
     }
 
     /// The tasks on the video at `playhead`, when it is the job's, in the
@@ -360,9 +362,15 @@ final class DevPipeline {
             fetched: job.fetched, total: total, reached: reached(on: playhead), translated: translated(on: playhead),
             speakers: speakers, cut: job.cut, analysed: job.analysed
         )
+        let end = Self.firstEnd(of: job)
+        let holes = Self.holes(own: ownCaptions(of: job).filter { $0.range.lowerBound < end }, others: others.filter { $0.start < end })
         return (total, Self.adding(ahead: Self.ahead(
             stretches: job.stretches, total: total, own: ownCaptions(of: job), others: others
-        ), to: tasks))
+        ), to: tasks).map { task in
+            var task = task
+            task.holes = holes[task.task] ?? []
+            return task
+        })
     }
 
     /// Where the captions made from the video's start end: where the first
@@ -455,10 +463,37 @@ final class DevPipeline {
         let done = captions == "done"
         let k2 = done ? max(total, ready) : max(ready, own.map(\.upperBound).max() ?? 0)
         return [("k2", k2)] + OtherHearing.shown.map { shown in
-            let heard = others.filter { $0[keyPath: shown.text] != nil }
-            let all = done && own.allSatisfy { caption in heard.contains { abs($0.start - caption.lowerBound) < 0.01 } }
-            return (shown.label, all ? k2 : min(heard.map(\.end).max() ?? 0, k2))
+            let heard = coverage(of: own, by: others.filter { $0[keyPath: shown.text] != nil })
+            return (shown.label, done && !heard.waiting ? k2 : min(heard.furthest, k2))
         }
+    }
+
+    /// How far the captions `own` are covered by `have` (a recognizer's
+    /// hearings, or its translations): to the end of the furthest; the
+    /// captions before that left out, which nothing later fills (a batch
+    /// its worker failed on); and whether any after it are still to come.
+    nonisolated static func coverage(
+        of own: [ClosedRange<Double>], by have: [OtherHearing]
+    ) -> (furthest: Double, holes: [ClosedRange<Double>], waiting: Bool) {
+        let furthest = have.map(\.end).max() ?? 0
+        let left = own.filter { caption in !have.contains { abs($0.start - caption.lowerBound) < 0.01 } }
+        return (furthest, left.filter { $0.lowerBound < furthest }, left.contains { $0.lowerBound >= furthest })
+    }
+
+    /// The captions each other recognizer left out, and so has no
+    /// translation of either, by the task's name: drawn on its bars as
+    /// gaps, where they are, rather than as a bar never done.
+    nonisolated static func holes(
+        own: [(range: ClosedRange<Double>, english: Bool)], others: [OtherHearing]
+    ) -> [String: [ClosedRange<Double>]] {
+        var holes: [String: [ClosedRange<Double>]] = [:]
+        for shown in OtherHearing.shown {
+            let heard = coverage(of: own.map(\.range), by: others.filter { $0[keyPath: shown.text] != nil }).holes
+            let translated = coverage(of: own.map(\.range), by: others.filter { $0[keyPath: shown.english] != nil }).holes
+            if !heard.isEmpty { holes["\(shown.label) captioning"] = heard }
+            if !translated.isEmpty { holes["Translating \(shown.label) captions"] = translated }
+        }
+        return holes
     }
 
     /// How far each recognizer's text has been translated from the video's
@@ -472,11 +507,8 @@ final class DevPipeline {
         let done = captions == "done"
         let k2 = done && own.allSatisfy(\.english) ? total : own.filter(\.english).map(\.range.upperBound).max() ?? 0
         return [("k2", k2)] + OtherHearing.shown.map { shown in
-            let translated = others.filter { $0[keyPath: shown.english] != nil }
-            let all = done && own.allSatisfy { caption in
-                translated.contains { abs($0.start - caption.range.lowerBound) < 0.01 }
-            }
-            return (shown.label, all ? total : translated.map(\.end).max() ?? 0)
+            let translated = coverage(of: own.map(\.range), by: others.filter { $0[keyPath: shown.english] != nil })
+            return (shown.label, done && !translated.waiting ? total : translated.furthest)
         }
     }
 

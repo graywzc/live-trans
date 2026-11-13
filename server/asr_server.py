@@ -627,6 +627,37 @@ def heard_words(audio, pieces):
 DEVTOOLS_DIR = os.path.expanduser(os.getenv("LIVETRANS_DEVTOOLS", "~/livetrans/devtools"))
 # A worker that takes longer than this is given up on.
 DEVTOOL_TIMEOUT = 900
+# The tools' temporary folder, on the disk rather than the system's /tmp,
+# which on aipc is a RAM disk of 8 GB: nemo unpacks its 2.5 GB model into
+# it each time its worker starts, and with /tmp nearly full it failed with
+# "No space left on device" and a batch went without nemo. One folder per
+# server, erased as it exits, and those of servers no longer running as the
+# next starts.
+DEVTOOL_TEMP = os.path.expanduser(os.getenv("LIVETRANS_DEVTOOL_TEMP", "~/livetrans/devtools-tmp"))
+
+
+def devtool_env():
+    """The environment a dev tool runs in: its temporary files in this
+    server's folder under DEVTOOL_TEMP."""
+    folder = os.path.join(DEVTOOL_TEMP, str(os.getpid()))
+    os.makedirs(folder, exist_ok=True)
+    return {**os.environ, "PYANNOTE_METRICS_ENABLED": "0", "TMPDIR": folder}
+
+
+def erase_devtool_temp(pid=None):
+    """Erases server `pid`'s folder under DEVTOOL_TEMP, or with None those
+    of every server no longer running; how many."""
+    try:
+        names = os.listdir(DEVTOOL_TEMP)
+    except OSError:
+        return 0
+    erased = 0
+    for name in names:
+        if not name.isdigit() or (pid is None and os.path.exists(f"/proc/{name}")) or (pid is not None and name != str(pid)):
+            continue
+        shutil.rmtree(os.path.join(DEVTOOL_TEMP, name), ignore_errors=True)
+        erased += 1
+    return erased
 
 
 def run_devtool(name, header, audio):
@@ -639,7 +670,7 @@ def run_devtool(name, header, audio):
         raise RuntimeError(f"{name} is not set up in {DEVTOOLS_DIR} (devtools/setup.sh)")
     pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
     request = json.dumps({**header, "samples": audio.size}).encode("utf-8") + b"\n" + pcm
-    env = {**os.environ, "PYANNOTE_METRICS_ENABLED": "0"}
+    env = devtool_env()
     done = subprocess.run([python, "-I", script], input=request, capture_output=True, timeout=DEVTOOL_TIMEOUT, env=env)
     if done.returncode != 0:
         last = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no message"]
@@ -658,7 +689,8 @@ def run_devtool_lines(name, header, audio, on_line):
     pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
     request = json.dumps({**header, "samples": audio.size}).encode("utf-8") + b"\n" + pcm
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen([python, "-I", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        process = subprocess.Popen([python, "-I", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
+                                   env=devtool_env())
 
         def feed():
             try:
@@ -806,8 +838,8 @@ class Worker:
         if not self.available():
             raise RuntimeError(f"{self.name} is not set up in {DEVTOOLS_DIR} (devtools/setup.sh)")
         self.errors = tempfile.TemporaryFile()
-        env = {**os.environ, "PYANNOTE_METRICS_ENABLED": "0"}
-        self.process = subprocess.Popen(self._command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errors, env=env)
+        self.process = subprocess.Popen(self._command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errors,
+                                        env=devtool_env())
 
     def _failed(self):
         process, self.process = self.process, None
@@ -857,6 +889,8 @@ class Worker:
 
 
 _workers = {name: Worker(name) for name in ("hear_nemo", "hear_qwen", "align")}
+# How many times a batch is given to nemo or qwen before it goes without.
+HEARER_TRIES = 2
 
 
 def version_names():
@@ -983,11 +1017,17 @@ def hear_equally(audio, clips, began=0.0, cache=None, speech=None, timing=None, 
                 got = time.time()
                 if got - t0 > 0.5:
                     timing[f"{name} waited"] = got - t0
-                try:
-                    answers = _workers[worker].ask({"clips": [list(clip) for clip in todo]}, audio)
-                    texts[name] = {answer["i"]: answer["text"] for answer in answers}
-                except Exception as exc:
-                    print(f"{name} not heard: {exc}", flush=True)
+                # Asked again once when it fails, its worker started afresh:
+                # a batch it never heard is a hole in its version nothing
+                # later fills, and its bar in the app is never done.
+                for attempt in range(HEARER_TRIES):
+                    try:
+                        answers = _workers[worker].ask({"clips": [list(clip) for clip in todo]}, audio)
+                        texts[name] = {answer["i"]: answer["text"] for answer in answers}
+                        break
+                    except Exception as exc:
+                        last = attempt == HEARER_TRIES - 1
+                        print(f"{name} not heard{'' if last else ', asking again'}: {exc}", flush=True)
                 timing[name] = time.time() - got
 
         threads = [threading.Thread(target=hear_k2, daemon=True)]
@@ -1774,6 +1814,7 @@ def exit_releasing_gpu():
     stop_bundle_fetches()
     unload_ollama()
     erase_temp_traces(os.getpid())
+    erase_devtool_temp(os.getpid())
     # Nothing of the session is kept: the log, which the app starts afresh
     # with each launch, is emptied too. A crash leaves it for a look.
     try:
@@ -5076,6 +5117,7 @@ def main():
     TARGET = args.target
     # What a server that is no longer running left behind.
     erase_temp_traces()
+    erase_devtool_temp()
     print(f"translating into {_language()}", flush=True)
     print(f"speech recognizer: {ASR_BACKEND}", flush=True)
     print(f"speech finder: {'FireRedVAD + segmentation-3.0' if PRODUCTION_SPEECH_MODEL else 'Silero'}", flush=True)

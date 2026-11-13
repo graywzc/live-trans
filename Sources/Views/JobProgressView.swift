@@ -23,7 +23,8 @@ struct JobProgressView: View {
     }
 
     private func row(_ task: DevPipeline.Progress) -> some View {
-        let done = task.reached >= total - 0.5
+        let reachedEnd = task.reached >= total - 0.5
+        let done = reachedEnd && task.holes.isEmpty
         return HStack(spacing: 8) {
             Text(task.task)
                 .foregroundStyle(running.contains(task.task) ? Color.white : Color.gray)
@@ -43,6 +44,14 @@ struct JobProgressView: View {
                         let from = width * VideoBar.fraction(stretch.lowerBound, of: total)
                         Capsule().fill(color)
                             .frame(width: max(width * VideoBar.fraction(stretch.upperBound, of: total) - from, Self.barHeight))
+                            .offset(x: from)
+                    }
+                    // Dark where it left captions out.
+                    ForEach(Array(task.holes.enumerated()), id: \.offset) { _, hole in
+                        let from = width * VideoBar.fraction(hole.lowerBound, of: total)
+                        Rectangle().fill(Color.black)
+                            .overlay(Rectangle().fill(Color.white.opacity(0.1)))
+                            .frame(width: max(width * VideoBar.fraction(hole.upperBound, of: total) - from, 2))
                             .offset(x: from)
                     }
                     if let stretch = task.underWay {
@@ -65,13 +74,14 @@ struct JobProgressView: View {
                 .frame(maxHeight: .infinity)
             }
             .frame(height: Self.barHeight + 4)
-            Text(done ? "done" : CaptionRow.timestamp(task.reached))
+            Text(done ? "done" : reachedEnd ? "gaps" : CaptionRow.timestamp(task.reached))
                 .foregroundStyle(.gray)
                 .frame(width: 44, alignment: .trailing)
         }
         .accessibilityElement()
         .accessibilityLabel(task.task)
-        .accessibilityValue(done ? "done" : "to \(CaptionRow.timestamp(task.reached))")
+        .accessibilityValue(done ? "done" : reachedEnd ? "done but for \(task.holes.count) left out"
+                            : "to \(CaptionRow.timestamp(task.reached))")
     }
 
     /// Each task's color, also its swatch in the running list: none of them

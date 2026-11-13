@@ -239,6 +239,28 @@ final class PrefetchTests: XCTestCase {
         XCTAssertEqual(reach("done", ready: 0, heardAll), ["k2 600", "nemo 600", "qwen 14"], "from the cache: done at once")
     }
 
+    /// A batch a recognizer never heard (its worker failed) leaves captions
+    /// out behind where it has come: its bar reaches the end once nothing
+    /// after is to come, with those as holes, rather than never being done.
+    func testCaptionsARecognizerLeftOutAreHolesNotAnEndNeverReached() {
+        let own: [(range: ClosedRange<Double>, english: Bool)] = [(2...6, true), (10...14, true), (20...25, true)]
+        let others = [
+            OtherHearing(start: 10, end: 14, nemo: "乙", qwen: "乙", nemoEnglish: "b", qwenEnglish: "b"),
+            OtherHearing(start: 20, end: 25, nemo: "丙", qwen: "丙", nemoEnglish: "c"),
+            OtherHearing(start: 2, end: 6, qwen: "甲", qwenEnglish: "a"),
+        ]
+        let reached = DevPipeline.reached(captions: "done", ready: 0, total: 600, own: own.map(\.range), others: others)
+        XCTAssertEqual(reached.map { "\($0.label) \(Int($0.seconds))" }, ["k2 600", "nemo 600", "qwen 600"])
+        let translated = DevPipeline.translated(captions: "done", total: 600, own: own, others: others)
+        XCTAssertEqual(translated.map { "\($0.label) \(Int($0.seconds))" }, ["k2 600", "nemo 600", "qwen 14"],
+                       "qwen's last is still to be translated")
+        let holes = DevPipeline.holes(own: own, others: others)
+        XCTAssertEqual(holes, ["nemo captioning": [2...6], "Translating nemo captions": [2...6]])
+        // Still running, the ones after the furthest are to come, not holes.
+        XCTAssertEqual(DevPipeline.reached(captions: "running", ready: 30, total: 600, own: own.map(\.range), others: others)
+            .map { "\($0.label) \(Int($0.seconds))" }, ["k2 30", "nemo 25", "qwen 25"])
+    }
+
     /// Each reaches the furthest caption with its translation; once k2 is
     /// done, the whole video for each with every caption translated.
     func testEachRecognizerIsTranslatedAsFarAsItsTranslationsGo() {
