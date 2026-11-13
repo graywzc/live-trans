@@ -101,9 +101,7 @@ final class JobProgressTests: XCTestCase {
             CaptionStretch(start: 0, end: 600, ready: 300, spoken: 0, cut: 0),
             CaptionStretch(start: 600, end: nil, ready: 900, spoken: 800, cut: 700),
         ]
-        let own: [(range: ClosedRange<Double>, english: Bool)] = [
-            (10...20, true), (610...620, true), (880...890, false),
-        ]
+        let own = [(10.0...20, true), (610...620, true), (880...890, false)].map { DevPipeline.OwnCaption(range: $0, english: $1) }
         let others = [OtherHearing(start: 610, end: 620, nemo: "甲", nemoEnglish: "a")]
         let ahead = DevPipeline.ahead(stretches: stretches, total: 1200, own: own, others: others)
         XCTAssertEqual(ahead["k2 captioning"], [600...900])

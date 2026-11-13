@@ -121,9 +121,12 @@ struct OtherHearing: Decodable, Equatable {
     var k2English: String?
     var nemoEnglish: String?
     var qwenEnglish: String?
+    /// Those that failed on the batch the caption was heard in: nothing of
+    /// theirs is to come there.
+    var missed: [String]? = nil
 
     enum CodingKeys: String, CodingKey {
-        case start, end, k2, nemo, qwen
+        case start, end, k2, nemo, qwen, missed
         case k2English = "k2_en"
         case nemoEnglish = "nemo_en"
         case qwenEnglish = "qwen_en"

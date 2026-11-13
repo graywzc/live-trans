@@ -306,7 +306,7 @@ final class DevPipeline {
         let end = Self.firstEnd(of: job)
         return Self.reached(
             captions: job.captions, ready: job.ready, total: Self.total(of: job),
-            own: ownCaptions(of: job).map(\.range).filter { $0.lowerBound < end }, others: others.filter { $0.start < end }
+            own: ownCaptions(of: job).filter { $0.range.lowerBound < end }, others: others.filter { $0.start < end }
         )
     }
 
@@ -383,7 +383,7 @@ final class DevPipeline {
     /// name: from the stretch's start, as `reached(...)`, `translated(...)`
     /// and the host tell it there.
     nonisolated static func ahead(
-        stretches: [CaptionStretch], total: Double, own: [(range: ClosedRange<Double>, english: Bool)],
+        stretches: [CaptionStretch], total: Double, own: [OwnCaption],
         others: [OtherHearing]
     ) -> [String: [ClosedRange<Double>]] {
         var ahead: [String: [ClosedRange<Double>]] = [:]
@@ -395,7 +395,7 @@ final class DevPipeline {
                 let reach = min(reach, end)
                 if reach > stretch.start { ahead[task, default: []].append(stretch.start...reach) }
             }
-            for (label, seconds) in reached(captions: "running", ready: stretch.ready, total: end, own: inside.map(\.range), others: heard) {
+            for (label, seconds) in reached(captions: "running", ready: stretch.ready, total: end, own: inside, others: heard) {
                 add("\(label) captioning", seconds)
             }
             for (label, seconds) in translated(captions: "running", total: end, own: inside, others: heard) {
@@ -444,12 +444,50 @@ final class DevPipeline {
 
     /// The job's captions on the list: where each is, and whether it has
     /// its translation.
-    private func ownCaptions(of job: Job) -> [(range: ClosedRange<Double>, english: Bool)] {
+    private func ownCaptions(of job: Job) -> [OwnCaption] {
         engine.captions.compactMap { caption in
             guard let moment = caption.moment, moment.tabID == job.tabID, moment.url == job.page, let end = moment.end
             else { return nil }
-            return (moment.seconds...max(end, moment.seconds), !caption.english.isEmpty)
+            return OwnCaption(range: moment.seconds...max(end, moment.seconds), english: !caption.english.isEmpty,
+                              heardBy: caption.heardBy, draft: caption.isDraft)
         }
+    }
+
+    /// A caption on the list, as the bars count it.
+    struct OwnCaption: Equatable {
+        var range: ClosedRange<Double>
+        /// It has its translation.
+        var english = true
+        /// The recognizer whose text it is, when the host hears with
+        /// three: then its line comes only once all three have heard it.
+        var heardBy: String?
+        /// k2's line ahead of the chosen one, which nemo and qwen are still hearing.
+        var draft = false
+    }
+
+    /// Where a caption stands for one of the other recognizers.
+    enum Covered { case yes, missed, waiting }
+
+    /// Whether `name` has heard `caption` (or, `translating`, has its
+    /// text of it translated): yes where its text is the caption's, where
+    /// it heard the stretch (or heard nothing there, which leaves nothing
+    /// to translate), and for any line of three heard as equals, which
+    /// comes once all three have; missed where the host says it failed
+    /// there; else still to come.
+    nonisolated static func covered(
+        _ caption: OwnCaption, by name: String, translating: Bool, entry: OtherHearing?
+    ) -> Covered {
+        guard !caption.draft else { return .waiting }
+        if entry?.missed?.contains(name) == true { return .missed }
+        let shown = OtherHearing.shown.first { $0.label == name }
+        let text = shown.flatMap { entry?[keyPath: $0.text] }
+        if caption.heardBy == name { return !translating || caption.english ? .yes : .waiting }
+        if !translating { return caption.heardBy != nil || text != nil ? .yes : .waiting }
+        // No entry beside a line of three heard as equals: none of the
+        // others heard anything there (a host from before kept none).
+        guard let entry, let shown else { return caption.heardBy != nil ? .yes : .waiting }
+        if (text ?? "").isEmpty { return caption.heardBy != nil || text != nil ? .yes : .waiting }
+        return entry[keyPath: shown.english] != nil ? .yes : .waiting
     }
 
     /// How far each recognizer has come from the video's start: k2 to
@@ -458,38 +496,44 @@ final class DevPipeline {
     /// whole video once k2 is done and it has heard every caption. Each
     /// runs on over the silences between captions, which no one hears.
     nonisolated static func reached(
-        captions: String, ready: Double, total: Double, own: [ClosedRange<Double>], others: [OtherHearing]
+        captions: String, ready: Double, total: Double, own: [OwnCaption], others: [OtherHearing]
     ) -> [(label: String, seconds: Double)] {
         let done = captions == "done"
-        let k2 = done ? max(total, ready) : max(ready, own.map(\.upperBound).max() ?? 0)
+        let k2 = done ? max(total, ready) : max(ready, own.map(\.range.upperBound).max() ?? 0)
         return [("k2", k2)] + OtherHearing.shown.map { shown in
-            let heard = coverage(of: own, by: others.filter { $0[keyPath: shown.text] != nil })
+            let heard = coverage(of: own, by: shown.label, translating: false, others: others, done: done)
             return (shown.label, done && !heard.waiting ? k2 : min(heard.furthest, k2))
         }
     }
 
-    /// How far the captions `own` are covered by `have` (a recognizer's
-    /// hearings, or its translations): to the end of the furthest; the
-    /// captions before that left out, which nothing later fills (a batch
-    /// its worker failed on); and whether any after it are still to come.
+    /// How far `name` has come over the captions `own` (heard, or
+    /// `translating`, translated; see `covered`): to the end of the
+    /// furthest it has; those it missed, which nothing later fills; and
+    /// whether any are still to come. k2's early lines left once the
+    /// captions are done stand for nothing.
     nonisolated static func coverage(
-        of own: [ClosedRange<Double>], by have: [OtherHearing]
+        of own: [OwnCaption], by name: String, translating: Bool, others: [OtherHearing], done: Bool
     ) -> (furthest: Double, holes: [ClosedRange<Double>], waiting: Bool) {
-        let furthest = have.map(\.end).max() ?? 0
-        let left = own.filter { caption in !have.contains { abs($0.start - caption.lowerBound) < 0.01 } }
-        return (furthest, left.filter { $0.lowerBound < furthest }, left.contains { $0.lowerBound >= furthest })
+        var furthest = 0.0, holes: [ClosedRange<Double>] = [], waiting = false
+        for caption in own where !(done && caption.draft) {
+            let entry = others.first { abs($0.start - caption.range.lowerBound) < 0.01 }
+            switch covered(caption, by: name, translating: translating, entry: entry) {
+            case .yes: furthest = max(furthest, caption.range.upperBound)
+            case .missed: holes.append(caption.range)
+            case .waiting: waiting = true
+            }
+        }
+        return (furthest, holes, waiting)
     }
 
-    /// The captions each other recognizer left out, and so has no
+    /// The captions each other recognizer missed, and so has no
     /// translation of either, by the task's name: drawn on its bars as
     /// gaps, where they are, rather than as a bar never done.
-    nonisolated static func holes(
-        own: [(range: ClosedRange<Double>, english: Bool)], others: [OtherHearing]
-    ) -> [String: [ClosedRange<Double>]] {
+    nonisolated static func holes(own: [OwnCaption], others: [OtherHearing]) -> [String: [ClosedRange<Double>]] {
         var holes: [String: [ClosedRange<Double>]] = [:]
         for shown in OtherHearing.shown {
-            let heard = coverage(of: own.map(\.range), by: others.filter { $0[keyPath: shown.text] != nil }).holes
-            let translated = coverage(of: own.map(\.range), by: others.filter { $0[keyPath: shown.english] != nil }).holes
+            let heard = coverage(of: own, by: shown.label, translating: false, others: others, done: false).holes
+            let translated = coverage(of: own, by: shown.label, translating: true, others: others, done: false).holes
             if !heard.isEmpty { holes["\(shown.label) captioning"] = heard }
             if !translated.isEmpty { holes["Translating \(shown.label) captions"] = translated }
         }
@@ -502,12 +546,12 @@ final class DevPipeline {
     /// comes translated, but for one the translator gave up on; the others'
     /// are translated after they are heard.
     nonisolated static func translated(
-        captions: String, total: Double, own: [(range: ClosedRange<Double>, english: Bool)], others: [OtherHearing]
+        captions: String, total: Double, own: [OwnCaption], others: [OtherHearing]
     ) -> [(label: String, seconds: Double)] {
         let done = captions == "done"
         let k2 = done && own.allSatisfy(\.english) ? total : own.filter(\.english).map(\.range.upperBound).max() ?? 0
         return [("k2", k2)] + OtherHearing.shown.map { shown in
-            let translated = coverage(of: own.map(\.range), by: others.filter { $0[keyPath: shown.english] != nil })
+            let translated = coverage(of: own, by: shown.label, translating: true, others: others, done: done)
             return (shown.label, done && !translated.waiting ? total : translated.furthest)
         }
     }
