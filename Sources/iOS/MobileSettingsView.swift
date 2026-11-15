@@ -48,6 +48,14 @@ struct MobileSettingsView: View {
 
                 Section {
                     LabeledContent("Version", value: AppVersion.current)
+                    if let expiry = InstallExpiry.current {
+                        InstallExpiryRow(expiry: expiry)
+                    }
+                } footer: {
+                    if InstallExpiry.current != nil {
+                        Text("The nightly reinstall on the Mac mini should keep the expiry about a week out. If it "
+                            + "is only a day or two away, the refresh there isn't working.")
+                    }
                 }
             }
             .navigationTitle("Settings")
