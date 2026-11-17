@@ -50,8 +50,10 @@ struct PrefetchStatus: Decodable, Equatable {
     var spoken: Double?
     var telling: [Double]?
     /// Up to where in the video the captions are cut where the speaker
-    /// changes; a server from before says nothing.
+    /// changes; a server from before says nothing. The section being cut
+    /// now ([start, end]), when one is.
     var cut: Double?
+    var cutting: [Double]?
     /// The stretches the captions are made over, in the order of the
     /// video: from its start, and from each place it was played ahead of
     /// them. A server from before says nothing.
@@ -87,7 +89,7 @@ struct PrefetchStatus: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case state, error, duration, start, fetched, ready, count, lines, step, analysed, worded, aligned, speakers
-        case cached, fetching, captions, others, video, bundle, running, spoken, telling, cut, stretches
+        case cached, fetching, captions, others, video, bundle, running, spoken, telling, cut, cutting, stretches
         case othersReady = "others_ready"
         case bundleFetched = "bundle_fetched"
         case bundleURL = "bundle_url"

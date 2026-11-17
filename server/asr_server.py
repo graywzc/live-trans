@@ -605,18 +605,19 @@ def heard_words(audio, pieces):
     the times in seconds into the piece: each character it heard, timed by
     the aligner (nemo-v2 gives no times of its own), less any it could not
     place. Raises RuntimeError when either tool is not set up or fails."""
+    # The workers the captions are heard by, their models loaded: a tool
+    # started afresh for each batch loaded its model again every couple of
+    # minutes (nemo ~30 s of all the CPU's cores), beside the captions
+    # and their re-hearing at the speaker changes, which it slowed.
     texts = [""] * len(pieces)
-
-    def heard(line):
+    for line in _workers["hear_nemo"].ask({"clips": [[start, start + length] for start, length in pieces]}, audio):
         texts[line["i"]] = line["text"]
-
-    run_devtool_lines("hear_nemo", {"clips": [[start, start + length] for start, length in pieces]}, audio, heard)
     chars = [[ch for ch in _WORD_LOOP.sub("", text) if ch not in _UNSPOKEN] for text in texts]
     with _gpu_gate.use("timeline words aligner"):
-        timed = run_devtool("align", {"pieces": [
+        timed = _workers["align"].ask({"pieces": [
             {"start": start, "length": length, "words": [[0.0, 0.0, ch, 1.0] for ch in heard_chars]}
             for (start, length), heard_chars in zip(pieces, chars)
-        ]}, audio)["pieces"]
+        ]}, audio, lines=False)["pieces"]
     return [[(t[0], t[1], ch) for ch, t in zip(heard_chars, times) if t] for heard_chars, times in zip(chars, timed)]
 
 
@@ -764,6 +765,10 @@ class Stretch:
     def __init__(self, start, end=None):
         self.start, self.end = start, end
         self.ready = self.told = self.cut = start
+        # Within the section being cut now: up to where its captions are
+        # gone through, for the bar in Activity (cut moves a section at a
+        # time, after the whole of it).
+        self.cut_part = start
         self.edges = []
         self.heard_all = False
         self.cut_all = False
@@ -3809,6 +3814,9 @@ class PrefetchJob:
         # of them came from the dev cache.
         self.turn_runs = []
         self.telling = None
+        # The section whose captions are being cut at the speaker changes
+        # now, in seconds of the video.
+        self.cutting = None
         self.speakers_kept = False
         # Whether the captions have reached the end of every stretch,
         # before they are cut where the speaker changes; and whether they
@@ -4444,13 +4452,22 @@ class PrefetchJob:
             a = self._video(stretch.cut)
             b = self._video(high) if not last else self._video(stretch.end) if stretch.end is not None else float("inf")
             if DEV_SPEAKER_CUTS and not self.captions_kept and self.turns:
-                with self.activity.doing("Cutting captions at speaker changes"):
-                    recut = self._cut_at_speakers(a, b)
+                stretch.cut_part = stretch.cut
+                self.cutting = (round(a, 2), round(self._video(min(high, self._end_of(stretch))), 2))
+
+                def reached(at, stretch=stretch, high=high):
+                    stretch.cut_part = max(stretch.cut_part, min(self._samples(at), high))
+
+                try:
+                    with self.activity.doing("Cutting captions at speaker changes"):
+                        recut = self._cut_at_speakers(a, b, reached)
+                finally:
+                    self.cutting = None
                 if self.stop_event.is_set():
                     return
                 print(f"prefetch {self.id}: {recut} captions cut in {a:.0f}-{min(b, 1e9):.0f}s", flush=True)
             self.sections.append((a, b))
-            stretch.cut = high
+            stretch.cut = stretch.cut_part = high
             stretch.cut_all = last
         if self.step and self.turns:
             # Where the speaker cuts went, in seconds of the video (no
@@ -4480,10 +4497,11 @@ class PrefetchJob:
             time.sleep(0.5)
         return not self.stop_event.is_set()
 
-    def _cut_at_speakers(self, low, high):
+    def _cut_at_speakers(self, low, high, reached=None):
         """Each caption starting in `low`..`high` of the video that a change
         of speaker falls inside heard again and cut there, the new pieces
-        given to the client. How many were cut."""
+        given to the client; `reached` told the end of each caption gone
+        through, in seconds of the video. How many were cut."""
         # Each run of DiariZen by itself: its names are not the next one's.
         changes = []
         for turns in list(self.turn_runs):
@@ -4496,6 +4514,8 @@ class PrefetchJob:
             if not self._wait_while_paused():
                 break
             if not any(line["start"] + SPEAKER_SNAP < t < line["end"] - SPEAKER_SNAP for t in changes):
+                if reached:
+                    reached(line["end"])
                 continue
             try:
                 new = self.rehear(line["start"], line["end"])
@@ -4504,7 +4524,9 @@ class PrefetchJob:
                 break
             except Exception as exc:
                 print(f"prefetch {self.id}: not cut: {type(exc).__name__}: {exc}", flush=True)
-                continue
+                new = []
+            if reached:
+                reached(line["end"])
             with self.lines_lock:
                 if len(new) > 1 and line in self.lines:
                     at = self.lines.index(line)
@@ -4817,7 +4839,7 @@ class PrefetchJob:
                 "end": round(self._video(s.end), 2) if s.end is not None else None,
                 "ready": round(self._video(s.ready), 2),
                 "spoken": round(self._video(self._end_of(s) if self.speakers_kept else s.told), 2),
-                "cut": round(self._video(min(s.cut, self._end_of(s))), 2),
+                "cut": round(self._video(min(max(s.cut, s.cut_part), self._end_of(s))), 2),
             } for s in list(self.stretches)],
             "count": len(self.feed),
             "lines": self.feed[since:],
@@ -4834,7 +4856,10 @@ class PrefetchJob:
             "telling": list(self.telling) if self.telling else None,
             # Up to where in the video the captions are cut where the
             # speaker changes, a section at a time behind the speakers.
-            "cut": round(self._video(min(self.stretches[0].cut, self._end_of(self.stretches[0]))), 2),
+            "cut": round(self._video(min(max(self.stretches[0].cut, self.stretches[0].cut_part),
+                                         self._end_of(self.stretches[0]))), 2),
+            # The section being cut now, [start, end] in the video, or None.
+            "cutting": list(self.cutting) if self.cutting else None,
             # How many texts the other recognizers have given so far.
             # Each caption's entry counts, an empty one too (see _keep_heard).
             "others": sum(len(texts) + 1 for texts in list(self.others.values())),

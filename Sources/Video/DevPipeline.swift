@@ -68,8 +68,9 @@ final class DevPipeline {
         var spokenTo = 0.0
         var telling: ClosedRange<Double>?
         /// Up to where the captions are cut where the speaker changes, when
-        /// the host says.
+        /// the host says, and the section being cut now.
         var cut: Double?
+        var cutting: ClosedRange<Double>?
         /// How many texts the other recognizers have given.
         var others = 0
         var state = "running"
@@ -360,7 +361,7 @@ final class DevPipeline {
         let total = Self.total(of: job)
         let tasks = Self.progress(
             fetched: job.fetched, total: total, reached: reached(on: playhead), translated: translated(on: playhead),
-            speakers: speakers, cut: job.cut, analysed: job.analysed
+            speakers: speakers, cut: job.cut, cutting: job.cutting, analysed: job.analysed
         )
         let end = Self.firstEnd(of: job)
         let holes = Self.holes(own: ownCaptions(of: job).filter { $0.range.lowerBound < end }, others: others.filter { $0.start < end })
@@ -422,7 +423,7 @@ final class DevPipeline {
     nonisolated static func progress(
         fetched: Double, total: Double, reached: [(label: String, seconds: Double)],
         translated: [(label: String, seconds: Double)], speakers: SpeakerState, cut: Double?,
-        analysed: Double? = nil
+        cutting: ClosedRange<Double>? = nil, analysed: Double? = nil
     ) -> [Progress] {
         let heard = reached.map { Progress(task: "\($0.label) captioning", reached: $0.seconds) }
         var tasks = [Progress(task: "Audio download", reached: fetched)]
@@ -432,7 +433,11 @@ final class DevPipeline {
             task: "Speaker detection", reached: speakers.done ? total : speakers.told,
             underWay: speakers.done ? nil : speakers.telling
         ))
-        if let cut { tasks.append(Progress(task: "Cutting captions at speaker changes", reached: cut)) }
+        if let cut {
+            // Striped over the section being cut, as far as it has not come.
+            let underWay = cutting.flatMap { max($0.lowerBound, cut) < $0.upperBound ? max($0.lowerBound, cut)...$0.upperBound : nil }
+            tasks.append(Progress(task: "Cutting captions at speaker changes", reached: cut, underWay: underWay))
+        }
         tasks += heard.dropFirst()
         tasks += translated.map { Progress(task: "Translating \($0.label) captions", reached: $0.seconds) }
         return tasks
@@ -823,6 +828,7 @@ final class DevPipeline {
             }
             updated.othersReady = status.othersReady ?? true
             updated.cut = status.cut
+            updated.cutting = status.cutting.flatMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
             updated.telling = status.telling.flatMap { $0.count == 2 && $0[0] <= $0[1] ? $0[0]...$0[1] : nil }
             if let bundle = status.bundle, bundle != updated.bundle {
                 if let news = Self.phoneCopyNews(from: updated.bundle, to: bundle) { ActivityLog.tell(news) }
