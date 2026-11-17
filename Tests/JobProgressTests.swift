@@ -43,6 +43,19 @@ final class JobProgressTests: XCTestCase {
         )
         XCTAssertEqual(done.first { $0.task == "Speaker detection" }, .init(task: "Speaker detection", reached: 1200))
         XCTAssertFalse(done.contains { $0.task.hasPrefix("Cutting") }, "a host from before says nothing of the cuts")
+
+        // The section being cut, striped from as far as its captions are
+        // gone through; nothing striped once it is done or none is.
+        func cutBar(_ cut: Double, _ cutting: ClosedRange<Double>?) -> DevPipeline.Progress? {
+            DevPipeline.progress(
+                fetched: 1050, total: 1200, reached: Self.reached, translated: [],
+                speakers: .init(told: 1200), cut: cut, cutting: cutting
+            ).first { $0.task == "Cutting captions at speaker changes" }
+        }
+        XCTAssertEqual(cutBar(240, 0...600)?.reached, 240)
+        XCTAssertEqual(cutBar(240, 0...600)?.underWay, 240...600)
+        XCTAssertNil(cutBar(600, 0...600)?.underWay)
+        XCTAssertNil(cutBar(240, nil)?.underWay)
     }
 
     /// Each bar lit from the start as far as its task has come, whatever its

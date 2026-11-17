@@ -385,27 +385,41 @@ def test_a_step_job_hears_the_words_piece_by_piece_and_keeps_them_for_next_time(
 def test_the_words_are_heard_by_nemo_timed_by_the_aligner_and_the_speakers_told_apart():
     cache = fresh_cache()
     original = (srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.run_devtool_lines,
-                srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH)
+                srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH, dict(srv._workers))
     srv.speech_stretches = loud_stretches
     srv.heard_words = _heard_words
     srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH = 4.0, 2.0, 60.0
     asked = []
 
-    def lines(name, header, audio, on_line):
-        asked.append((name, header, audio.size))
-        for i, _ in enumerate(header["clips"]):
+    # nemo and the aligner are asked through their loaded workers, as the
+    # captions are; a tool started afresh fails the test.
+    class Worker:
+        def __init__(self, name):
+            self.name = name
+
+        def available(self):
+            return True
+
+        def ask(self, header, audio, lines=True):
+            asked.append((self.name, header, audio.size))
+            if self.name == "align":
+                assert not lines
+                # The first character 0.5 s into its piece, the second
+                # 2.5 s; the third one it cannot place.
+                return {"pieces": [[[0.5, 0.9], [2.5, 3.5], None] for _ in header["pieces"]]}
+            assert lines
             # A loop over music, punctuation, and three characters said.
-            on_line({"i": i, "text": "はいはいはいはい。あ、めっ"})
+            return [{"i": i, "text": "はいはいはいはい。あ、めっ"} for i, _ in enumerate(header["clips"])]
 
     def tool(name, header, audio):
         asked.append((name, header, audio.size))
-        if name == "align":
-            # The first character 0.5 s into its piece, the second 2.5 s;
-            # the third one it cannot place.
-            return {"pieces": [[[0.5, 0.9], [2.5, 3.5], None] for _ in header["pieces"]]}
+        if name != "diarize":
+            return _not_set_up(name, header, audio)
         return {"segments": [[1.0, 2.0, "S1"], [4.0, 5.5, "S2"]]}
 
-    srv.run_devtool, srv.run_devtool_lines = tool, lines
+    srv.run_devtool = tool
+    srv.run_devtool_lines = lambda name, header, audio, on_line: _not_set_up(name, header, audio)
+    srv._workers.update({name: Worker(name) for name in ("hear_nemo", "align")})
     try:
         url = wav_file(noise_and_silence([(1, False), (5, True), (1, False)]))
         job = srv.PrefetchJob(url, "https://example.com/y", {}, 7.0, step="speech")
@@ -420,6 +434,8 @@ def test_the_words_are_heard_by_nemo_timed_by_the_aligner_and_the_speakers_told_
 
         srv.run_devtool = again_tool
         srv.run_devtool_lines = lambda name, header, audio, on_line: again_tool(name, header, audio)
+        srv._workers.update({name: type("Gone", (), {"ask": lambda self, header, audio, lines=True, name=name:
+                                                     again_tool(name, header, audio)})() for name in ("hear_nemo", "align")})
         again = srv.PrefetchJob(url + ".gone", "https://example.com/y", {}, 7.0, step="speech")
         deadline = time.time() + 15
         # Both come once the audio is in, in either order.
@@ -427,7 +443,9 @@ def test_the_words_are_heard_by_nemo_timed_by_the_aligner_and_the_speakers_told_
             time.sleep(0.1)
     finally:
         (srv.speech_stretches, srv.heard_words, srv.run_devtool, srv.run_devtool_lines,
-         srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH) = original
+         srv.WORDS_PIECE, srv.WORDS_OVERLAP, srv.WORDS_BATCH, workers) = original
+        srv._workers.clear()
+        srv._workers.update(workers)
     assert job.aligned and job.status()["aligned"] and job.status()["speakers"]
     # Pieces of 4 s every 2 s, the last to the end: 0-4, 2-6, 4-7. The
     # character at 0.5 is the first piece's, the one 2.5 s into each piece
@@ -777,12 +795,17 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
     # The captions past the third section wait for the others to begin on
     # the first: they must not need all the captions made.
     others_began, waited = threading.Event(), []
+    # The job's status while a caption is heard again to be cut: the bar
+    # shows the section under way, not only each section once it is done.
+    jobs, while_cut = [], []
 
     def heard(grid, audio, start, turns=None, within=None, **kwargs):
         if start >= 3.9 and not within:
             waited.append(others_began.wait(10))
         pieces = grid.pieces(start, start + audio.size / srv.SAMPLE_RATE)
         if within:
+            if jobs:
+                while_cut.append(jobs[0].status())
             a, b = pieces[0]
             return [{"ja": "ことば", "en": "words", "start": round(a, 2), "end": round((a + b) / 2, 2)},
                     {"ja": "はい", "en": "yes", "start": round((a + b) / 2, 2), "end": round(b, 2)}]
@@ -814,6 +837,7 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
     try:
         url = wav_file(noise_and_silence([(1, False), (0.9, True), (0.1, False)] * 3 + [(1, False)]))
         job = srv.start_prefetch(url, "https://example.com/long", {}, 7.0, step="speech", keep=False)
+        jobs.append(job)
         deadline = time.time() + 30
         while time.time() < deadline and not job.others_done:
             time.sleep(0.1)
@@ -837,6 +861,12 @@ def test_a_long_video_s_speaker_cuts_and_other_recognizers_go_a_section_at_a_tim
     # before the others heard it.
     assert [l["ja"] for l in job.lines][:4] == ["ことばはい", "ことば", "はい", "ことばはい"], job.lines
     assert status["captions"] == "done" and status["speakers"] and status["spoken"] >= 6.9 and status["cut"] >= 6.9, status
+    # Cut while the second section (2-4 s) was under way: striped there,
+    # cut up to its start; once all are cut, nothing is under way.
+    assert while_cut, "no caption was heard again with the job's status read"
+    assert [round(x) for x in while_cut[0]["cutting"]] == [2, 4], while_cut[0]
+    assert 1.9 <= while_cut[0]["cut"] < 3.0, while_cut[0]
+    assert status["cutting"] is None, status
     assert status["others_ready"] and status["others"] == (2 * 2 + 1) * len(job.lines), status
 
 
